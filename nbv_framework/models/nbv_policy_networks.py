@@ -1,7 +1,7 @@
 """
 NBV策略网络统一框架
 
-提供多种NBV策略网络架构，支持[B, S, 2048]输入格式：
+提供多种NBV策略网络架构，支持[B, S, 2048]或[B, S, P, 2048]输入格式：
 1. BasicNBVPolicy - 基础策略网络
 2. AttentionNBVPolicy - 注意力机制策略网络
 3. IterativeNBVPolicy - 迭代细化策略网络
@@ -9,9 +9,10 @@ NBV策略网络统一框架
 5. HybridNBVPolicy - 混合架构策略网络
 6. GeometryAwareNBVPolicy - 几何感知策略网络
 
-所有网络统一接收[B, S, 2048]格式的场景特征，其中：
+所有网络统一接收[B, S, 2048]或[B, S, P, 2048]格式的场景特征，其中：
 - B: batch size
 - S: sequence length (多视角特征数量)
+- P: token数量（相机/注册/patch等）
 - 2048: VGGT特征维度
 """
 
@@ -29,9 +30,10 @@ class BaseNBVPolicy(nn.Module):
     提供通用的功能和接口定义
     """
     
-    def __init__(self, output_mode: str = "cartesian"):
+    def __init__(self, output_mode: str = "cartesian", token_pooling_mode: str = "mean"):
         super().__init__()
         self.output_mode = output_mode
+        self.token_pooling_mode = token_pooling_mode  # 处理[B, S, P, 2048]时的token池化方式
         
         if output_mode == "spherical":
             self.target_dim = 7  # theta, phi, radius + qx, qy, qz, qw (球面位置+四元数旋转)
@@ -43,6 +45,20 @@ class BaseNBVPolicy(nn.Module):
             self.target_dim = 3  # x, y, z (仅笛卡尔位置，姿态自动确定)
         else:
             raise ValueError(f"Unknown output_mode: {output_mode}. Supported: spherical, cartesian, euler, position_only")
+
+    def _pool_tokens_if_needed(self, scene_features: torch.Tensor) -> torch.Tensor:
+        """如果输入为[B, S, P, D]，按token维度P进行池化，返回[B, S, D]。
+        支持: mean/max/camera(取camera token索引0)。
+        """
+        if scene_features.dim() == 4:
+            if self.token_pooling_mode == "mean":
+                return scene_features.mean(dim=2)
+            if self.token_pooling_mode == "max":
+                return scene_features.max(dim=2)[0]
+            if self.token_pooling_mode == "camera":
+                return scene_features[:, :, 0, :]
+            raise ValueError(f"Unknown token_pooling_mode: {self.token_pooling_mode}. Supported: mean, max, camera")
+        return scene_features
     
     def _activate_nbv(self, nbv: torch.Tensor) -> torch.Tensor:
         """激活NBV预测，约束输出范围"""
@@ -144,7 +160,8 @@ class BasicNBVPolicy(BaseNBVPolicy):
                  hidden_dim: int = 256,
                  num_layers: int = 3,
                  pooling_mode: str = "mean",
-                 output_mode: str = "cartesian"):
+                 output_mode: str = "cartesian",
+                 token_pooling_mode: str = "mean"):
         """
         初始化基础NBV策略网络
         
@@ -155,7 +172,7 @@ class BasicNBVPolicy(BaseNBVPolicy):
             pooling_mode: 池化模式 "mean", "max", "attention"
             output_mode: 输出模式 "spherical" 或 "cartesian"
         """
-        super().__init__(output_mode)
+        super().__init__(output_mode, token_pooling_mode)
         
         self.scene_feature_dim = scene_feature_dim
         self.hidden_dim = hidden_dim
@@ -207,6 +224,7 @@ class BasicNBVPolicy(BaseNBVPolicy):
         Returns:
             camera_pose: 相机位姿 [B, target_dim]
         """
+        scene_features = self._pool_tokens_if_needed(scene_features)  # [B, S, D]
         B, S, D = scene_features.shape
         
         # 归一化
@@ -243,7 +261,8 @@ class AttentionNBVPolicy(BaseNBVPolicy):
                  hidden_dim: int = 512,
                  num_heads: int = 8,
                  num_layers: int = 4,
-                 output_mode: str = "cartesian"):
+                 output_mode: str = "cartesian",
+                 token_pooling_mode: str = "mean"):
         """
         初始化注意力NBV策略网络
         
@@ -254,7 +273,7 @@ class AttentionNBVPolicy(BaseNBVPolicy):
             num_layers: Transformer层数
             output_mode: 输出模式
         """
-        super().__init__(output_mode)
+        super().__init__(output_mode, token_pooling_mode)
         
         self.scene_feature_dim = scene_feature_dim
         self.hidden_dim = hidden_dim
@@ -304,6 +323,7 @@ class AttentionNBVPolicy(BaseNBVPolicy):
         Returns:
             camera_pose: 相机位姿 [B, target_dim]
         """
+        scene_features = self._pool_tokens_if_needed(scene_features)  # [B, S, D]
         B, S, D = scene_features.shape
         
         # 特征投影
@@ -339,11 +359,12 @@ class IterativeNBVPolicy(BaseNBVPolicy):
                  trunk_depth: int = 4,
                  num_heads: int = 8,
                  output_mode: str = "cartesian",
-                 num_iterations: int = 4):
+                 num_iterations: int = 4,
+                 token_pooling_mode: str = "mean"):
         """
         初始化迭代细化NBV策略网络
         """
-        super().__init__(output_mode)
+        super().__init__(output_mode, token_pooling_mode)
         
         self.scene_feature_dim = scene_feature_dim
         self.hidden_dim = hidden_dim
@@ -406,6 +427,7 @@ class IterativeNBVPolicy(BaseNBVPolicy):
         if num_iterations is None:
             num_iterations = self.num_iterations
         
+        scene_features = self._pool_tokens_if_needed(scene_features)  # [B, S, D]
         B = scene_features.shape[0]
         
         # 场景特征编码
@@ -464,11 +486,12 @@ class MultiScaleNBVPolicy(BaseNBVPolicy):
                  scene_feature_dim: int = 2048,
                  feature_scales: List[int] = [512, 1024, 1536, 2048],
                  hidden_dim: int = 512,
-                 output_mode: str = "cartesian"):
+                 output_mode: str = "cartesian",
+                 token_pooling_mode: str = "mean"):
         """
         初始化多尺度NBV策略网络
         """
-        super().__init__(output_mode)
+        super().__init__(output_mode, token_pooling_mode)
         
         self.scene_feature_dim = scene_feature_dim
         self.feature_scales = feature_scales
@@ -529,6 +552,7 @@ class MultiScaleNBVPolicy(BaseNBVPolicy):
         Returns:
             nbv_prediction: NBV预测 [B, target_dim]
         """
+        scene_features = self._pool_tokens_if_needed(scene_features)  # [B, S, D]
         B, S, D = scene_features.shape
         
         # 序列特征编码
@@ -573,24 +597,25 @@ class HybridNBVPolicy(BaseNBVPolicy):
                  hidden_dim: int = 512,
                  feature_scales: List[int] = [1024, 1536, 2048],
                  num_iterations: int = 3,
-                 output_mode: str = "cartesian"):
+                 output_mode: str = "cartesian",
+                 token_pooling_mode: str = "mean"):
         """
         初始化混合架构NBV策略网络
         """
-        super().__init__(output_mode)
+        super().__init__(output_mode, token_pooling_mode)
         
         self.scene_feature_dim = scene_feature_dim
         self.hidden_dim = hidden_dim
         
         # 多尺度特征提取
         self.multi_scale_extractor = MultiScaleNBVPolicy(
-            scene_feature_dim, feature_scales, hidden_dim, output_mode
+            scene_feature_dim, feature_scales, hidden_dim, output_mode, token_pooling_mode
         )
         
         # 迭代细化模块
         self.iterative_refiner = IterativeNBVPolicy(
             scene_feature_dim, hidden_dim, trunk_depth=2,
-            num_iterations=num_iterations, output_mode=output_mode
+            num_iterations=num_iterations, output_mode=output_mode, token_pooling_mode=token_pooling_mode
         )
         
         # 预测融合器
@@ -638,7 +663,8 @@ class GeometryAwareNBVPolicy(BaseNBVPolicy):
                  scene_feature_dim: int = 2048,
                  geometry_feature_dim: int = 7,
                  hidden_dim: int = 512,
-                 output_mode: str = "cartesian"):
+                 output_mode: str = "cartesian",
+                 token_pooling_mode: str = "mean"):
         """
         初始化几何感知NBV策略网络
         
@@ -648,7 +674,7 @@ class GeometryAwareNBVPolicy(BaseNBVPolicy):
             hidden_dim: 隐藏层维度
             output_mode: 输出模式
         """
-        super().__init__(output_mode)
+        super().__init__(output_mode, token_pooling_mode)
         
         self.scene_feature_dim = scene_feature_dim
         self.geometry_feature_dim = geometry_feature_dim
@@ -696,6 +722,7 @@ class GeometryAwareNBVPolicy(BaseNBVPolicy):
         Returns:
             nbv_prediction: NBV预测 [B, target_dim]
         """
+        scene_features = self._pool_tokens_if_needed(scene_features)  # [B, S, D]
         B = scene_features.shape[0]
         
         # 场景特征编码

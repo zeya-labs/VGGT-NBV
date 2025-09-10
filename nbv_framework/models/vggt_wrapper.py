@@ -75,7 +75,7 @@ class VGGTWrapper(nn.Module):
             layer_idx: 使用哪一层的特征，-1表示最后一层
             
         Returns:
-            scene_features: 场景特征张量 [B, S, 2048] （保持原始维度）
+            scene_features: 场景特征张量 [B, S, P, 2048] （不做池化，保留所有tokens）
         """
         with torch.cuda.amp.autocast(dtype=self.dtype):
             # 确保输入有batch维度
@@ -91,13 +91,7 @@ class VGGTWrapper(nn.Module):
                 layer_idx = len(aggregated_tokens_list) - 1
             
             tokens = aggregated_tokens_list[layer_idx]  # [B, S, P, 2048]
-            B, S, P, C = tokens.shape
-            
-            # 聚合所有tokens（包括camera token, register tokens和patch tokens）
-            # 使用平均池化聚合所有spatial tokens，保持2048维度
-            scene_features = tokens.mean(dim=2)  # [B, S, 2048]
-            
-            return scene_features
+            return tokens
     
     def extract_token_features(self, images: torch.Tensor, layer_idx: int = -1, 
                               token_type: str = "all") -> torch.Tensor:
