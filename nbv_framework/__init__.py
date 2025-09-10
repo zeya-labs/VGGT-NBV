@@ -15,7 +15,7 @@ NBV Framework: 目标驱动的策略学习框架
 __version__ = "0.1.0"
 __author__ = "NBV Research Team"
 
-from .models import VGGTWrapper, BaseNBVPolicy, BasicNBVPolicy, AttentionNBVPolicy, IterativeNBVPolicy, MultiScaleNBVPolicy, HybridNBVPolicy, GeometryAwareNBVPolicy, create_nbv_policy
+from .models import VGGTWrapper, BaseNBVPolicy, BasicNBVPolicy, AttentionNBVPolicy, IterativeNBVPolicy, MultiScaleNBVPolicy, HybridNBVPolicy, GeometryAwareNBVPolicy
 from .rendering import DifferentiableRenderer
 from .training import NBVTrainer
 
@@ -30,5 +30,4 @@ __all__ = [
     "MultiScaleNBVPolicy",
     "HybridNBVPolicy",
     "GeometryAwareNBVPolicy",
-    "create_nbv_policy"
 ]

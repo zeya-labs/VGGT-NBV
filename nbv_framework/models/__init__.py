@@ -8,11 +8,10 @@
 - MultiScaleNBVPolicy: 多尺度特征NBV策略网络
 - HybridNBVPolicy: 混合架构NBV策略网络
 - GeometryAwareNBVPolicy: 几何感知NBV策略网络
-- create_nbv_policy: NBV策略网络工厂函数
 """
 
 from .vggt_wrapper import VGGTWrapper
-from .nbv_policy_networks import BaseNBVPolicy, BasicNBVPolicy, AttentionNBVPolicy, IterativeNBVPolicy, MultiScaleNBVPolicy, HybridNBVPolicy, GeometryAwareNBVPolicy, create_nbv_policy
+from .nbv_policy_networks import BaseNBVPolicy, BasicNBVPolicy, AttentionNBVPolicy, IterativeNBVPolicy, MultiScaleNBVPolicy, HybridNBVPolicy, GeometryAwareNBVPolicy
 
 __all__ = [
     "VGGTWrapper",
@@ -23,5 +22,4 @@ __all__ = [
     "MultiScaleNBVPolicy",
     "HybridNBVPolicy", 
     "GeometryAwareNBVPolicy",
-    "create_nbv_policy",
 ]
