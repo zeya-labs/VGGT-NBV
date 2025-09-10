@@ -3,7 +3,7 @@ runs/
 checkpoints/
 synthetic_data/
 TEMP/
-models/
+/models/
 color_ball/
 .gradio/
 
@@ -118,15 +118,6 @@ logs/
 *.hdf5
 *.npy
 *.npz
-
-# Large datasets
-datasets/
-data/
-
-# Exclude specific image directories but allow example images
-color_ball/images/
-synthetic_data/*/images/
-TEMP/view/
 
 # Allow important config files
 !*.json
