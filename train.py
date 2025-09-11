@@ -6,6 +6,7 @@ NBV框架演示脚本
 
 import torch
 import torch.multiprocessing as mp
+import time
 import os
 import argparse
 import random
@@ -38,6 +39,8 @@ from nbv_framework.utils.evaluation import evaluate_nbv_policy, compare_with_bas
 
 def setup_config() -> Dict[str, Any]:
     """设置配置参数"""
+    experiment_name = "dataset-house3k"
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
     config = {
         # 模型配置
         "scene_feature_dim": 2048,
@@ -52,7 +55,7 @@ def setup_config() -> Dict[str, Any]:
         "weight_decay": 1e-5,
         
         # 数据配置
-        "data_root": "./synthetic_data",
+        "synthetic_data_root": "./models/synthetic_data",
         "num_initial_views": 3,
         "image_size": 224,
         "up_axis": "Y",  # 数据集模型默认上方向 ('Y' 或 'Z')
@@ -60,13 +63,15 @@ def setup_config() -> Dict[str, Any]:
         
         # 设备配置
         "device": "cuda" if torch.cuda.is_available() else "cpu",
-        "save_dir": "./checkpoints",
         
         # 断点续训配置
         "resume_checkpoint": None,  # 指定要恢复的检查点路径
         "auto_resume": False,       # 是否自动从最新检查点恢复
-        "log_dir": "runs/nbv_experiment_house3k", # 日志目录
     }
+    
+    # 在config定义完成后设置路径相关配置，避免循环引用
+    config["save_dir"] = f"./checkpoints/{experiment_name}_bs-{config['batch_size']}_initv-{config['num_initial_views']}_pom-{config['policy_output_mode']}_{timestamp}"
+    config["log_dir"] = f"runs/{experiment_name}_bs-{config['batch_size']}_initv-{config['num_initial_views']}_pom-{config['policy_output_mode']}_{timestamp}"
     
     return config
 
@@ -76,7 +81,7 @@ def create_synthetic_data(config: Dict[str, Any]):
     print("Creating synthetic training data...")
     
     create_synthetic_training_data(
-        output_dir=config["data_root"],
+        output_dir=config["synthetic_data_root"],
         num_objects=20,  # 小规模演示
         num_views_per_object=15,
         image_size=config["image_size"],
@@ -298,7 +303,7 @@ def run_evaluation(config: Dict[str, Any],
     
     # 创建测试数据集
     test_dataset = SyntheticDataset(
-        data_root=config["data_root"],
+        data_root=config["synthetic_data_root"],
         num_initial_views=config["num_initial_views"],
         image_size=config["image_size"],
         split="val"  # 使用验证集作为测试集
@@ -380,7 +385,7 @@ def main():
     print(f"Max meshes: {config['max_meshes']}")
     
     # 创建合成数据（如果需要）
-    if args.create_data or not os.path.exists(config["data_root"]):
+    if args.create_data or not os.path.exists(config["synthetic_data_root"]):
         create_synthetic_data(config)
     
     # 设置模型
