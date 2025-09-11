@@ -24,6 +24,7 @@ import torchvision
 from ..models import VGGTWrapper, BaseNBVPolicy
 from ..rendering import DifferentiableRenderer
 from .losses import ReconstructionLoss, ChamferDistance
+from ..utils.camera_utils import position_to_pose_tensor
 
 
 class NBVTrainer:
@@ -127,6 +128,37 @@ class NBVTrainer:
         # 步骤2: 动作提议 - 策略网络输出下一个相机位姿
         next_camera_pose = self.policy_network(scene_features)
         
+        # 检查输出维度，如果是[B,3]则转换为[B,7]
+        if next_camera_pose.shape[-1] == 3:
+            next_camera_pose = position_to_pose_tensor(next_camera_pose)
+        
+        # 记录位姿数据到TensorBoard
+        if self.global_step % 1 == 0:  # 每10步记录一次，避免过于频繁
+            # 记录位置信息（前3维）
+            positions = next_camera_pose[:, :3]  # [B, 3]
+            # self.writer.add_histogram('camera_pose/position_x', positions[:, 0], self.global_step)
+            # self.writer.add_histogram('camera_pose/position_y', positions[:, 1], self.global_step)
+            # self.writer.add_histogram('camera_pose/position_z', positions[:, 2], self.global_step)
+            
+            # # 记录四元数信息（后4维）
+            quaternions = next_camera_pose[:, 3:]  # [B, 4]
+            # self.writer.add_histogram('camera_pose/quaternion_x', quaternions[:, 0], self.global_step)
+            # self.writer.add_histogram('camera_pose/quaternion_y', quaternions[:, 1], self.global_step)
+            # self.writer.add_histogram('camera_pose/quaternion_z', quaternions[:, 2], self.global_step)
+            # self.writer.add_histogram('camera_pose/quaternion_w', quaternions[:, 3], self.global_step)
+            
+            # 记录位置的统计信息
+            position_norms = torch.norm(positions, dim=1)  # 计算位置向量的模长
+            self.writer.add_scalar('camera_pose/position_norm_mean', position_norms.mean(), self.global_step)
+            if position_norms.numel() > 1:  # 只有当样本数大于1时才计算标准差
+                self.writer.add_scalar('camera_pose/position_norm_std', position_norms.std(), self.global_step)
+            
+            # 记录四元数的模长（应该接近1）
+            quaternion_norms = torch.norm(quaternions, dim=1)
+            # self.writer.add_scalar('camera_pose/quaternion_norm_mean', quaternion_norms.mean(), self.global_step)
+            if quaternion_norms.numel() > 1:  # 只有当样本数大于1时才计算标准差
+                self.writer.add_scalar('camera_pose/quaternion_norm_std', quaternion_norms.std(), self.global_step)
+
         # 步骤3: 环境交互 - 可微分渲染生成新视图
         batched_mesh = gt_mesh_data['normalized_mesh'] # 这现在是单个批次化的 Meshes 对象
 
@@ -135,7 +167,7 @@ class NBVTrainer:
         new_images = self.renderer(
             gt_mesh=batched_mesh,
             camera_poses=next_camera_pose,
-            pose_format=self.policy_network.output_mode,
+            # pose_format=self.policy_network.output_mode,
             lighting_type="ambient"
         )
 
@@ -143,25 +175,17 @@ class NBVTrainer:
         if new_images.device != initial_images.device:
             new_images = new_images.to(initial_images.device)
         
-        # 为每个batch sample添加新图像
-        combined_images_list = []
-        for i in range(batch_size):
-            # 取出当前样本的N个初始图像
-            sample_initial = initial_images[i]  # [N, 3, H, W]
-            sample_new = new_images[i:i+1]      # [1, 3, H, W]
-            
-            # 组合为N+1个图像
-            combined = torch.cat([sample_initial, sample_new], dim=0)  # [N+1, 3, H, W]
-            combined_images_list.append(combined)
-        
         # 步骤4: 质量评估 - VGGT重建并计算质量
-        # 将每个样本的图像沿 batch 维度堆叠，得到 [B, N+1, 3, H, W]
-        combined_images_batch = torch.stack(combined_images_list, dim=0)
+        # 将 new_images 从 [B, 3, H, W] 扩展为 [B, 1, 3, H, W]
+        new_images_expanded = new_images.unsqueeze(1)  # [B, 1, 3, H, W]
+        
+        # 直接在第二个维度上拼接，得到 [B, N+1, 3, H, W]
+        combined_images_batch = torch.cat([initial_images, new_images_expanded], dim=1)
         # VGGT一次性对整个batch进行重建与评估
         recon_data = self.vggt_wrapper.reconstruct_and_evaluate(
             combined_images_batch  # [B, N+1, 3, H, W]
         )
-        # 计算重建质量损失：直接传入batched的 GT 数据结构（参考 datasets.py）
+        # 计算重建质量损失
         total_loss, loss_components = self.loss_fn(recon_data, gt_mesh_data, new_images, return_components=True)
         
         # 步骤5: 策略更新 - 反向传播（仅训练时）
@@ -191,13 +215,13 @@ class NBVTrainer:
             
             # 记录各个损失组件（原始值）
             self.writer.add_scalar('train/losses/chamfer_loss', loss_dict['chamfer_loss'], self.global_step)
-            self.writer.add_scalar('train/losses/confidence_loss', loss_dict['confidence_loss'], self.global_step)
-            self.writer.add_scalar('train/losses/viewpoint_loss', loss_dict['viewpoint_loss'], self.global_step)
+            # self.writer.add_scalar('train/losses/confidence_loss', loss_dict['confidence_loss'], self.global_step)
+            # self.writer.add_scalar('train/losses/viewpoint_loss', loss_dict['viewpoint_loss'], self.global_step)
             
             # 记录加权后的损失组件
-            self.writer.add_scalar('train/weighted_losses/chamfer_loss', loss_dict['weighted_chamfer_loss'], self.global_step)
-            self.writer.add_scalar('train/weighted_losses/confidence_loss', loss_dict['weighted_confidence_loss'], self.global_step)
-            self.writer.add_scalar('train/weighted_losses/viewpoint_loss', loss_dict['weighted_viewpoint_loss'], self.global_step)
+            # self.writer.add_scalar('train/weighted_losses/chamfer_loss', loss_dict['weighted_chamfer_loss'], self.global_step)
+            # self.writer.add_scalar('train/weighted_losses/confidence_loss', loss_dict['weighted_confidence_loss'], self.global_step)
+            # self.writer.add_scalar('train/weighted_losses/viewpoint_loss', loss_dict['weighted_viewpoint_loss'], self.global_step)
 
         self.global_step += 1
         

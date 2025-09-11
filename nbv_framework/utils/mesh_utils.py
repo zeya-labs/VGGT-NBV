@@ -110,13 +110,13 @@ def load_and_normalize_mesh(
     mesh = load_mesh_as_pytorch3d(mesh_path)
     normalized_mesh = normalize_mesh(mesh, normalize_method)
     
-    # 输出mesh点距离原点的范围
-    vertices = normalized_mesh.verts_packed()  # 获取所有顶点坐标
-    distances = torch.norm(vertices, dim=1)  # 计算每个点到原点的距离
-    min_dist = distances.min().item()
-    max_dist = distances.max().item()
-    mean_dist = distances.mean().item()
-    print(f"Mesh顶点距离原点范围: 最小={min_dist:.4f}, 最大={max_dist:.4f}, 平均={mean_dist:.4f}")
+    # # 输出mesh点距离原点的范围
+    # vertices = normalized_mesh.verts_packed()  # 获取所有顶点坐标
+    # distances = torch.norm(vertices, dim=1)  # 计算每个点到原点的距离
+    # min_dist = distances.min().item()
+    # max_dist = distances.max().item()
+    # mean_dist = distances.mean().item()
+    # print(f"Mesh顶点距离原点范围: 最小={min_dist:.4f}, 最大={max_dist:.4f}, 平均={mean_dist:.4f}")
     
     sampled_points = sample_points_from_meshes(normalized_mesh, num_samples=num_samples)
 

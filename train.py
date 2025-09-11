@@ -46,12 +46,13 @@ def setup_config() -> Dict[str, Any]:
         "scene_feature_dim": 2048,
         "policy_hidden_dim": 256,
         "policy_num_layers": 3,
-        "policy_output_mode": "cartesian",
+        # "policy_output_mode": "cartesian",
+        "policy_output_mode": "position_only",
         
         # 训练配置
         "learning_rate": 1e-4,
         "batch_size": 1,  # 根据GPU内存调整
-        "num_epochs": 1000,
+        "num_epochs": 10000,
         "weight_decay": 1e-5,
         
         # 数据配置

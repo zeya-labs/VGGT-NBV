@@ -14,6 +14,7 @@ from pytorch3d.transforms import matrix_to_quaternion
 from .coordinate_utils import get_up_vector, generate_fibonacci_sphere_points
 
 
+
 class CameraPoseGenerator:
     """相机位姿生成器"""
     
@@ -144,3 +145,46 @@ def tensor_to_pose_dict(pose_tensor: torch.Tensor) -> Dict[str, List[float]]:
         "position": pose_array[:3].tolist(),
         "quaternion": pose_array[3:].tolist()
     }
+
+
+def position_to_pose_tensor(positions: torch.Tensor, up_axis: str = "Y") -> torch.Tensor:
+    """
+    将位置张量转换为完整的相机位姿张量（包含位置和四元数）
+    
+    Args:
+        positions: 相机位置张量 [B, 3] (x, y, z)
+        up_axis: 上朝向轴，默认为"Y"
+        
+    Returns:
+        pose_tensor: 相机位姿张量 [B, 7] (x, y, z, qx, qy, qz, qw)
+    """
+    batch_size = positions.shape[0]
+    device = positions.device
+    
+    # 获取up向量
+    up_vector = get_up_vector(up_axis)
+    up = torch.tensor(up_vector, dtype=torch.float32).to(device).unsqueeze(0).expand(batch_size, -1)
+    
+    # 目标点（看向原点）
+    at = torch.zeros(batch_size, 3, dtype=torch.float32, device=device)
+    
+    # 使用PyTorch3D的look_at_view_transform生成旋转矩阵
+    R, T = look_at_view_transform(eye=positions, at=at, up=up)
+    
+    # 确保旋转矩阵在正确的设备上
+    R = R.to(device)
+    
+    # 将旋转矩阵转换为四元数
+    quaternions_wxyz = matrix_to_quaternion(R)
+    # 转换为xyzw格式
+    quaternions_xyzw = torch.stack([
+        quaternions_wxyz[:, 1],  # x
+        quaternions_wxyz[:, 2],  # y
+        quaternions_wxyz[:, 3],  # z
+        quaternions_wxyz[:, 0]   # w
+    ], dim=1)
+    
+    # 拼接位置和四元数
+    pose_tensor = torch.cat([positions, quaternions_xyzw], dim=1)
+    
+    return pose_tensor
