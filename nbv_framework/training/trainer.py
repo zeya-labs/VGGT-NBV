@@ -63,9 +63,10 @@ class NBVTrainer:
         self.loss_fn = loss_fn
         self.device = device
         self.num_epochs = num_epochs
+        self.log_dir = log_dir
         
         # 初始化TensorBoard Writer
-        self.writer = SummaryWriter(log_dir)
+        self.writer = SummaryWriter(self.log_dir)
         
         # 优化器（只优化策略网络）
         self.optimizer = optim.Adam(
@@ -186,12 +187,25 @@ class NBVTrainer:
         
         # 直接在第二个维度上拼接，得到 [B, N+1, 3, H, W]
         combined_images_batch = torch.cat([initial_images, new_images_expanded], dim=1)
+        
+        # 保存N+1张图片到log_dir下的images文件夹
+        self._save_combined_images(combined_images_batch)
+        
         # VGGT一次性对整个batch进行重建与评估
         recon_data = self.vggt_wrapper.reconstruct_and_evaluate(
             combined_images_batch  # [B, N+1, 3, H, W]
         )
         # 计算重建质量损失
-        total_loss, loss_components = self.loss_fn(recon_data, gt_mesh_data, new_images, return_components=True)
+        # 在训练时传递writer和step参数以启用点云可视化
+        if backprop:
+            total_loss, loss_components = self.loss_fn(
+                recon_data, gt_mesh_data, combined_images_batch, 
+                return_components=True, writer=self.writer, step=self.global_step
+            )
+        else:
+            total_loss, loss_components = self.loss_fn(
+                recon_data, gt_mesh_data, combined_images_batch, return_components=True, writer=self.writer, step=self.val_image_step
+            )
         
         # 步骤5: 策略更新 - 反向传播（仅训练时）
         if backprop:
@@ -434,3 +448,43 @@ class NBVTrainer:
         self.best_loss = checkpoint["best_loss"]
         
         self.logger.info(f"Checkpoint loaded: {checkpoint_path}")
+    
+    def _save_combined_images(self, combined_images_batch: torch.Tensor):
+        """
+        保存N+1张图片到log_dir下的images文件夹
+        
+        Args:
+            combined_images_batch: [B, N+1, 3, H, W] 的图片张量
+        """
+        # 创建保存图片的目录
+        images_dir = os.path.join(self.log_dir, "images")
+        os.makedirs(images_dir, exist_ok=True)
+        
+        # 创建当前步骤的子目录
+        step_dir = os.path.join(images_dir, f"step_{self.global_step:06d}")
+        os.makedirs(step_dir, exist_ok=True)
+        
+        # 将张量移到CPU并转换为numpy
+        images_cpu = combined_images_batch.detach().cpu()
+        
+        # 遍历batch中的每个样本
+        for batch_idx in range(images_cpu.shape[0]):
+            batch_dir = os.path.join(step_dir, f"batch_{batch_idx:03d}")
+            os.makedirs(batch_dir, exist_ok=True)
+            
+            # 遍历每个样本中的N+1张图片
+            for img_idx in range(images_cpu.shape[1]):
+                # 获取单张图片 [3, H, W]
+                img = images_cpu[batch_idx, img_idx]
+                
+                # 确保像素值在[0, 1]范围内
+                img = torch.clamp(img, 0, 1)
+                
+                # 保存图片
+                img_filename = f"image_{img_idx:02d}.png"
+                img_path = os.path.join(batch_dir, img_filename)
+                
+                # 使用torchvision保存图片
+                torchvision.utils.save_image(img, img_path)
+        
+        self.logger.info(f"Saved {combined_images_batch.shape[0]} batches of {combined_images_batch.shape[1]} images to {step_dir}")

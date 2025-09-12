@@ -65,9 +65,16 @@ class ChamferDistance(nn.Module):
         
         return p_cloud_normalized
 
-    def forward(self, p_pred: torch.Tensor, p_gt: torch.Tensor) -> torch.Tensor:
+    def forward(self, p_pred: torch.Tensor, p_gt: torch.Tensor, 
+                writer=None, step=None) -> torch.Tensor:
         """
         计算对齐后的倒角距离。
+        
+        Args:
+            p_pred: 预测点云 [B, N, 3]
+            p_gt: 真实点云 [B, M, 3]
+            writer: TensorBoard SummaryWriter，可选
+            step: 当前训练步数，可选
         """
         # 步骤 1: 归一化两个点云
         p_pred_norm = self._normalize_point_cloud(p_pred)
@@ -82,10 +89,60 @@ class ChamferDistance(nn.Module):
             )
         p_pred_aligned = icp_result.Xt
         
+        # TensorBoard可视化点云
+        if writer is not None and step is not None:
+            self._visualize_point_clouds(writer, step, p_pred_norm, p_gt_norm, p_pred_aligned)
+        
         # 步骤 3: 计算最终的倒角距离
         loss, _ = chamfer_distance(p_pred_aligned, p_gt_norm)
         
         return loss
+    
+    def _visualize_point_clouds(self, writer, step, p_pred_norm, p_gt_norm, p_pred_aligned):
+        """
+        在TensorBoard中将多个点云合并到一个视图中进行可视化。
+        pred: 红, gt: 绿, aligned: 蓝
+        """
+        # 只可视化第一个batch
+        if p_pred_norm.shape[0] == 0:
+            return
+        
+        # 取第一个样本并分离计算图
+        pred_points = p_pred_norm[0].detach()
+        gt_points = p_gt_norm[0].detach()
+        aligned_points = p_pred_aligned[0].detach()
+        
+        #输出shape
+        print("pred_points shape:", pred_points.shape)
+        print("gt_points shape:", gt_points.shape)
+        print("aligned_points shape:", aligned_points.shape)
+
+        # 可选：降采样
+        def _maybe_subsample(points: torch.Tensor, max_points: int = 20000) -> torch.Tensor:
+            if points.shape[0] <= max_points:
+                return points
+            idx = torch.randperm(points.shape[0])[:max_points]
+            return points[idx]
+        
+        pred_points = _maybe_subsample(pred_points)
+        gt_points = _maybe_subsample(gt_points)
+        aligned_points = _maybe_subsample(aligned_points)
+        
+        # 为不同点云创建颜色
+        pred_colors = torch.tensor([255, 0, 0], dtype=torch.uint8).expand_as(pred_points)
+        gt_colors = torch.tensor([0, 255, 0], dtype=torch.uint8).expand_as(gt_points)
+        aligned_colors = torch.tensor([0, 0, 255], dtype=torch.uint8).expand_as(aligned_points)
+        
+        # 合并顶点和颜色
+        all_vertices = torch.cat([pred_points, gt_points, aligned_points], dim=0)
+        all_colors = torch.cat([pred_colors, gt_colors, aligned_colors], dim=0)
+        
+        # 增加 batch 维度
+        all_vertices = all_vertices.unsqueeze(0)  # Shape: [1, N_total, 3]
+        all_colors = all_colors.unsqueeze(0)      # Shape: [1, N_total, 3]
+        
+        # 只调用一次 add_mesh
+        writer.add_mesh('point_clouds/comparison', vertices=all_vertices, colors=all_colors, global_step=step)
 
 class ViewpointLoss(nn.Module):
     """
@@ -248,16 +305,20 @@ class ReconstructionLoss(nn.Module):
         self.viewpoint_loss = ViewpointLoss()
     
     def extract_point_cloud_from_reconstruction(
-        self, 
+        self,
         recon_data: Dict[str, torch.Tensor],
+        combined_images_batch: torch.Tensor,
         confidence_threshold: float = 0.5,
         source: Literal['vggt', 'depth'] = 'depth'
     ) -> List[torch.Tensor]:
+        
+        # print("Shape of combined_images_batch:", combined_images_batch.shape)
         """
-        从重建数据中为批处理中的每个项目提取高置信度点云。
+        从重建数据中为批处理中的每个项目高效地提取高置信度点云。
 
         Args:
             recon_data: 包含重建结果的字典。
+            combined_images_batch: 输入图像 [B, N+1, 3, H, W]。
             confidence_threshold: 用于筛选点的置信度阈值。
             source: 指定点云和置信度的数据源。
                     - 'vggt': 使用 'world_points' 和 'world_points_conf'。
@@ -270,8 +331,8 @@ class ReconstructionLoss(nn.Module):
         """
         # 1. 根据 'source' 参数选择数据源
         if source == 'vggt':
-            points_data = recon_data.get("world_points")
-            conf_data = recon_data.get("world_points_conf")
+            points_data = recon_data.get("world_points")       # Shape: [B, S, H, W, 3]
+            conf_data = recon_data.get("world_points_conf")     # Shape: [B, S, H, W]
             if points_data is None or conf_data is None:
                 raise KeyError("Source 'vggt' selected, but 'world_points' or 'world_points_conf' not found in recon_data.")
         elif source == 'depth':
@@ -282,49 +343,58 @@ class ReconstructionLoss(nn.Module):
         else:
             raise ValueError(f"未知的 source: {source}。应为 'vggt' 或 'depth'。")
 
-        # 检查输入是否有效
+        # 检查输入是否有效，如果数据为空则直接返回
         if points_data is None or conf_data is None:
-            # 如果任何一个批次的数据源为空，返回一个空列表
             return []
-        
-        # 获取批处理大小
-        batch_size = points_data.shape[0]
-        point_clouds_list = []
 
-        # 2. 遍历批处理中的每一个项目
-        for i in range(batch_size):
-            # 提取当前项目的点和置信度
-            points_item = points_data[i]  # Shape: [S, H, W, 3]
-            conf_item = conf_data[i]      # Shape: [S, H, W]
+        B, S, H, W, _ = points_data.shape
+        # 2. 矢量化计算高置信度掩码 (对整个批次一次性计算)
+        high_conf_mask = conf_data > confidence_threshold  # Shape: [B, S, H, W]
+        
+        # 3. 矢量化计算非黑色像素掩码
+        if combined_images_batch is not None:
+            # 计算所有像素的平均强度
+            pixel_intensity = combined_images_batch.mean(dim=2)  # Shape: [B, S, H, W]
             
-            # 3. 对当前项目进行筛选
-            # 选择高置信度的点
-            high_conf_mask = conf_item > confidence_threshold  # Shape: [S, H, W]
+            # 定义黑色像素阈值
+            black_threshold = 0.05
+            non_black_mask = pixel_intensity > black_threshold  # Shape: [B, S, H, W]
             
-            # 4. 直接在多维张量上应用掩码
-            # high_conf_mask 会被自动广播以匹配 points_item 的维度
-            # 结果 valid_points_item 将是一个一维张量，其中包含所有满足条件的点
-            # 然后我们将其重塑为 [Ni, 3]
-            valid_points_item = points_item[high_conf_mask]
-            
-            # 将提取的点云添加到列表中
-            point_clouds_list.append(valid_points_item)
-            
+            # 合并两个掩码
+            # print("Shape of high_conf_mask:", high_conf_mask.shape)
+            # print("Shape of non_black_mask:", non_black_mask.shape)
+            combined_mask = high_conf_mask & non_black_mask
+        else:
+            # 如果没有提供图像，只使用置信度掩码
+            combined_mask = high_conf_mask
+        
+        # 4. 应用掩码并生成结果列表
+        # 尽管我们仍然需要一个循环来构建列表（因为每个元素的点数量不同），
+        # 但所有昂贵的计算（掩码生成）都已在循环外完成。
+        # 列表推导式是完成这个任务的简洁方式。
+        point_clouds_list = [
+            points_data[i][combined_mask[i]] for i in range(B)
+        ]
+                
         return point_clouds_list
     
     def forward(self, 
                recon_data: Dict[str, torch.Tensor],
                gt_data: Dict[str, torch.Tensor],
-               new_images: Optional[torch.Tensor] = None,
-               return_components: bool = False) -> torch.Tensor:
+               combined_images_batch: Optional[torch.Tensor],
+               return_components: bool = False,
+               writer=None,
+               step=None) -> torch.Tensor:
         """
         计算综合重建损失
         
         Args:
             recon_data: VGGT重建数据
             gt_data: 真实数据（可以是mesh、点云等）
-            new_images: 新渲染的图像 [B, 3, H, W]，用于视角损失计算
+            combined_images_batch: 输入图像 [B, N+1, 3, H, W]
             return_components: 是否返回损失组件详情
+            writer: TensorBoard SummaryWriter，可选，用于点云可视化
+            step: 当前训练步数，可选，用于TensorBoard记录
             
         Returns:
             total_loss: 总损失 或 (总损失, 损失组件字典)
@@ -332,12 +402,12 @@ class ReconstructionLoss(nn.Module):
         total_loss = torch.tensor(0.0, device=self._get_device(recon_data))
         loss_components = {}
         loss_count = 0
-        
+
         # Chamfer距离损失
         chamfer_loss_value = torch.tensor(0.0, device=total_loss.device)
         if self.chamfer_weight > 0 and "gt_points" in gt_data:
             # 1. 提取预测点云列表，每个元素是 [Ni, 3]
-            pred_points_list = self.extract_point_cloud_from_reconstruction(recon_data, source='depth')
+            pred_points_list = self.extract_point_cloud_from_reconstruction(recon_data, combined_images_batch, source='depth')
             
             # 2. 获取真实的GT点云批处理张量，假设形状为 [B, M, 3]
             gt_points_batch = gt_data["gt_points"]
@@ -365,7 +435,11 @@ class ReconstructionLoss(nn.Module):
                     gt_pc_item_batched = gt_pc_item.unsqueeze(0)
 
                     # 7. 计算当前项的Chamfer损失
-                    item_loss = self.chamfer_loss(pred_pc_item_batched, gt_pc_item_batched)
+                    # 只在第一个有效项目上进行可视化，避免过多的TensorBoard记录
+                    if valid_items_count == 0 and writer is not None and step is not None:
+                        item_loss = self.chamfer_loss(pred_pc_item_batched, gt_pc_item_batched, writer, step)
+                    else:
+                        item_loss = self.chamfer_loss(pred_pc_item_batched, gt_pc_item_batched)
                     
                     # 8. 累加损失并计数有效项目
                     batch_chamfer_loss += item_loss
@@ -404,6 +478,7 @@ class ReconstructionLoss(nn.Module):
         loss_components['weighted_confidence_loss'] = (self.confidence_weight * conf_loss_value).item()
         
         # 视角损失（惩罚黑屏和低质量视角）
+        new_images = combined_images_batch[:, -1, :, :, :]
         viewpoint_loss_value = torch.tensor(0.0, device=total_loss.device)
         if self.viewpoint_weight > 0 and new_images is not None:
             viewpoint_penalty = self.viewpoint_loss(new_images)

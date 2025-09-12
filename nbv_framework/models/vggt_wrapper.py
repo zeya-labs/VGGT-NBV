@@ -106,7 +106,7 @@ class VGGTWrapper(nn.Module):
         Returns:
             token_features: 对应类型的token特征
         """
-        with torch.cuda.amp.autocast(dtype=self.dtype):
+        with torch.autocast(device_type=self.device, dtype=self.dtype):
             # 确保输入有batch维度
             if len(images.shape) == 4:
                 images = images.unsqueeze(0)

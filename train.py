@@ -52,7 +52,8 @@ def setup_config() -> Dict[str, Any]:
         # 训练配置
         "learning_rate": 1e-3,
         "batch_size": 1,  # 根据GPU内存调整
-        "num_epochs": 10000,
+        "num_epochs": 1000,
+        "num_samples": 20000,
         "weight_decay": 1e-5,
         
         # 数据配置
@@ -159,6 +160,7 @@ def setup_data_loaders(config: Dict[str, Any]):
             "num_initial_views": config["num_initial_views"],
             "image_size": config["image_size"],
             "normalize_method": "quantile",
+            "num_samples": config["num_samples"],
             "split": "train",
             "max_meshes": config.get("max_meshes", 100),  # 限制总mesh数量
             "use_cache": True,
@@ -174,6 +176,7 @@ def setup_data_loaders(config: Dict[str, Any]):
             "num_initial_views": config["num_initial_views"],
             "image_size": config["image_size"],
             "normalize_method": "quantile",
+            "num_samples": config["num_samples"],
             "split": "val",
             "max_meshes": config.get("max_meshes", 100),  # 验证集使用更少的mesh
             "use_cache": True,
