@@ -83,6 +83,7 @@ class NBVTrainer:
         self.current_epoch = 0
         self.global_step = 0
         self.best_loss = float('inf')
+        self.val_image_step = 0
         
         # 日志
         self.setup_logging()
@@ -226,8 +227,7 @@ class NBVTrainer:
             # self.writer.add_scalar('train/weighted_losses/chamfer_loss', loss_dict['weighted_chamfer_loss'], self.global_step)
             # self.writer.add_scalar('train/weighted_losses/confidence_loss', loss_dict['weighted_confidence_loss'], self.global_step)
             # self.writer.add_scalar('train/weighted_losses/viewpoint_loss', loss_dict['weighted_viewpoint_loss'], self.global_step)
-
-        self.global_step += 1
+            self.global_step += 1
         
         return loss_dict, new_images, initial_images
     
@@ -293,10 +293,11 @@ class NBVTrainer:
                 initial_images_flat = initial_images.view(b * n, c, h, w)
                 
                 initial_grid = torchvision.utils.make_grid(initial_images_flat, nrow=n)
-                self.writer.add_image('val/initial_views', initial_grid, self.global_step)
+                self.writer.add_image('val/initial_views', initial_grid, self.val_image_step)
 
                 new_grid = torchvision.utils.make_grid(new_images, nrow=1)
-                self.writer.add_image('val/next_best_view', new_grid, self.global_step)
+                self.writer.add_image('val/next_best_view', new_grid, self.val_image_step)
+                self.val_image_step += 1
 
             progress_bar.set_postfix({
                 "val_loss": f"{loss_dict['total_loss']:.4f}"
@@ -304,18 +305,18 @@ class NBVTrainer:
         
         avg_loss_dict = self._average_loss_dicts(epoch_losses)
         
-        # 记录验证损失
-        self.writer.add_scalar('val/total_loss', avg_loss_dict['total_loss'], self.global_step)
+        # 记录验证损失（以 epoch 作为 step）
+        self.writer.add_scalar('val/total_loss', avg_loss_dict['total_loss'], self.current_epoch)
         
         # 记录各个验证损失组件（原始值）
-        self.writer.add_scalar('val/losses/chamfer_loss', avg_loss_dict['chamfer_loss'], self.global_step)
-        self.writer.add_scalar('val/losses/confidence_loss', avg_loss_dict['confidence_loss'], self.global_step)
-        self.writer.add_scalar('val/losses/viewpoint_loss', avg_loss_dict['viewpoint_loss'], self.global_step)
+        self.writer.add_scalar('val/losses/chamfer_loss', avg_loss_dict['chamfer_loss'], self.current_epoch)
+        self.writer.add_scalar('val/losses/confidence_loss', avg_loss_dict['confidence_loss'], self.current_epoch)
+        self.writer.add_scalar('val/losses/viewpoint_loss', avg_loss_dict['viewpoint_loss'], self.current_epoch)
         
         # 记录加权后的验证损失组件
-        self.writer.add_scalar('val/weighted_losses/chamfer_loss', avg_loss_dict['weighted_chamfer_loss'], self.global_step)
-        self.writer.add_scalar('val/weighted_losses/confidence_loss', avg_loss_dict['weighted_confidence_loss'], self.global_step)
-        self.writer.add_scalar('val/weighted_losses/viewpoint_loss', avg_loss_dict['weighted_viewpoint_loss'], self.global_step)
+        self.writer.add_scalar('val/weighted_losses/chamfer_loss', avg_loss_dict['weighted_chamfer_loss'], self.current_epoch)
+        self.writer.add_scalar('val/weighted_losses/confidence_loss', avg_loss_dict['weighted_confidence_loss'], self.current_epoch)
+        self.writer.add_scalar('val/weighted_losses/viewpoint_loss', avg_loss_dict['weighted_viewpoint_loss'], self.current_epoch)
 
         return avg_loss_dict
     
