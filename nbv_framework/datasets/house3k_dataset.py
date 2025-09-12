@@ -349,7 +349,7 @@ class House3KDataset(BaseDataset):
             from ..utils.camera_utils import CameraPoseGenerator
             self._camera_generator = CameraPoseGenerator(up_axis=self.up_axis)
         
-        return self._camera_generator.generate_camera_poses(num_views, seed=seed)
+        return self._camera_generator.generate_camera_poses(num_views, seed=seed, hemisphere='upper')
     
     def _get_renderer(self):
         """获取渲染器（延迟初始化）"""

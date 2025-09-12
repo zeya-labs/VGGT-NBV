@@ -11,7 +11,7 @@ from typing import Dict, List
 from pytorch3d.renderer import look_at_view_transform
 from pytorch3d.transforms import matrix_to_quaternion
 
-from .coordinate_utils import get_up_vector, generate_fibonacci_sphere_points
+from .coordinate_utils import get_up_vector, generate_fibonacci_sphere_points, generate_fibonacci_upper_hemisphere_points
 
 
 
@@ -28,18 +28,18 @@ class CameraPoseGenerator:
         self.up_axis = up_axis
         self.up_vector = get_up_vector(up_axis)
     
-    def generate_camera_poses(
-        self, 
-        num_views: int, 
+    def _generate_poses_from_positions(
+        self,
+        sphere_positions: np.ndarray,
         seed: int = 0,
-        base_radius: float = 2.22, # 0.9, 0.8是2.5，0.7是2.86
+        base_radius: float = 2.22,
         radius_variation: float = 0
     ) -> List[Dict[str, List[float]]]:
         """
-        生成相机位姿
+        从球面位置生成相机位姿的通用方法
         
         Args:
-            num_views: 视图数量
+            sphere_positions: 球面位置数组
             seed: 随机种子
             base_radius: 基础相机距离
             radius_variation: 距离变化范围
@@ -51,9 +51,6 @@ class CameraPoseGenerator:
         rng = np.random.RandomState(seed)
         
         poses = []
-        
-        # 生成球面上的均匀分布点
-        sphere_positions, _ = generate_fibonacci_sphere_points(num_views, radius=1.0)
         
         for i, direction in enumerate(sphere_positions):
             # 添加随机距离变化
@@ -82,6 +79,38 @@ class CameraPoseGenerator:
             })
         
         return poses
+    
+    def generate_camera_poses(
+        self, 
+        num_views: int, 
+        seed: int = 0,
+        base_radius: float = 2.22, # 0.9, 0.8是2.5，0.7是2.86
+        radius_variation: float = 0,
+        hemisphere: str = 'full'
+    ) -> List[Dict[str, List[float]]]:
+        """
+        生成相机位姿
+        
+        Args:
+            num_views: 视图数量
+            seed: 随机种子
+            base_radius: 基础相机距离
+            radius_variation: 距离变化范围
+            hemisphere: 球面类型，'full'表示全球面，'upper'表示上半球面
+            
+        Returns:
+            camera_poses: 相机位姿列表，每个元素包含position和quaternion
+        """
+        if hemisphere == 'upper':
+            # 生成上半球面上的均匀分布点
+            sphere_positions, _ = generate_fibonacci_upper_hemisphere_points(num_views, radius=1.0, up_axis=self.up_axis)
+        else:
+            # 生成球面上的均匀分布点
+            sphere_positions, _ = generate_fibonacci_sphere_points(num_views, radius=1.0)
+        
+        return self._generate_poses_from_positions(
+            sphere_positions, seed, base_radius, radius_variation
+        )
     
     def save_camera_poses(self, camera_poses: List[Dict], filepath: str):
         """

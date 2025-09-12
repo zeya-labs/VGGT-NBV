@@ -39,7 +39,9 @@ class NBVTrainer:
                  policy_network: BaseNBVPolicy,
                  renderer: DifferentiableRenderer,
                  loss_fn: ReconstructionLoss,
+                 num_epochs: int = 1000,
                  learning_rate: float = 1e-4,
+                 weight_decay: float = 1e-5,
                  log_dir: str = "runs/nbv_experiment",
                  device: str = "cuda"):
         """
@@ -51,6 +53,7 @@ class NBVTrainer:
             renderer: 可微分渲染器
             loss_fn: 重建质量损失函数
             learning_rate: 学习率
+            weight_decay: 权重衰减
             log_dir: TensorBoard日志目录
             device: 计算设备
         """
@@ -59,6 +62,7 @@ class NBVTrainer:
         self.renderer = renderer
         self.loss_fn = loss_fn
         self.device = device
+        self.num_epochs = num_epochs
         
         # 初始化TensorBoard Writer
         self.writer = SummaryWriter(log_dir)
@@ -67,12 +71,12 @@ class NBVTrainer:
         self.optimizer = optim.Adam(
             self.policy_network.parameters(),
             lr=learning_rate,
-            weight_decay=1e-5
+            weight_decay=weight_decay
         )
         
         # 学习率调度器
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, T_max=1000, eta_min=1e-6
+            self.optimizer, T_max=self.num_epochs, eta_min=1e-6
         )
         
         # 训练状态
@@ -318,7 +322,6 @@ class NBVTrainer:
     def train(self, 
              train_loader: DataLoader,
              val_loader: Optional[DataLoader] = None,
-             num_epochs: int = 100,
              save_dir: str = "checkpoints"):
         """
         完整训练流程
@@ -326,15 +329,14 @@ class NBVTrainer:
         Args:
             train_loader: 训练数据加载器
             val_loader: 验证数据加载器
-            num_epochs: 训练轮数
             save_dir: 模型保存目录
         """
         os.makedirs(save_dir, exist_ok=True)
         
-        self.logger.info(f"Starting training for {num_epochs} epochs")
+        self.logger.info(f"Starting training for {self.num_epochs} epochs")
         self.logger.info(f"Policy network parameters: {sum(p.numel() for p in self.policy_network.parameters())}")
         
-        for epoch in range(num_epochs):
+        for epoch in range(self.num_epochs):
             self.current_epoch = epoch
             
             # 训练

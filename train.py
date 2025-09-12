@@ -50,7 +50,7 @@ def setup_config() -> Dict[str, Any]:
         "policy_output_mode": "position_only",
         
         # 训练配置
-        "learning_rate": 1e-4,
+        "learning_rate": 1e-3,
         "batch_size": 1,  # 根据GPU内存调整
         "num_epochs": 10000,
         "weight_decay": 1e-5,
@@ -252,7 +252,9 @@ def train_nbv_policy(config: Dict[str, Any],
         policy_network=policy_network,
         renderer=renderer,
         loss_fn=loss_fn,
+        num_epochs=config["num_epochs"],
         learning_rate=config["learning_rate"],
+        weight_decay=config["weight_decay"],
         device=config["device"],
         log_dir=config["log_dir"]
     )
@@ -287,7 +289,6 @@ def train_nbv_policy(config: Dict[str, Any],
     trainer.train(
         train_loader=train_loader,
         val_loader=val_loader,
-        num_epochs=config["num_epochs"],
         save_dir=config["save_dir"]
     )
     
