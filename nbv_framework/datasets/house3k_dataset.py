@@ -10,6 +10,7 @@ import torch
 import numpy as np
 from typing import List, Dict, Optional, Tuple
 from .base_dataset import BaseDataset
+from ..utils.camera_utils import pose_dict_to_tensor
 
 
 class House3KDataset(BaseDataset):
@@ -400,19 +401,12 @@ class House3KDataset(BaseDataset):
             # 选择对应的相机位姿
             selected_poses = [camera_poses[i] for i in selected_indices]
             
-            # 转换位姿格式
-            pose_tensors = []
-            for pose in selected_poses:
-                pose_tensor = torch.tensor(
-                    pose["position"] + pose["quaternion"], 
-                    dtype=torch.float32
-                )
-                pose_tensors.append(pose_tensor)
-            
-            camera_poses_tensor = torch.stack(pose_tensors, dim=0)
-            
             # 为每个相机位姿复制网格
             device = renderer.device
+            
+            # 转换位姿格式
+            pose_tensors = [pose_dict_to_tensor(pose, device=device) for pose in selected_poses]
+            camera_poses_tensor = torch.cat(pose_tensors, dim=0)
             mesh = mesh.to(device)
             
             # 创建批次化的网格，每个相机位姿对应一个网格副本
@@ -470,19 +464,12 @@ class House3KDataset(BaseDataset):
             # 选择对应的相机位姿
             selected_poses = [camera_poses[i] for i in selected_indices]
             
-            # 转换位姿格式
-            pose_tensors = []
-            for pose in selected_poses:
-                pose_tensor = torch.tensor(
-                    pose["position"] + pose["quaternion"], 
-                    dtype=torch.float32
-                )
-                pose_tensors.append(pose_tensor)
-            
-            camera_poses_tensor = torch.stack(pose_tensors, dim=0)
-            
             # 为每个相机位姿复制网格
             device = renderer.device
+            
+            # 转换位姿格式
+            pose_tensors = [pose_dict_to_tensor(pose, device=device) for pose in selected_poses]
+            camera_poses_tensor = torch.cat(pose_tensors, dim=0)
             mesh = mesh.to(device)
             
             # 创建批次化的网格，每个相机位姿对应一个网格副本

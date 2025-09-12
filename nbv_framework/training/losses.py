@@ -229,7 +229,7 @@ class ReconstructionLoss(nn.Module):
     def __init__(self,
                  chamfer_weight: float = 1.0,
                  confidence_weight: float = 0.01,
-                 viewpoint_weight: float = 0):
+                 viewpoint_weight: float = 0.1):
         """
         初始化重建损失
         
