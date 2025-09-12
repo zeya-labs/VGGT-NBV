@@ -197,8 +197,10 @@ def position_to_pose_tensor(positions: torch.Tensor, up_axis: str = "Y") -> torc
     # 目标点（看向原点）
     at = torch.zeros(batch_size, 3, dtype=torch.float32, device=device)
     
-    # 使用PyTorch3D的look_at_view_transform生成旋转矩阵
-    R, T = look_at_view_transform(eye=positions, at=at, up=up)
+    with torch.autocast(device_type=device.type, enabled=False):
+        positions_float32 = positions.to(torch.float32)
+        # 使用PyTorch3D的look_at_view_transform生成旋转矩阵
+        R, T = look_at_view_transform(eye=positions_float32, at=at, up=up)
     
     # 确保旋转矩阵在正确的设备上
     R = R.to(device)

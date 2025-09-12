@@ -231,6 +231,8 @@ class DifferentiableRenderer(nn.Module):
             - cartesian格式：相机位置和朝向完全由7DOF位姿决定，四元数格式为(qx,qy,qz,qw)
             - 相机朝向完全由四元数控制
         """
+        # 确保使用 float32，避免 AMP 导致的半精度与渲染器 dtype 不匹配
+        camera_poses = camera_poses.float()
         batch_size = camera_poses.shape[0]
         
         if pose_format == "spherical":
@@ -290,89 +292,50 @@ class DifferentiableRenderer(nn.Module):
         Returns:
             rendered_images: 渲染的图像 [B, 3, H, W]。
         """
-        # 1. 初始化光照
-        self.setup_lighting(lighting_type)
-        batch_size = len(meshes)
+        # 在渲染期间禁用 AMP，强制使用 float32，避免 PyTorch3D 内部与 half 冲突
+        with torch.autocast(device_type=meshes.device.type, enabled=False):
+            # 1. 初始化光照
+            self.setup_lighting(lighting_type)
+            batch_size = len(meshes)
 
-        # 2. 一次性完成光栅化，获取整个批次的 fragments
-        _, fragments = self.renderer_with_frags(meshes, cameras=cameras)
+            # 2. 一次性完成光栅化，获取整个批次的 fragments
+            _, fragments = self.renderer_with_frags(meshes, cameras=cameras)
 
-        # 3. 向量化的光照和着色 (这部分逻辑不变)
-        image_shape = (batch_size, self.raster_settings.image_size, self.raster_settings.image_size, 4)
-        final_image = torch.zeros(image_shape, device=self.device)
+            # 3. 向量化的光照和着色 (这部分逻辑不变)
+            image_shape = (batch_size, self.raster_settings.image_size, self.raster_settings.image_size, 4)
+            final_image = torch.zeros(image_shape, device=self.device, dtype=torch.float32)
 
-        if self.light_properties:
-            for i, properties in enumerate(self.light_properties):
-                ambient_color = self.base_ambient_color if i == 0 else (0.0, 0.0, 0.0)
-                lights_pass = PointLights(
-                    device=self.device, location=[properties["location"]],
-                    ambient_color=(ambient_color,), diffuse_color=(properties["diffuse_color"],),
-                    specular_color=(properties["specular_color"],)
-                )
-                image_pass = self.shader(fragments, meshes, cameras=cameras, lights=lights_pass)
-                final_image += image_pass
-        else:
-            lights_pass = PointLights(device=self.device, ambient_color=(self.base_ambient_color,))
-            final_image = self.shader(fragments, meshes, cameras=cameras, lights=lights_pass)
+            if self.light_properties:
+                for i, properties in enumerate(self.light_properties):
+                    ambient_color = self.base_ambient_color if i == 0 else (0.0, 0.0, 0.0)
+                    lights_pass = PointLights(
+                        device=self.device, location=[properties["location"]],
+                        ambient_color=(ambient_color,), diffuse_color=(properties["diffuse_color"],),
+                        specular_color=(properties["specular_color"],)
+                    )
+                    image_pass = self.shader(fragments, meshes, cameras=cameras, lights=lights_pass)
+                    final_image += image_pass
+            else:
+                lights_pass = PointLights(device=self.device, ambient_color=(self.base_ambient_color,))
+                final_image = self.shader(fragments, meshes, cameras=cameras, lights=lights_pass)
 
-        # 4. 后处理 (这部分逻辑不变)
-        final_image = torch.clamp(final_image, 0.0, 1.0)
-        rendered_images = final_image.permute(0, 3, 1, 2)[:, :3, :, :]
+            # 4. 后处理 (这部分逻辑不变)
+            final_image = torch.clamp(final_image, 0.0, 1.0)
+            rendered_images = final_image.permute(0, 3, 1, 2)[:, :3, :, :]
 
-        if self.quality == "high" and self.render_image_size != self.image_size:
-            try:
-                rendered_images = F.interpolate(
-                    rendered_images, size=(self.image_size, self.image_size),
-                    mode='bilinear', align_corners=False, antialias=True
-                )
-            except TypeError:
-                rendered_images = F.interpolate(
-                    rendered_images, size=(self.image_size, self.image_size),
-                    mode='bilinear', align_corners=False
-                )
+            if self.quality == "high" and self.render_image_size != self.image_size:
+                try:
+                    rendered_images = F.interpolate(
+                        rendered_images, size=(self.image_size, self.image_size),
+                        mode='bilinear', align_corners=False, antialias=True
+                    )
+                except TypeError:
+                    rendered_images = F.interpolate(
+                        rendered_images, size=(self.image_size, self.image_size),
+                        mode='bilinear', align_corners=False
+                    )
 
         return rendered_images
-    
-    def normalize_mesh(self, mesh: Meshes) -> Meshes:
-        """将网格移动到原点并缩放到单位球内"""
-        verts = mesh.verts_packed()
-        center = verts.mean(0)
-        verts = verts - center
-        scale = torch.max(torch.norm(verts, p=2, dim=1))
-        verts = verts / scale
-        mesh = mesh.update_padded(verts.unsqueeze(0))
-        return mesh
-    
-    def create_mesh_from_vertices_faces(self, 
-                                      vertices: torch.Tensor,
-                                      faces: torch.Tensor,
-                                      colors: Optional[torch.Tensor] = None) -> Meshes:
-        """
-        从顶点和面创建mesh
-        
-        Args:
-            vertices: 顶点坐标 [V, 3]
-            faces: 面索引 [F, 3]
-            colors: 顶点颜色 [V, 3]，可选
-            
-        Returns:
-            mesh: PyTorch3D Meshes对象
-        """
-        if colors is None:
-            # 默认白色
-            colors = torch.ones_like(vertices, device=self.device)
-        
-        # 创建纹理
-        textures = TexturesVertex(verts_features=[colors])
-        
-        # 创建mesh
-        mesh = Meshes(
-            verts=[vertices],
-            faces=[faces],
-            textures=textures
-        ).to(self.device)
-        
-        return mesh
     
     def forward(self, 
                gt_mesh: Meshes,

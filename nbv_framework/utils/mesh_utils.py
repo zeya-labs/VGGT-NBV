@@ -29,19 +29,29 @@ def load_mesh_as_pytorch3d(mesh_path: str) -> Meshes:
             load_textures=True
         )
         
+        # 优化：立即将顶点转换为float32
+        verts_f32 = mesh.verts_packed().to(torch.float32)
+        
         # 如果纹理加载失败，创建默认的白色纹理
         if mesh.textures is None:
-            verts = mesh.verts_packed()
-            verts_rgb = torch.ones_like(verts)[None]  # (1, V, 3)
-            textures = TexturesVertex(verts_features=verts_rgb.to(cpu_device))
-            mesh.textures = textures
+            raise ValueError(f"Mesh {mesh_path} 没有加载到纹理信息")
+        
+        # 重新创建mesh对象，确保顶点是float32
+        mesh = Meshes(
+            verts=[verts_f32.to(cpu_device)],
+            faces=mesh.faces_list(),
+            textures=mesh.textures
+        )
 
     elif mesh_path.endswith('.ply'):
         verts, faces = load_ply(mesh_path)
         
         # 为 .ply 文件创建一个默认的纯白顶点颜色纹理
         # 这是为了满足 SoftPhongShader 的要求
-        verts_rgb = torch.ones_like(verts)[None]  # (1, V, 3)
+        # 优化：确保顶点是float32类型
+        verts = verts.to(cpu_device, dtype=torch.float32)
+        faces = faces.to(cpu_device)
+        verts_rgb = torch.ones_like(verts, dtype=torch.float32)[None]  # (1, V, 3)
         textures = TexturesVertex(verts_features=verts_rgb.to(cpu_device))
         
         # 创建 Meshes 对象，这次包含了纹理信息

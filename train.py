@@ -55,6 +55,7 @@ def setup_config() -> Dict[str, Any]:
         "num_epochs": 1000,
         "num_samples": 20000,
         "weight_decay": 1e-5,
+        "use_amp": True,
         
         # 数据配置
         "synthetic_data_root": "./models/synthetic_data",
@@ -259,7 +260,8 @@ def train_nbv_policy(config: Dict[str, Any],
         learning_rate=config["learning_rate"],
         weight_decay=config["weight_decay"],
         device=config["device"],
-        log_dir=config["log_dir"]
+        log_dir=config["log_dir"],
+        use_amp=config["use_amp"]
     )
     
     # 断点续训逻辑

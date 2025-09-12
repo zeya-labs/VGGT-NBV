@@ -150,21 +150,20 @@ class VGGTWrapper(nn.Module):
                 - depth_conf: 深度置信度 [B, S, H, W]
                 - pose_enc: 相机位姿编码 [B, S, 9]
         """
-        with torch.cuda.amp.autocast(dtype=self.dtype):
-            predictions = self.vggt_model(images)
-            
+        predictions = self.vggt_model(images)
+        
 
-            # 将姿态编码转换为外参和内参矩阵
-            extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])
-            predictions["extrinsic"] = extrinsic
-            predictions["intrinsic"] = intrinsic
+        # 将姿态编码转换为外参和内参矩阵
+        extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])
+        predictions["extrinsic"] = extrinsic
+        predictions["intrinsic"] = intrinsic
 
-            # 从深度图生成世界坐标点
-            depth_map = predictions["depth"]  # (B, S, H, W, 1)
-            world_points = unproject_depth_map_to_point_map_torch(depth_map, predictions["extrinsic"], predictions["intrinsic"])
-            predictions["world_points_from_depth"] = world_points
+        # 从深度图生成世界坐标点
+        depth_map = predictions["depth"]  # (B, S, H, W, 1)
+        world_points = unproject_depth_map_to_point_map_torch(depth_map, predictions["extrinsic"], predictions["intrinsic"])
+        predictions["world_points_from_depth"] = world_points
 
-            return predictions
+        return predictions
     
     def compute_reconstruction_quality(self, 
                                      reconstruction_data: Dict[str, torch.Tensor],

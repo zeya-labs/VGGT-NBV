@@ -81,13 +81,17 @@ class ChamferDistance(nn.Module):
         p_gt_norm = self._normalize_point_cloud(p_gt)
         
         # 步骤 2: 使用ICP将预测点云对齐到GT点云
+        # 注意：在 AMP 下，PyTorch3D 的 ICP 不支持 half，需要强制使用 float32
         with torch.no_grad():
-            icp_result = iterative_closest_point(
-                X=p_pred_norm, 
-                Y=p_gt_norm, 
-                max_iterations=self.icp_iterations
-            )
-        p_pred_aligned = icp_result.Xt
+            with torch.autocast(device_type=p_pred.device.type, enabled=False):
+                X32 = p_pred_norm.detach().to(dtype=torch.float32)
+                Y32 = p_gt_norm.detach().to(dtype=torch.float32)
+                icp_result = iterative_closest_point(
+                    X=X32,
+                    Y=Y32,
+                    max_iterations=self.icp_iterations
+                )
+        p_pred_aligned = icp_result.Xt  # float32
         
         # TensorBoard可视化点云
         if writer is not None and step is not None:
@@ -113,9 +117,9 @@ class ChamferDistance(nn.Module):
         aligned_points = p_pred_aligned[0].detach()
         
         #输出shape
-        print("pred_points shape:", pred_points.shape)
-        print("gt_points shape:", gt_points.shape)
-        print("aligned_points shape:", aligned_points.shape)
+        # print("pred_points shape:", pred_points.shape)
+        # print("gt_points shape:", gt_points.shape)
+        # print("aligned_points shape:", aligned_points.shape)
 
         # 可选：降采样
         def _maybe_subsample(points: torch.Tensor, max_points: int = 20000) -> torch.Tensor:
@@ -348,33 +352,36 @@ class ReconstructionLoss(nn.Module):
             return []
 
         B, S, H, W, _ = points_data.shape
-        # 2. 矢量化计算高置信度掩码 (对整个批次一次性计算)
-        high_conf_mask = conf_data > confidence_threshold  # Shape: [B, S, H, W]
         
-        # 3. 矢量化计算非黑色像素掩码
-        if combined_images_batch is not None:
-            # 计算所有像素的平均强度
-            pixel_intensity = combined_images_batch.mean(dim=2)  # Shape: [B, S, H, W]
+        with torch.no_grad():  # 掩码计算不需要梯度
+            # 2. 矢量化计算高置信度掩码 (对整个批次一次性计算)
+            high_conf_mask = conf_data > confidence_threshold  # Shape: [B, S, H, W]
             
-            # 定义黑色像素阈值
-            black_threshold = 0.05
-            non_black_mask = pixel_intensity > black_threshold  # Shape: [B, S, H, W]
-            
-            # 合并两个掩码
-            # print("Shape of high_conf_mask:", high_conf_mask.shape)
-            # print("Shape of non_black_mask:", non_black_mask.shape)
-            combined_mask = high_conf_mask & non_black_mask
-        else:
-            # 如果没有提供图像，只使用置信度掩码
-            combined_mask = high_conf_mask
+            # 3. 矢量化计算非黑色像素掩码
+            if combined_images_batch is not None:
+                # 计算所有像素的平均强度
+                pixel_intensity = combined_images_batch.mean(dim=2)  # Shape: [B, S, H, W]
+                
+                # 定义黑色像素阈值
+                black_threshold = 0.05
+                non_black_mask = pixel_intensity > black_threshold  # Shape: [B, S, H, W]
+                
+                # 合并两个掩码
+                combined_mask = high_conf_mask & non_black_mask
+            else:
+                # 如果没有提供图像，只使用置信度掩码
+                combined_mask = high_conf_mask
         
         # 4. 应用掩码并生成结果列表
-        # 尽管我们仍然需要一个循环来构建列表（因为每个元素的点数量不同），
-        # 但所有昂贵的计算（掩码生成）都已在循环外完成。
-        # 列表推导式是完成这个任务的简洁方式。
-        point_clouds_list = [
-            points_data[i][combined_mask[i]] for i in range(B)
-        ]
+        point_clouds_list = []
+        for i in range(B):
+            mask_i = combined_mask[i]  # Shape: [S, H, W]
+            if mask_i.any():  # 只有当存在有效点时才进行提取
+                points_i = points_data[i][mask_i]
+                point_clouds_list.append(points_i)
+            else:
+                # 如果没有有效点，添加空张量
+                point_clouds_list.append(torch.empty((0, 3), device=points_data.device, dtype=points_data.dtype))
                 
         return point_clouds_list
     
@@ -416,40 +423,45 @@ class ReconstructionLoss(nn.Module):
             if len(pred_points_list) != gt_points_batch.shape[0]:
                 print("警告: 预测点云列表的批次大小与GT点云不匹配。跳过Chamfer损失计算。")
             else:
-                batch_chamfer_loss = 0.0
-                valid_items_count = 0
+                # 预先筛选有效的点云，避免在循环中重复检查
+                valid_indices = []
+                valid_pred_points = []
+                valid_gt_points = []
                 
-                # 4. 遍历批处理中的每个项目来计算损失
                 for i in range(len(pred_points_list)):
                     pred_pc_item = pred_points_list[i]  # 当前预测点云, shape: [Ni, 3]
-                    gt_pc_item = gt_points_batch[i]      # 当前GT点云, shape: [M, 3]
                     
-                    # 5. 安全检查：如果过滤后没有剩下任何点，则跳过此项
+                    # 安全检查：如果过滤后没有剩下任何点，则跳过此项
                     if pred_pc_item.shape[0] == 0:
                         continue
                     
-                    # 6. 为损失函数准备输入：为当前项增加一个批次维度
-                    #    pred_pc_item -> [1, Ni, 3]
-                    #    gt_pc_item   -> [1, M, 3]
-                    pred_pc_item_batched = pred_pc_item.unsqueeze(0)
-                    gt_pc_item_batched = gt_pc_item.unsqueeze(0)
-
-                    # 7. 计算当前项的Chamfer损失
-                    # 只在第一个有效项目上进行可视化，避免过多的TensorBoard记录
-                    if valid_items_count == 0 and writer is not None and step is not None:
-                        item_loss = self.chamfer_loss(pred_pc_item_batched, gt_pc_item_batched, writer, step)
-                    else:
-                        item_loss = self.chamfer_loss(pred_pc_item_batched, gt_pc_item_batched)
+                    valid_indices.append(i)
+                    valid_pred_points.append(pred_pc_item)
+                    valid_gt_points.append(gt_points_batch[i])
+                
+                # 4. 如果有有效点云，批量计算损失
+                if len(valid_pred_points) > 0:
+                    # 使用torch.stack创建批量张量，避免循环中的unsqueeze操作
+                    # 注意：由于点云大小可能不同，我们仍需要逐个计算，但可以优化其他部分
+                    batch_chamfer_loss = torch.tensor(0.0, device=total_loss.device)
                     
-                    # 8. 累加损失并计数有效项目
-                    batch_chamfer_loss += item_loss
-                    valid_items_count += 1
+                    for idx, (pred_pc, gt_pc) in enumerate(zip(valid_pred_points, valid_gt_points)):
+                        # 为损失函数准备输入：增加批次维度
+                        pred_pc_batched = pred_pc.unsqueeze(0)
+                        gt_pc_batched = gt_pc.unsqueeze(0)
+                        
+                        # 计算当前项的Chamfer损失
+                        # 只在第一个有效项目上进行可视化，避免过多的TensorBoard记录
+                        if idx == 0 and writer is not None and step is not None:
+                            item_loss = self.chamfer_loss(pred_pc_batched, gt_pc_batched, writer, step)
+                        else:
+                            item_loss = self.chamfer_loss(pred_pc_batched, gt_pc_batched)
+                        
+                        batch_chamfer_loss += item_loss
                     
-                # 9. 如果批处理中至少有一个有效项目，则计算平均损失并加到总损失中
-                if valid_items_count > 0:
-                    mean_chamfer_loss = batch_chamfer_loss / valid_items_count
-                    chamfer_loss_value = mean_chamfer_loss
-                    total_loss += self.chamfer_weight * mean_chamfer_loss
+                    # 计算平均损失
+                    chamfer_loss_value = batch_chamfer_loss / len(valid_pred_points)
+                    total_loss += self.chamfer_weight * chamfer_loss_value
                     loss_count += 1
         
         loss_components['chamfer_loss'] = chamfer_loss_value.item()
