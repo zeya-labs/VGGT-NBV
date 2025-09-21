@@ -11,8 +11,9 @@ from typing import Dict, Optional, Tuple, List, Literal
 import numpy as np
 from pytorch3d.ops import iterative_closest_point
 from pytorch3d.loss import chamfer_distance
-from pytorch3d.structures import Meshes
-import cv2
+from pytorch3d.structures import Meshes, Pointclouds
+import logging
+
 
 class ChamferDistance(nn.Module):
     """
@@ -38,139 +39,178 @@ class ChamferDistance(nn.Module):
         self.icp_iterations = icp_iterations
         self.normalization_method = normalization_method
 
-    def _normalize_point_cloud(self, p_cloud: torch.Tensor) -> torch.Tensor:
+    def _normalize_point_clouds(self, p_clouds: Pointclouds) -> Pointclouds:
         """
         根据选定的方法，将一批点云归一化。
-        【已修改】确保在计算前将点云转换为浮点类型。
         """
-        p_cloud_float = p_cloud.float()
-        
-        # 1. 平移到原点 (在浮点张量上操作)
-        centroid = torch.mean(p_cloud_float, dim=1, keepdim=True)
-        p_cloud_centered = p_cloud_float - centroid
-        
-        # 2. 根据选定的方法计算缩放因子并缩放 (在浮点张量上操作)
-        if self.normalization_method == 'max':
-            distances = torch.norm(p_cloud_centered, p=2, dim=2, keepdim=True)
-            scale = torch.max(distances, dim=1, keepdim=True)[0]
-        elif self.normalization_method == 'std':
-            distances = torch.norm(p_cloud_centered, p=2, dim=2)
-            scale = torch.sqrt(torch.mean(distances**2, dim=1, keepdim=True)).unsqueeze(-1)
-        elif self.normalization_method == 'quantile':
-            # 现在 distances 是浮点类型，quantile 可以正常工作
-            distances = torch.norm(p_cloud_centered, p=2, dim=2)
-            scale = torch.quantile(distances, q=0.95, dim=1, keepdim=True).unsqueeze(-1)
-            
-        p_cloud_normalized = p_cloud_centered / (scale + 1e-8)
-        
-        return p_cloud_normalized
+        points_list = p_clouds.points_list()
+        if not points_list:
+            return p_clouds
 
-    def forward(self, p_pred: torch.Tensor, p_gt: torch.Tensor, 
-                writer=None, step=None) -> torch.Tensor:
+        normalized_points_list = []
+        for p_cloud in points_list:
+            if p_cloud.shape[0] == 0:
+                normalized_points_list.append(p_cloud)
+                continue
+
+            p_cloud_float = p_cloud.float()
+            
+            # 1. 平移到原点
+            centroid = torch.mean(p_cloud_float, dim=0, keepdim=True)
+            p_cloud_centered = p_cloud_float - centroid
+            
+            # 2. 根据选定的方法计算缩放因子并缩放
+            distances = torch.norm(p_cloud_centered, p=2, dim=1)
+            if distances.shape[0] == 0:
+                scale = torch.tensor(1.0, device=distances.device)
+            elif self.normalization_method == 'max':
+                scale = torch.max(distances)
+            elif self.normalization_method == 'std':
+                scale = torch.sqrt(torch.mean(distances**2))
+            elif self.normalization_method == 'quantile':
+                scale = torch.quantile(distances, q=0.95)
+            
+            p_cloud_normalized = p_cloud_centered / (scale + 1e-8)
+            normalized_points_list.append(p_cloud_normalized)
+        
+        return Pointclouds(points=normalized_points_list)
+
+    def forward(self, p_pred: Pointclouds, p_gt: Pointclouds, writer=None, step=None) -> torch.Tensor:
         """
         计算对齐后的倒角距离。
         
         Args:
-            p_pred: 预测点云 [B, N, 3]
-            p_gt: 真实点云 [B, M, 3]
-            writer: TensorBoard SummaryWriter，可选
-            step: 当前训练步数，可选
+            p_pred: 预测点云 (Pointclouds object)
+            p_gt: 真实点云 (Pointclouds object)
+            writer: TensorBoard SummaryWriter for visualization.
+            step: Current training step.
         """
         # 步骤 1: 归一化两个点云
-        p_pred_norm = self._normalize_point_cloud(p_pred)
-        p_gt_norm = self._normalize_point_cloud(p_gt)
+        p_pred_norm = self._normalize_point_clouds(p_pred)
+        p_gt_norm = self._normalize_point_clouds(p_gt)
         
         # 步骤 2: 使用ICP将预测点云对齐到GT点云
-        # 注意：在 AMP 下，PyTorch3D 的 ICP 不支持 half，需要强制使用 float32
+        # ICP在pytorch3d中不支持不同点数的批处理，所以我们仍然需要一个循环。
+        aligned_points_list = []
         with torch.no_grad():
             with torch.autocast(device_type=p_pred.device.type, enabled=False):
-                X32 = p_pred_norm.detach().to(dtype=torch.float32)
-                Y32 = p_gt_norm.detach().to(dtype=torch.float32)
-                icp_result = iterative_closest_point(
-                    X=X32,
-                    Y=Y32,
-                    max_iterations=self.icp_iterations
-                )
-        p_pred_aligned = icp_result.Xt  # float32
-        
-        # TensorBoard可视化点云
+                X_list = [p.to(dtype=torch.float32) for p in p_pred_norm.points_list()]
+                Y_list = [p.to(dtype=torch.float32) for p in p_gt_norm.points_list()]
+
+                for X, Y in zip(X_list, Y_list):
+                    if X.shape[0] == 0 or Y.shape[0] == 0:
+                        aligned_points_list.append(X) # Append original (empty) points
+                        continue
+                    
+                    icp_result = iterative_closest_point(
+                        X=X.unsqueeze(0),
+                        Y=Y.unsqueeze(0),
+                        max_iterations=self.icp_iterations
+                    )
+                    aligned_points_list.append(icp_result.Xt.squeeze(0))
+
+        p_pred_aligned = Pointclouds(points=aligned_points_list)
+
+        # 可视化
         if writer is not None and step is not None:
-            self._visualize_point_clouds(writer, step, p_pred_norm, p_gt_norm, p_pred_aligned)
+            # We need to be careful about batching here.
+            # Let's visualize the first element of the batch.
+            if len(p_pred_norm.points_list()) > 0 and len(p_gt_norm.points_list()) > 0 and len(p_pred_aligned.points_list()) > 0:
+                self._visualize_point_clouds(writer, step,
+                                             Pointclouds(points=[p_pred_norm.points_list()[0]]),
+                                             Pointclouds(points=[p_gt_norm.points_list()[0]]),
+                                             Pointclouds(points=[p_pred_aligned.points_list()[0]]))
         
-        # 步骤 3: 计算最终的倒角距离
+        # 步骤 3: 计算最终的倒角距离 (batched)
+        # chamfer_distance可以处理空的点云
         loss, _ = chamfer_distance(p_pred_aligned, p_gt_norm)
         
         return loss
-    
+
     def _visualize_point_clouds(self, writer, step, p_pred_norm, p_gt_norm, p_pred_aligned):
         """
-        在TensorBoard中将多个点云合并到一个视图中进行可视化。
-        pred: 红, gt: 绿, aligned: 蓝
+        使用TensorBoard记录点云以进行可视化
+
+        Args:
+            writer: TensorBoard SummaryWriter
+            step: 当前训练步数
+            p_pred_norm: 预测点云
+            p_gt_norm: 真实点云
+            p_pred_aligned: 对齐后的预测点云
+            
+        Returns:
+            None
+
+        颜色说明：
+            - 蓝色：预测点云
+            - 绿色：真实点云
+            - 红色：对齐后的预测点云
         """
-        # 只可视化第一个batch
-        if p_pred_norm.shape[0] == 0:
+        if writer is None or step is None:
             return
         
-        # 取第一个样本并分离计算图
-        pred_points = p_pred_norm[0].detach()
-        gt_points = p_gt_norm[0].detach()
-        aligned_points = p_pred_aligned[0].detach()
-        
-        #输出shape
-        # print("pred_points shape:", pred_points.shape)
-        # print("gt_points shape:", gt_points.shape)
-        # print("aligned_points shape:", aligned_points.shape)
+        # 确保点云在CPU上并且是numpy数组
+        p_pred_norm_np = p_pred_norm.points_list()[0].detach().cpu().numpy()
+        p_gt_norm_np = p_gt_norm.points_list()[0].detach().cpu().numpy()
+        p_pred_aligned_np = p_pred_aligned.points_list()[0].detach().cpu().numpy()
 
-        # 可选：降采样
-        def _maybe_subsample(points: torch.Tensor, max_points: int = 20000) -> torch.Tensor:
-            if points.shape[0] <= max_points:
-                return points
-            idx = torch.randperm(points.shape[0])[:max_points]
-            return points[idx]
-        
-        pred_points = _maybe_subsample(pred_points)
-        gt_points = _maybe_subsample(gt_points)
-        aligned_points = _maybe_subsample(aligned_points)
-        
-        # 为不同点云创建颜色
-        pred_colors = torch.tensor([255, 0, 0], dtype=torch.uint8).expand_as(pred_points)
-        gt_colors = torch.tensor([0, 255, 0], dtype=torch.uint8).expand_as(gt_points)
-        aligned_colors = torch.tensor([0, 0, 255], dtype=torch.uint8).expand_as(aligned_points)
-        
-        # 合并顶点和颜色
-        all_vertices = torch.cat([pred_points, gt_points, aligned_points], dim=0)
-        all_colors = torch.cat([pred_colors, gt_colors, aligned_colors], dim=0)
-        
-        # 增加 batch 维度
-        all_vertices = all_vertices.unsqueeze(0)  # Shape: [1, N_total, 3]
-        all_colors = all_colors.unsqueeze(0)      # Shape: [1, N_total, 3]
-        
-        # 只调用一次 add_mesh
-        writer.add_mesh('point_clouds/comparison', vertices=all_vertices, colors=all_colors, global_step=step)
+        # 为每个点云分配颜色
+        pred_colors = np.array([[0, 0, 255]] * p_pred_norm_np.shape[0], dtype=np.uint8)
+        gt_colors = np.array([[0, 255, 0]] * p_gt_norm_np.shape[0], dtype=np.uint8)
+        aligned_colors = np.array([[255, 0, 0]] * p_pred_aligned_np.shape[0], dtype=np.uint8)
+
+        # 合并点云和颜色
+        combined_vertices = np.vstack([p_pred_norm_np, p_gt_norm_np, p_pred_aligned_np])
+        combined_colors = np.vstack([pred_colors, gt_colors, aligned_colors])
+
+        # 添加到TensorBoard
+        writer.add_mesh("Chamfer/Comparison", 
+                        vertices=combined_vertices[np.newaxis, ...], 
+                        colors=combined_colors[np.newaxis, ...], 
+                        global_step=step)
 
 class ViewpointLoss(nn.Module):
     """
     视角损失
     
-    惩罚预测出黑屏或偏离物体的相机位置。
+    惩罚预测出黑屏、内容单调或缺乏细节的相机视角。
     """ 
     
     def __init__(self,
                  black_screen_threshold: float = 0.5,
-                 low_variance_threshold: float = 0.01,
+                 low_variance_threshold: float = 0.05,
                  edge_density_threshold: float = 0.05):
         """
         初始化视角损失
         
         Args:
-            black_screen_threshold: 黑色像素占比阈值，超过此值认为是黑屏
-            low_variance_threshold: 低方差阈值，低于此值认为图像内容单调
-            edge_density_threshold: 边缘密度阈值，低于此值认为图像缺乏细节
+            black_screen_threshold: 黑色像素占比阈值，超过此值认为是黑屏。
+            low_variance_threshold: 低方差阈值，低于此值认为图像内容单调。
+            edge_density_threshold: 边缘密度阈值，低于此值认为图像缺乏细节。
         """
         super().__init__()
         self.black_screen_threshold = black_screen_threshold
         self.low_variance_threshold = low_variance_threshold
         self.edge_density_threshold = edge_density_threshold
+        
+        # 将 Sobel 算子注册为 buffer，而不是每次都重新创建。
+        # 这样它们只会被创建一次，并会自动跟随模型移动到正确的设备。
+        sobel_x_kernel = torch.tensor(
+            [[-1, 0, 1], 
+             [-2, 0, 2], 
+             [-1, 0, 1]], 
+            dtype=torch.float32
+        ).view(1, 1, 3, 3)
+        
+        sobel_y_kernel = torch.tensor(
+            [[-1, -2, -1], 
+             [0, 0, 0], 
+             [1, 2, 1]], 
+            dtype=torch.float32
+        ).view(1, 1, 3, 3)
+        
+        self.register_buffer('sobel_x', sobel_x_kernel)
+        self.register_buffer('sobel_y', sobel_y_kernel)
     
     def compute_black_screen_penalty(self, images: torch.Tensor) -> torch.Tensor:
         """
@@ -180,21 +220,17 @@ class ViewpointLoss(nn.Module):
             images: 渲染的图像 [B, 3, H, W]
             
         Returns:
-            penalty: 黑屏惩罚值
+            penalty: 黑屏惩罚值 (标量)
         """
-        # 转换为灰度图像
-        gray_images = 0.299 * images[:, 0] + 0.587 * images[:, 1] + 0.114 * images[:, 2]  # [B, H, W]
+        # 转换为灰度图像 [B, H, W]
+        gray_images = 0.299 * images[:, 0] + 0.587 * images[:, 1] + 0.114 * images[:, 2]
         
         # 计算黑色像素占比（像素值小于0.1认为是黑色）
         black_pixels = (gray_images < 0.1).float()
-        black_ratio = black_pixels.mean(dim=[1, 2])  # [B]
+        black_ratio = black_pixels.mean(dim=[1, 2])  # Shape: [B]
         
-        # 当黑色占比超过阈值时给予惩罚
-        penalty = torch.where(
-            black_ratio > self.black_screen_threshold,
-            (black_ratio - self.black_screen_threshold) * 10.0,  # 线性惩罚
-            torch.zeros_like(black_ratio)
-        )
+        # 当黑色占比超过阈值时给予线性惩罚
+        penalty = F.relu(black_ratio - self.black_screen_threshold)
         
         return penalty.mean()
     
@@ -206,20 +242,16 @@ class ViewpointLoss(nn.Module):
             images: 渲染的图像 [B, 3, H, W]
             
         Returns:
-            penalty: 低方差惩罚值
+            penalty: 低方差惩罚值 (标量)
         """
-        # 转换为灰度图像
-        gray_images = 0.299 * images[:, 0] + 0.587 * images[:, 1] + 0.114 * images[:, 2]  # [B, H, W]
+        # 转换为灰度图像 [B, H, W]
+        gray_images = 0.299 * images[:, 0] + 0.587 * images[:, 1] + 0.114 * images[:, 2]
         
-        # 计算每个图像的方差
-        variance = torch.var(gray_images.view(gray_images.shape[0], -1), dim=1)  # [B]
-        
-        # 当方差低于阈值时给予惩罚
-        penalty = torch.where(
-            variance < self.low_variance_threshold,
-            (self.low_variance_threshold - variance) * 5.0,  # 反比例惩罚
-            torch.zeros_like(variance)
-        )
+        # 计算每个图像的方差 [B]
+        variance = torch.var(gray_images.view(gray_images.shape[0], -1), dim=1)
+        print("variance:",variance)
+        # 当方差低于阈值时给予反比例惩罚
+        penalty = F.relu(self.low_variance_threshold - variance) * 10.0
         
         return penalty.mean()
     
@@ -231,26 +263,24 @@ class ViewpointLoss(nn.Module):
             images: 渲染的图像 [B, 3, H, W]
             
         Returns:
-            penalty: 边缘密度惩罚值
+            penalty: 边缘密度惩罚值 (标量)
         """
-        # 转换为灰度图像
-        gray_images = 0.299 * images[:, 0] + 0.587 * images[:, 1] + 0.114 * images[:, 2]  # [B, H, W]
+        # 转换为灰度图像 [B, 1, H, W] for conv2d
+        gray_images = (0.299 * images[:, 0] + 0.587 * images[:, 1] + 0.114 * images[:, 2]).unsqueeze(1)
         
-        # 使用Sobel算子计算边缘
-        sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32, device=images.device).view(1, 1, 3, 3)
-        sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32, device=images.device).view(1, 1, 3, 3)
-        
-        # 添加padding并计算梯度
-        gray_padded = F.pad(gray_images.unsqueeze(1), (1, 1, 1, 1), mode='reflect')
-        grad_x = F.conv2d(gray_padded, sobel_x)
-        grad_y = F.conv2d(gray_padded, sobel_y)
+        # 使用预先注册的 Sobel 算子计算梯度
+        # F.conv2d 需要 [B, C_in, H, W] 格式的输入
+        sobel_x = self.sobel_x.to(device=gray_images.device, dtype=gray_images.dtype)
+        sobel_y = self.sobel_y.to(device=gray_images.device, dtype=gray_images.dtype)
+        grad_x = F.conv2d(gray_images, sobel_x, padding='same')
+        grad_y = F.conv2d(gray_images, sobel_y, padding='same')
         
         # 计算梯度幅值
         edge_magnitude = torch.sqrt(grad_x**2 + grad_y**2)
         
         # 计算边缘密度（强边缘像素占比）
         strong_edges = (edge_magnitude > 0.1).float()
-        edge_density = strong_edges.mean(dim=[1, 2, 3])  # [B]
+        edge_density = strong_edges.mean(dim=[1, 2, 3])  # Shape: [B]
         
         # 当边缘密度低于阈值时给予惩罚
         penalty = torch.where(
@@ -269,16 +299,18 @@ class ViewpointLoss(nn.Module):
             images: 渲染的图像 [B, 3, H, W]
             
         Returns:
-            total_penalty: 总惩罚值
+            total_penalty: 总惩罚值 (标量)
         """
         black_penalty = self.compute_black_screen_penalty(images)
         variance_penalty = self.compute_low_variance_penalty(images)
         edge_penalty = self.compute_edge_density_penalty(images)
-        
+        #输出调试
+        print(f"black_penalty: {black_penalty}")
+        print(f"variance_penalty: {variance_penalty}")
+        print(f"edge_penalty: {edge_penalty}")
         total_penalty = black_penalty + variance_penalty + edge_penalty
         
         return total_penalty
-
 
 class ReconstructionLoss(nn.Module):
     """
@@ -289,7 +321,7 @@ class ReconstructionLoss(nn.Module):
     
     def __init__(self,
                  chamfer_weight: float = 1.0,
-                 confidence_weight: float = 0.01,
+                 confidence_weight: float = 0.0,
                  viewpoint_weight: float = 0.1):
         """
         初始化重建损失
@@ -312,26 +344,22 @@ class ReconstructionLoss(nn.Module):
         self,
         recon_data: Dict[str, torch.Tensor],
         combined_images_batch: torch.Tensor,
-        confidence_threshold: float = 0.5,
+        confidence_threshold: float = 50.0,
         source: Literal['vggt', 'depth'] = 'depth'
-    ) -> List[torch.Tensor]:
-        
-        # print("Shape of combined_images_batch:", combined_images_batch.shape)
+    ) -> Pointclouds:
         """
         从重建数据中为批处理中的每个项目高效地提取高置信度点云。
 
         Args:
             recon_data: 包含重建结果的字典。
             combined_images_batch: 输入图像 [B, N+1, 3, H, W]。
-            confidence_threshold: 用于筛选点的置信度阈值。
+            confidence_threshold: 置信度百分位数阈值 (0-100)，过滤掉置信度最低的百分比点。
             source: 指定点云和置信度的数据源。
                     - 'vggt': 使用 'world_points' 和 'world_points_conf'。
                     - 'depth': 使用 'world_points_from_depth' 和 'depth_conf'。
 
         Returns:
-            point_clouds_list: 一个列表，包含批处理中每个项目的点云。
-                            列表长度为B，每个元素是形状为 [Ni, 3] 的张量，
-                            其中 Ni 是第i个项目中通过阈值的点的数量。
+            point_clouds: 一个Pointclouds对象，包含批处理中每个项目的点云。
         """
         # 1. 根据 'source' 参数选择数据源
         if source == 'vggt':
@@ -349,13 +377,21 @@ class ReconstructionLoss(nn.Module):
 
         # 检查输入是否有效，如果数据为空则直接返回
         if points_data is None or conf_data is None:
-            return []
+            return Pointclouds(points=[])
 
         B, S, H, W, _ = points_data.shape
         
         with torch.no_grad():  # 掩码计算不需要梯度
-            # 2. 矢量化计算高置信度掩码 (对整个批次一次性计算)
-            high_conf_mask = conf_data > confidence_threshold  # Shape: [B, S, H, W]
+            # 2. 计算置信度百分位数阈值并生成掩码
+            if confidence_threshold == 0.0:
+                conf_threshold_value = 0.0
+            else:
+                # 将置信度数据展平并计算百分位数
+                conf_flat = conf_data.reshape(-1)
+                conf_threshold_value = torch.quantile(conf_flat, confidence_threshold / 100.0)
+            
+            # 生成高置信度掩码
+            high_conf_mask = (conf_data >= conf_threshold_value) & (conf_data > 1e-5)  # Shape: [B, S, H, W]
             
             # 3. 矢量化计算非黑色像素掩码
             if combined_images_batch is not None:
@@ -383,7 +419,7 @@ class ReconstructionLoss(nn.Module):
                 # 如果没有有效点，添加空张量
                 point_clouds_list.append(torch.empty((0, 3), device=points_data.device, dtype=points_data.dtype))
                 
-        return point_clouds_list
+        return Pointclouds(points=point_clouds_list)
     
     def forward(self, 
                recon_data: Dict[str, torch.Tensor],
@@ -406,77 +442,37 @@ class ReconstructionLoss(nn.Module):
         Returns:
             total_loss: 总损失 或 (总损失, 损失组件字典)
         """
-        total_loss = torch.tensor(0.0, device=self._get_device(recon_data))
+        device = next(iter(recon_data.values())).device if recon_data else "cpu"
+        total_loss = torch.tensor(0.0, device=device)
         loss_components = {}
-        loss_count = 0
 
         # Chamfer距离损失
-        chamfer_loss_value = torch.tensor(0.0, device=total_loss.device)
+        chamfer_loss_value = torch.tensor(0.0, device=device)
         if self.chamfer_weight > 0 and "gt_points" in gt_data:
-            # 1. 提取预测点云列表，每个元素是 [Ni, 3]
-            pred_points_list = self.extract_point_cloud_from_reconstruction(recon_data, combined_images_batch, source='depth')
-            
-            # 2. 获取真实的GT点云批处理张量，假设形状为 [B, M, 3]
+            pred_pointclouds = self.extract_point_cloud_from_reconstruction(recon_data, combined_images_batch, source='depth') # 224 效果不好
+            # pred_pointclouds = self.extract_point_cloud_from_reconstruction(recon_data, combined_images_batch, source='vggt')
+
             gt_points_batch = gt_data["gt_points"]
-            
-            # 3. 检查批处理大小是否匹配
-            if len(pred_points_list) != gt_points_batch.shape[0]:
-                print("警告: 预测点云列表的批次大小与GT点云不匹配。跳过Chamfer损失计算。")
+            gt_pointclouds = Pointclouds(points=[p for p in gt_points_batch])
+
+            if len(pred_pointclouds) != len(gt_pointclouds):
+                logging.warning("预测点云列表的批次大小与GT点云不匹配。跳过Chamfer损失计算。")
             else:
-                # 预先筛选有效的点云，避免在循环中重复检查
-                valid_indices = []
-                valid_pred_points = []
-                valid_gt_points = []
-                
-                for i in range(len(pred_points_list)):
-                    pred_pc_item = pred_points_list[i]  # 当前预测点云, shape: [Ni, 3]
-                    
-                    # 安全检查：如果过滤后没有剩下任何点，则跳过此项
-                    if pred_pc_item.shape[0] == 0:
-                        continue
-                    
-                    valid_indices.append(i)
-                    valid_pred_points.append(pred_pc_item)
-                    valid_gt_points.append(gt_points_batch[i])
-                
-                # 4. 如果有有效点云，批量计算损失
-                if len(valid_pred_points) > 0:
-                    # 使用torch.stack创建批量张量，避免循环中的unsqueeze操作
-                    # 注意：由于点云大小可能不同，我们仍需要逐个计算，但可以优化其他部分
-                    batch_chamfer_loss = torch.tensor(0.0, device=total_loss.device)
-                    
-                    for idx, (pred_pc, gt_pc) in enumerate(zip(valid_pred_points, valid_gt_points)):
-                        # 为损失函数准备输入：增加批次维度
-                        pred_pc_batched = pred_pc.unsqueeze(0)
-                        gt_pc_batched = gt_pc.unsqueeze(0)
-                        
-                        # 计算当前项的Chamfer损失
-                        # 只在第一个有效项目上进行可视化，避免过多的TensorBoard记录
-                        if idx == 0 and writer is not None and step is not None:
-                            item_loss = self.chamfer_loss(pred_pc_batched, gt_pc_batched, writer, step)
-                        else:
-                            item_loss = self.chamfer_loss(pred_pc_batched, gt_pc_batched)
-                        
-                        batch_chamfer_loss += item_loss
-                    
-                    # 计算平均损失
-                    chamfer_loss_value = batch_chamfer_loss / len(valid_pred_points)
-                    total_loss += self.chamfer_weight * chamfer_loss_value
-                    loss_count += 1
+                chamfer_loss_value = self.chamfer_loss(pred_pointclouds, gt_pointclouds, writer, step)
+                total_loss += self.chamfer_weight * chamfer_loss_value
         
         loss_components['chamfer_loss'] = chamfer_loss_value.item()
         loss_components['weighted_chamfer_loss'] = (self.chamfer_weight * chamfer_loss_value).item()
         
         # 置信度正则化
-        conf_loss_value = torch.tensor(0.0, device=total_loss.device)
+        conf_loss_value = torch.tensor(0.0, device=device)
         if self.confidence_weight > 0:
             world_points_conf = recon_data.get("world_points_conf")
             depth_conf = recon_data.get("depth_conf")
             
-            conf_loss = torch.tensor(0.0, device=total_loss.device)
+            conf_loss = torch.tensor(0.0, device=device)
             
             if world_points_conf is not None:
-                # 鼓励高置信度预测
                 conf_loss += -torch.log(world_points_conf.mean() + 1e-8)
             
             if depth_conf is not None:
@@ -484,19 +480,17 @@ class ReconstructionLoss(nn.Module):
             
             conf_loss_value = conf_loss
             total_loss += self.confidence_weight * conf_loss
-            loss_count += 1
         
         loss_components['confidence_loss'] = conf_loss_value.item()
         loss_components['weighted_confidence_loss'] = (self.confidence_weight * conf_loss_value).item()
         
         # 视角损失（惩罚黑屏和低质量视角）
-        new_images = combined_images_batch[:, -1, :, :, :]
-        viewpoint_loss_value = torch.tensor(0.0, device=total_loss.device)
-        if self.viewpoint_weight > 0 and new_images is not None:
-            viewpoint_penalty = self.viewpoint_loss(new_images)
-            viewpoint_loss_value = viewpoint_penalty
-            total_loss += self.viewpoint_weight * viewpoint_penalty
-            loss_count += 1
+        viewpoint_loss_value = torch.tensor(0.0, device=device)
+        if self.viewpoint_weight > 0 and combined_images_batch is not None:
+            new_images = combined_images_batch[:, -1, :, :, :]
+            viewpoint_loss_value = self.viewpoint_loss(new_images)
+            print("viewpoint_loss_value:",viewpoint_loss_value)
+            total_loss += self.viewpoint_weight * viewpoint_loss_value
         
         loss_components['viewpoint_loss'] = viewpoint_loss_value.item()
         loss_components['weighted_viewpoint_loss'] = (self.viewpoint_weight * viewpoint_loss_value).item()
@@ -505,10 +499,3 @@ class ReconstructionLoss(nn.Module):
         if return_components:
             return total_loss, loss_components
         return total_loss
-    
-    def _get_device(self, data_dict: Dict[str, torch.Tensor]) -> str:
-        """获取数据的设备"""
-        for v in data_dict.values():
-            if isinstance(v, torch.Tensor):
-                return v.device
-        return "cpu"

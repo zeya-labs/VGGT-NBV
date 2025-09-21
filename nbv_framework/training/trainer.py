@@ -250,13 +250,13 @@ class NBVTrainer:
             
             # 记录各个损失组件（原始值）
             self.writer.add_scalar('train/losses/chamfer_loss', loss_dict['chamfer_loss'], self.global_step)
-            # self.writer.add_scalar('train/losses/confidence_loss', loss_dict['confidence_loss'], self.global_step)
-            # self.writer.add_scalar('train/losses/viewpoint_loss', loss_dict['viewpoint_loss'], self.global_step)
+            self.writer.add_scalar('train/losses/confidence_loss', loss_dict['confidence_loss'], self.global_step)
+            self.writer.add_scalar('train/losses/viewpoint_loss', loss_dict['viewpoint_loss'], self.global_step)
             
             # 记录加权后的损失组件
-            # self.writer.add_scalar('train/weighted_losses/chamfer_loss', loss_dict['weighted_chamfer_loss'], self.global_step)
-            # self.writer.add_scalar('train/weighted_losses/confidence_loss', loss_dict['weighted_confidence_loss'], self.global_step)
-            # self.writer.add_scalar('train/weighted_losses/viewpoint_loss', loss_dict['weighted_viewpoint_loss'], self.global_step)
+            self.writer.add_scalar('train/weighted_losses/chamfer_loss', loss_dict['weighted_chamfer_loss'], self.global_step)
+            self.writer.add_scalar('train/weighted_losses/confidence_loss', loss_dict['weighted_confidence_loss'], self.global_step)
+            self.writer.add_scalar('train/weighted_losses/viewpoint_loss', loss_dict['weighted_viewpoint_loss'], self.global_step)
             self.global_step += 1
         
         return loss_dict, new_images, initial_images
