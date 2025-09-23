@@ -30,10 +30,22 @@ class BaseNBVPolicy(nn.Module):
     提供通用的功能和接口定义
     """
     
-    def __init__(self, output_mode: str = "cartesian", token_pooling_mode: str = "mean"):
+    def __init__(
+        self,
+        output_mode: str = "cartesian",
+        token_pooling_mode: str = "mean",
+        position_bounds: Optional[Tuple[float, float]] = None,
+    ):
         super().__init__()
         self.output_mode = output_mode
         self.token_pooling_mode = token_pooling_mode  # 处理[B, S, P, 2048]时的token池化方式
+        if position_bounds is None:
+            position_bounds = (-3.0,3.0)
+        if position_bounds[0] >= position_bounds[1]:
+            raise ValueError(
+                f"Invalid position_bounds: {position_bounds}. Expected (min, max) with min < max"
+            )
+        self.position_bounds = position_bounds
         
         if output_mode == "spherical":
             self.target_dim = 7  # theta, phi, radius + qx, qy, qz, qw (球面位置+四元数旋转)
@@ -94,7 +106,12 @@ class BaseNBVPolicy(nn.Module):
             
         elif self.output_mode == "position_only":
             # 仅笛卡尔位置: x, y, z (姿态将由其他方式自动确定)
-            position = nbv[:, :3]  # 直接返回位置，不做额外约束
+            lower, upper = self.position_bounds
+            # 平滑限制在[min, max]区间，避免训练过程中位置发散
+            position = torch.tanh(nbv[:, :3])
+            midpoint = (upper + lower) * 0.5
+            half_range = (upper - lower) * 0.5
+            position = position * half_range + midpoint
             return position
     
     def _initialize_weights(self):
