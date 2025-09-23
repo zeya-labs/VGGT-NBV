@@ -7,7 +7,7 @@
 
 import torch
 import torch.nn as nn
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional, List, Union
 import numpy as np
 import os
 import math
@@ -21,6 +21,7 @@ try:
         look_at_view_transform, HardPhongShader, Materials
     )
     from pytorch3d.renderer.mesh import TexturesVertex
+    from pytorch3d.renderer.mesh.utils import interpolate_face_attributes
     from pytorch3d.io import load_objs_as_meshes, load_ply
     from pytorch3d.transforms import quaternion_to_matrix
     PYTORCH3D_AVAILABLE = True
@@ -42,7 +43,7 @@ class DifferentiableRenderer(nn.Module):
     """
     
     def __init__(self, 
-                 image_size: int = 518,
+                 image_size: int = 224,
                  device: str = "cuda",
                  quality: str = "high",
                  downsample_factor: int = 2):
@@ -231,6 +232,8 @@ class DifferentiableRenderer(nn.Module):
             - cartesian格式：相机位置和朝向完全由7DOF位姿决定，四元数格式为(qx,qy,qz,qw)
             - 相机朝向完全由四元数控制
         """
+        # 确保使用 float32，避免 AMP 导致的半精度与渲染器 dtype 不匹配
+        camera_poses = camera_poses.float()
         batch_size = camera_poses.shape[0]
         
         if pose_format == "spherical":
@@ -275,7 +278,8 @@ class DifferentiableRenderer(nn.Module):
     def render_views(self, 
                     meshes: Meshes,
                     cameras: FoVPerspectiveCameras,
-                    lighting_type: str = "ambient") -> torch.Tensor:
+                    lighting_type: str = "ambient",
+                    return_point_maps: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         """
         从已匹配的批次化网格和相机中渲染视图。
         
@@ -289,97 +293,92 @@ class DifferentiableRenderer(nn.Module):
 
         Returns:
             rendered_images: 渲染的图像 [B, 3, H, W]。
+            point_maps (可选): 当 `return_point_maps=True` 时返回对应的世界坐标 [B, 3, H, W]。
+            valid_masks (可选): 对应点的有效掩码 [B, 1, H, W]。
         """
-        # 1. 初始化光照
-        self.setup_lighting(lighting_type)
-        batch_size = len(meshes)
+        # 在渲染期间禁用 AMP，强制使用 float32，避免 PyTorch3D 内部与 half 冲突
+        with torch.autocast(device_type=meshes.device.type, enabled=False):
+            # 1. 初始化光照
+            self.setup_lighting(lighting_type)
+            batch_size = len(meshes)
 
-        # 2. 一次性完成光栅化，获取整个批次的 fragments
-        _, fragments = self.renderer_with_frags(meshes, cameras=cameras)
+            # 2. 一次性完成光栅化，获取整个批次的 fragments
+            _, fragments = self.renderer_with_frags(meshes, cameras=cameras)
 
-        # 3. 向量化的光照和着色 (这部分逻辑不变)
-        image_shape = (batch_size, self.raster_settings.image_size, self.raster_settings.image_size, 4)
-        final_image = torch.zeros(image_shape, device=self.device)
+            # 3. 向量化的光照和着色 (这部分逻辑不变)
+            image_shape = (batch_size, self.raster_settings.image_size, self.raster_settings.image_size, 4)
+            final_image = torch.zeros(image_shape, device=self.device, dtype=torch.float32)
 
-        if self.light_properties:
-            for i, properties in enumerate(self.light_properties):
-                ambient_color = self.base_ambient_color if i == 0 else (0.0, 0.0, 0.0)
-                lights_pass = PointLights(
-                    device=self.device, location=[properties["location"]],
-                    ambient_color=(ambient_color,), diffuse_color=(properties["diffuse_color"],),
-                    specular_color=(properties["specular_color"],)
-                )
-                image_pass = self.shader(fragments, meshes, cameras=cameras, lights=lights_pass)
-                final_image += image_pass
-        else:
-            lights_pass = PointLights(device=self.device, ambient_color=(self.base_ambient_color,))
-            final_image = self.shader(fragments, meshes, cameras=cameras, lights=lights_pass)
+            if self.light_properties:
+                for i, properties in enumerate(self.light_properties):
+                    ambient_color = self.base_ambient_color if i == 0 else (0.0, 0.0, 0.0)
+                    lights_pass = PointLights(
+                        device=self.device, location=[properties["location"]],
+                        ambient_color=(ambient_color,), diffuse_color=(properties["diffuse_color"],),
+                        specular_color=(properties["specular_color"],)
+                    )
+                    image_pass = self.shader(fragments, meshes, cameras=cameras, lights=lights_pass)
+                    final_image += image_pass
+            else:
+                lights_pass = PointLights(device=self.device, ambient_color=(self.base_ambient_color,))
+                final_image = self.shader(fragments, meshes, cameras=cameras, lights=lights_pass)
 
-        # 4. 后处理 (这部分逻辑不变)
-        final_image = torch.clamp(final_image, 0.0, 1.0)
-        rendered_images = final_image.permute(0, 3, 1, 2)[:, :3, :, :]
+            # 4. 后处理 (这部分逻辑不变)
+            final_image = torch.clamp(final_image, 0.0, 1.0)
+            rendered_images = final_image.permute(0, 3, 1, 2)[:, :3, :, :]
 
-        if self.quality == "high" and self.render_image_size != self.image_size:
-            try:
-                rendered_images = F.interpolate(
-                    rendered_images, size=(self.image_size, self.image_size),
-                    mode='bilinear', align_corners=False, antialias=True
-                )
-            except TypeError:
-                rendered_images = F.interpolate(
-                    rendered_images, size=(self.image_size, self.image_size),
-                    mode='bilinear', align_corners=False
-                )
+            point_maps: Optional[torch.Tensor] = None
+            valid_masks: Optional[torch.Tensor] = None
+
+            if return_point_maps:
+                # 将每个像素插值得到的网格顶点位置转换为世界坐标点
+                face_vertices = meshes.verts_packed()[meshes.faces_packed()]  # (F, 3, 3)
+                interpolated = interpolate_face_attributes(
+                    fragments.pix_to_face, fragments.bary_coords, face_vertices
+                )  # (B, H, W, K, 3)
+
+                # 只保留 faces_per_pixel == 1 的第一个面
+                interpolated = interpolated[..., 0, :]
+                point_maps = interpolated.permute(0, 3, 1, 2).contiguous()  # (B, 3, H, W)
+
+                # 有效像素掩码：pix_to_face >= 0 表示命中了一张面
+                valid_masks = (fragments.pix_to_face[..., 0] >= 0).unsqueeze(1).float()
+
+            if self.quality == "high" and self.render_image_size != self.image_size:
+                try:
+                    rendered_images = F.interpolate(
+                        rendered_images, size=(self.image_size, self.image_size),
+                        mode='bilinear', align_corners=False, antialias=True
+                    )
+                except TypeError:
+                    rendered_images = F.interpolate(
+                        rendered_images, size=(self.image_size, self.image_size),
+                        mode='bilinear', align_corners=False
+                    )
+
+                if return_point_maps and point_maps is not None and valid_masks is not None:
+                    point_maps = F.interpolate(
+                        point_maps, size=(self.image_size, self.image_size),
+                        mode='bilinear', align_corners=False
+                    )
+                    valid_masks = F.interpolate(
+                        valid_masks, size=(self.image_size, self.image_size),
+                        mode='nearest'
+                    )
+
+        if return_point_maps and point_maps is not None and valid_masks is not None:
+            valid_masks = valid_masks > 0.5
+            return rendered_images, point_maps, valid_masks
 
         return rendered_images
-    
-    def normalize_mesh(self, mesh: Meshes) -> Meshes:
-        """将网格移动到原点并缩放到单位球内"""
-        verts = mesh.verts_packed()
-        center = verts.mean(0)
-        verts = verts - center
-        scale = torch.max(torch.norm(verts, p=2, dim=1))
-        verts = verts / scale
-        mesh = mesh.update_padded(verts.unsqueeze(0))
-        return mesh
-    
-    def create_mesh_from_vertices_faces(self, 
-                                      vertices: torch.Tensor,
-                                      faces: torch.Tensor,
-                                      colors: Optional[torch.Tensor] = None) -> Meshes:
-        """
-        从顶点和面创建mesh
-        
-        Args:
-            vertices: 顶点坐标 [V, 3]
-            faces: 面索引 [F, 3]
-            colors: 顶点颜色 [V, 3]，可选
-            
-        Returns:
-            mesh: PyTorch3D Meshes对象
-        """
-        if colors is None:
-            # 默认白色
-            colors = torch.ones_like(vertices, device=self.device)
-        
-        # 创建纹理
-        textures = TexturesVertex(verts_features=[colors])
-        
-        # 创建mesh
-        mesh = Meshes(
-            verts=[vertices],
-            faces=[faces],
-            textures=textures
-        ).to(self.device)
-        
-        return mesh
-    
+
     def forward(self, 
                gt_mesh: Meshes,
                camera_poses: torch.Tensor,
                pose_format: str = "cartesian",
                fov: float = 60.0,
-               lighting_type: str = "ambient") -> torch.Tensor:
+               lighting_type: str = "ambient",
+               return_point_maps: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         """
         前向传播：渲染新视图
         """
@@ -389,7 +388,13 @@ class DifferentiableRenderer(nn.Module):
             pose_format, 
             fov=fov
         )
-        
+
+        # print("camera_poses:",camera_poses)
         # 2. 调用纯粹的渲染函数
         #    这里隐含了一个假设：len(gt_mesh) == len(camera_poses)
-        return self.render_views(gt_mesh, cameras, lighting_type)
+        return self.render_views(
+            gt_mesh,
+            cameras,
+            lighting_type=lighting_type,
+            return_point_maps=return_point_maps
+        )

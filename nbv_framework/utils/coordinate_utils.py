@@ -4,6 +4,7 @@
 """
 
 import numpy as np
+import math
 from typing import Tuple
 
 
@@ -107,7 +108,9 @@ def apply_transform_to_vertices(vertices: np.ndarray, transform_matrix: np.ndarr
     return transformed_homogeneous[:, :3]
 
 
-def generate_fibonacci_sphere_points(num_points: int, radius: float = 1.0) -> Tuple[np.ndarray, np.ndarray]:
+def generate_fibonacci_sphere_points(
+    num_points: int, radius: float = 1.0
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     生成斐波那契球面分布的点
     
@@ -119,28 +122,84 @@ def generate_fibonacci_sphere_points(num_points: int, radius: float = 1.0) -> Tu
         positions: 球面上的点位置 [num_points, 3]
         directions: 从原点到各点的方向向量 [num_points, 3]
     """
+    
+    # 创建一个从 0.5 到 num_points - 0.5 的数组
+    i = np.arange(num_points, dtype=float) + 0.5
+    
+    # 黄金比例
+    golden_ratio = (1 + math.sqrt(5)) / 2
+    
+    # 计算所有点的 phi 和 theta
+    phi = np.arccos(1 - 2 * i / num_points)
+    theta = 2 * math.pi * i / golden_ratio
+    
+    # 一次性计算所有点的球面坐标
+    x = radius * np.sin(phi) * np.cos(theta)
+    y = radius * np.sin(phi) * np.sin(theta)
+    z = radius * np.cos(phi)
+    
+    # 将坐标堆叠成 [num_points, 3] 的数组
+    positions = np.stack([x, y, z], axis=-1)
+    
+    # 方向向量是位置向量的归一化
+    # 由于我们是从单位球生成的，除以半径即可
+    directions = positions / radius
+    
+    return positions, directions
+
+
+def generate_fibonacci_upper_hemisphere_points(
+    num_points: int, radius: float = 1.0, up_axis: str = "Y"
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    生成斐波那契上半球面分布的点
+    
+    Args:
+        num_points: 点的数量
+        radius: 半球半径
+        up_axis: 上朝向轴，可选 "X", "Y", "Z", "-X", "-Y", "-Z"
+        
+    Returns:
+        positions: 上半球面上的点位置 [num_points, 3]
+        directions: 从原点到各点的方向向量 [num_points, 3]
+    """
     import math
     
     positions = []
     directions = []
     
-    for i in range(num_points):
-        # 使用斐波那契球面分布
-        phi = math.acos(1 - 2 * (i + 0.5) / num_points)
-        theta = 2 * math.pi * (i + 0.5) / (1 + math.sqrt(5)) * 2
-        
-        # 计算球面坐标
-        x = radius * math.sin(phi) * math.cos(theta)
-        y = radius * math.sin(phi) * math.sin(theta)
-        z = radius * math.cos(phi)
-        
-        positions.append([x, y, z])
-        directions.append([x/radius, y/radius, z/radius])
+    i = np.arange(num_points, dtype=float) + 0.5
+    golden_ratio = (1 + math.sqrt(5)) / 2
     
-    return np.array(positions), np.array(directions)
-
-
-
-
-
-
+    # 垂直分量
+    z_coord = 1 - i / num_points
+    phi = np.arccos(z_coord)
+    
+    # 黄金螺旋角度
+    theta = 2 * math.pi * i / golden_ratio
+    
+    # 标准 Z-up 球面坐标
+    x = radius * np.sin(phi) * np.cos(theta)
+    y = radius * np.sin(phi) * np.sin(theta)
+    z = radius * z_coord
+    
+    # 根据up_axis调整坐标系
+    up = up_axis.upper()
+    if up == "Y":
+        positions = np.stack([x, z, y], axis=-1)
+    elif up == "Z":
+        positions = np.stack([x, y, z], axis=-1)
+    elif up == "X":
+        positions = np.stack([z, y, x], axis=-1)
+    elif up == "-Y":
+        positions = np.stack([x, -z, y], axis=-1)
+    elif up == "-Z":
+        positions = np.stack([x, y, -z], axis=-1)
+    elif up == "-X":
+        positions = np.stack([-z, y, x], axis=-1)
+    else: # 默认 Z 轴向上
+        positions = np.stack([x, y, z], axis=-1)
+        
+    directions = positions / radius
+    
+    return positions, directions

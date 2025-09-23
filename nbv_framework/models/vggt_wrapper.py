@@ -106,7 +106,7 @@ class VGGTWrapper(nn.Module):
         Returns:
             token_features: 对应类型的token特征
         """
-        with torch.cuda.amp.autocast(dtype=self.dtype):
+        with torch.autocast(device_type=self.device, dtype=self.dtype):
             # 确保输入有batch维度
             if len(images.shape) == 4:
                 images = images.unsqueeze(0)
@@ -150,50 +150,24 @@ class VGGTWrapper(nn.Module):
                 - depth_conf: 深度置信度 [B, S, H, W]
                 - pose_enc: 相机位姿编码 [B, S, 9]
         """
-        with torch.cuda.amp.autocast(dtype=self.dtype):
-            predictions = self.vggt_model(images)
-            
+        predictions = self.vggt_model(images)
+        
+        # print(f"Pose enc shape: {predictions['pose_enc'].shape}")
+        # 将姿态编码转换为外参和内参矩阵
 
-            # 将姿态编码转换为外参和内参矩阵
-            extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])
-            predictions["extrinsic"] = extrinsic
-            predictions["intrinsic"] = intrinsic
+        extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])
+        predictions["extrinsic"] = extrinsic
+        predictions["intrinsic"] = intrinsic
 
-            # 从深度图生成世界坐标点
-            depth_map = predictions["depth"]  # (B, S, H, W, 1)
-            world_points = unproject_depth_map_to_point_map_torch(depth_map, predictions["extrinsic"], predictions["intrinsic"])
-            predictions["world_points_from_depth"] = world_points
+        # 从深度图生成世界坐标点
+        depth_map = predictions["depth"]  # (B, S, H, W, 1)
+        # print(f"Depth map shape: {depth_map.shape}")
+        # print(f"Extrinsic shape: {predictions['extrinsic'].shape}")
+        # print(f"Intrinsic shape: {predictions['intrinsic'].shape}")
+        world_points = unproject_depth_map_to_point_map_torch(depth_map, predictions["extrinsic"], predictions["intrinsic"])
+        predictions["world_points_from_depth"] = world_points
 
-            return predictions
-    
-    def compute_reconstruction_quality(self, 
-                                     reconstruction_data: Dict[str, torch.Tensor],
-                                     gt_mesh_points: torch.Tensor = None) -> torch.Tensor:
-        """
-        计算重建质量评分
-        
-        Args:
-            reconstruction_data: 重建数据字典
-            gt_mesh_points: 真实mesh的点云 [N, 3]，可选
-            
-        Returns:
-            quality_score: 重建质量评分标量
-        """
-        # 这里实现重建质量的评估逻辑
-        # 可以基于点云密度、置信度、几何一致性等指标
-        
-        world_points = reconstruction_data["world_points"]
-        world_points_conf = reconstruction_data["world_points_conf"]
-        
-        if world_points is None or world_points_conf is None:
-            return torch.tensor(0.0, device=self.device)
-        
-        # 简单的质量评估：基于高置信度点的数量
-        # 后续可以替换为更复杂的几何质量评估
-        high_conf_mask = world_points_conf > 0.5
-        quality_score = high_conf_mask.float().mean()
-        
-        return quality_score
+        return predictions
     
     def forward(self, images: torch.Tensor, mode: str = "encode") -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
         """

@@ -6,6 +6,7 @@ NBV框架演示脚本
 
 import torch
 import torch.multiprocessing as mp
+import time
 import os
 import argparse
 import random
@@ -38,21 +39,26 @@ from nbv_framework.utils.evaluation import evaluate_nbv_policy, compare_with_bas
 
 def setup_config() -> Dict[str, Any]:
     """设置配置参数"""
+    experiment_name = "dataset-house3k"
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
     config = {
         # 模型配置
         "scene_feature_dim": 2048,
         "policy_hidden_dim": 256,
         "policy_num_layers": 3,
-        "policy_output_mode": "cartesian",
+        # "policy_output_mode": "cartesian",
+        "policy_output_mode": "position_only",
         
         # 训练配置
-        "learning_rate": 1e-4,
+        "learning_rate": 1e-3,
         "batch_size": 1,  # 根据GPU内存调整
         "num_epochs": 1000,
+        "num_samples": 20000,
         "weight_decay": 1e-5,
+        "use_amp": True,
         
         # 数据配置
-        "data_root": "./synthetic_data",
+        "synthetic_data_root": "./models/synthetic_data",
         "num_initial_views": 3,
         "image_size": 224,
         "up_axis": "Y",  # 数据集模型默认上方向 ('Y' 或 'Z')
@@ -60,13 +66,15 @@ def setup_config() -> Dict[str, Any]:
         
         # 设备配置
         "device": "cuda" if torch.cuda.is_available() else "cpu",
-        "save_dir": "./checkpoints",
         
         # 断点续训配置
         "resume_checkpoint": None,  # 指定要恢复的检查点路径
         "auto_resume": False,       # 是否自动从最新检查点恢复
-        "log_dir": "runs/nbv_experiment_house3k", # 日志目录
     }
+    
+    # 在config定义完成后设置路径相关配置，避免循环引用
+    config["save_dir"] = f"./checkpoints/{experiment_name}_bs-{config['batch_size']}_initv-{config['num_initial_views']}_pom-{config['policy_output_mode']}_{timestamp}"
+    config["log_dir"] = f"runs/{experiment_name}_bs-{config['batch_size']}_initv-{config['num_initial_views']}_pom-{config['policy_output_mode']}_{timestamp}"
     
     return config
 
@@ -76,7 +84,7 @@ def create_synthetic_data(config: Dict[str, Any]):
     print("Creating synthetic training data...")
     
     create_synthetic_training_data(
-        output_dir=config["data_root"],
+        output_dir=config["synthetic_data_root"],
         num_objects=20,  # 小规模演示
         num_views_per_object=15,
         image_size=config["image_size"],
@@ -119,7 +127,8 @@ def setup_models(config: Dict[str, Any]):
     # 4. 损失函数
     loss_fn = ReconstructionLoss(
         chamfer_weight=1.0,
-        confidence_weight=0.01
+        confidence_weight=0.01,
+        renderer=renderer
     )
     
     print("Models setup completed!")
@@ -153,6 +162,7 @@ def setup_data_loaders(config: Dict[str, Any]):
             "num_initial_views": config["num_initial_views"],
             "image_size": config["image_size"],
             "normalize_method": "quantile",
+            "num_samples": config["num_samples"],
             "split": "train",
             "max_meshes": config.get("max_meshes", 100),  # 限制总mesh数量
             "use_cache": True,
@@ -168,6 +178,7 @@ def setup_data_loaders(config: Dict[str, Any]):
             "num_initial_views": config["num_initial_views"],
             "image_size": config["image_size"],
             "normalize_method": "quantile",
+            "num_samples": config["num_samples"],
             "split": "val",
             "max_meshes": config.get("max_meshes", 100),  # 验证集使用更少的mesh
             "use_cache": True,
@@ -246,9 +257,12 @@ def train_nbv_policy(config: Dict[str, Any],
         policy_network=policy_network,
         renderer=renderer,
         loss_fn=loss_fn,
+        num_epochs=config["num_epochs"],
         learning_rate=config["learning_rate"],
+        weight_decay=config["weight_decay"],
         device=config["device"],
-        log_dir=config["log_dir"]
+        log_dir=config["log_dir"],
+        use_amp=config["use_amp"]
     )
     
     # 断点续训逻辑
@@ -281,7 +295,6 @@ def train_nbv_policy(config: Dict[str, Any],
     trainer.train(
         train_loader=train_loader,
         val_loader=val_loader,
-        num_epochs=config["num_epochs"],
         save_dir=config["save_dir"]
     )
     
@@ -298,7 +311,7 @@ def run_evaluation(config: Dict[str, Any],
     
     # 创建测试数据集
     test_dataset = SyntheticDataset(
-        data_root=config["data_root"],
+        data_root=config["synthetic_data_root"],
         num_initial_views=config["num_initial_views"],
         image_size=config["image_size"],
         split="val"  # 使用验证集作为测试集
@@ -380,7 +393,7 @@ def main():
     print(f"Max meshes: {config['max_meshes']}")
     
     # 创建合成数据（如果需要）
-    if args.create_data or not os.path.exists(config["data_root"]):
+    if args.create_data or not os.path.exists(config["synthetic_data_root"]):
         create_synthetic_data(config)
     
     # 设置模型

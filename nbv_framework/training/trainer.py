@@ -24,6 +24,7 @@ import torchvision
 from ..models import VGGTWrapper, BaseNBVPolicy
 from ..rendering import DifferentiableRenderer
 from .losses import ReconstructionLoss, ChamferDistance
+from ..utils.camera_utils import position_to_pose_tensor
 
 
 class NBVTrainer:
@@ -38,9 +39,12 @@ class NBVTrainer:
                  policy_network: BaseNBVPolicy,
                  renderer: DifferentiableRenderer,
                  loss_fn: ReconstructionLoss,
+                 num_epochs: int = 1000,
                  learning_rate: float = 1e-4,
+                 weight_decay: float = 1e-5,
                  log_dir: str = "runs/nbv_experiment",
-                 device: str = "cuda"):
+                 device: str = "cuda",
+                 use_amp: bool = True):
         """
         初始化训练器
         
@@ -50,6 +54,7 @@ class NBVTrainer:
             renderer: 可微分渲染器
             loss_fn: 重建质量损失函数
             learning_rate: 学习率
+            weight_decay: 权重衰减
             log_dir: TensorBoard日志目录
             device: 计算设备
         """
@@ -58,30 +63,38 @@ class NBVTrainer:
         self.renderer = renderer
         self.loss_fn = loss_fn
         self.device = device
+        self.num_epochs = num_epochs
+        self.log_dir = log_dir
+        self.use_amp = use_amp
         
         # 初始化TensorBoard Writer
-        self.writer = SummaryWriter(log_dir)
+        self.writer = SummaryWriter(self.log_dir)
         
         # 优化器（只优化策略网络）
         self.optimizer = optim.Adam(
             self.policy_network.parameters(),
             lr=learning_rate,
-            weight_decay=1e-5
+            weight_decay=weight_decay
         )
         
         # 学习率调度器
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, T_max=1000, eta_min=1e-6
+            self.optimizer, T_max=self.num_epochs, eta_min=1e-6
         )
         
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
         # 训练状态
         self.current_epoch = 0
         self.global_step = 0
         self.best_loss = float('inf')
+        self.val_image_step = 0
         
         # 日志
         self.setup_logging()
-        
+
+        # 标记是否已执行过一次优化器步进，用于保证scheduler.step()调用顺序
+        self._optimizer_stepped = False
+    
     def setup_logging(self):
         """设置日志"""
         logging.basicConfig(
@@ -118,58 +131,123 @@ class NBVTrainer:
         
         initial_images = batch["initial_images"]  # [B, N, 3, H, W]
         gt_mesh_data = batch["gt_mesh_data"]
-        
-        batch_size = initial_images.shape[0]
-        
-        # 步骤1: 状态编码 - VGGT提取场景特征
-        scene_features = self.vggt_wrapper.extract_scene_features(initial_images)
-        
-        # 步骤2: 动作提议 - 策略网络输出下一个相机位姿
-        next_camera_pose = self.policy_network(scene_features)
-        
-        # 步骤3: 环境交互 - 可微分渲染生成新视图
-        batched_mesh = gt_mesh_data['normalized_mesh'] # 这现在是单个批次化的 Meshes 对象
+        camera_poses_batch = batch.get("camera_poses")
 
-        # 确保整个批次化的 mesh 对象位于渲染器设备上
-        batched_mesh = batched_mesh.to(self.renderer.device)
-        new_images = self.renderer(
-            gt_mesh=batched_mesh,
-            camera_poses=next_camera_pose,
-            pose_format=self.policy_network.output_mode,
-            lighting_type="ambient"
-        )
+        if camera_poses_batch is None:
+            raise KeyError("Batch is missing 'camera_poses', which are required for correspondence-guided losses.")
 
-        # 确保与 initial_images 在同一设备
-        if new_images.device != initial_images.device:
-            new_images = new_images.to(initial_images.device)
-        
-        # 为每个batch sample添加新图像
-        combined_images_list = []
-        for i in range(batch_size):
-            # 取出当前样本的N个初始图像
-            sample_initial = initial_images[i]  # [N, 3, H, W]
-            sample_new = new_images[i:i+1]      # [1, 3, H, W]
+        device_type = self.device.split(':')[0]
+        with torch.autocast(device_type=device_type, dtype=torch.float16, enabled=self.use_amp):
+            # 步骤1: 状态编码 - VGGT提取场景特征
+            scene_features = self.vggt_wrapper.extract_scene_features(initial_images)
             
-            # 组合为N+1个图像
-            combined = torch.cat([sample_initial, sample_new], dim=0)  # [N+1, 3, H, W]
-            combined_images_list.append(combined)
-        
-        # 步骤4: 质量评估 - VGGT重建并计算质量
-        # 将每个样本的图像沿 batch 维度堆叠，得到 [B, N+1, 3, H, W]
-        combined_images_batch = torch.stack(combined_images_list, dim=0)
-        # VGGT一次性对整个batch进行重建与评估
-        recon_data = self.vggt_wrapper.reconstruct_and_evaluate(
-            combined_images_batch  # [B, N+1, 3, H, W]
-        )
-        # 计算重建质量损失：直接传入batched的 GT 数据结构（参考 datasets.py）
-        total_loss, loss_components = self.loss_fn(recon_data, gt_mesh_data, new_images, return_components=True)
+            # 步骤2: 动作提议 - 策略网络输出下一个相机位姿
+            next_camera_pose = self.policy_network(scene_features)
+            
+            # 检查输出维度，如果是[B,3]则转换为[B,7]
+            if next_camera_pose.shape[-1] == 3:
+                next_camera_pose = position_to_pose_tensor(next_camera_pose)
+            
+            # 记录位姿数据到TensorBoard
+            if self.global_step % 1 == 0:  # 每10步记录一次，避免过于频繁
+                # 记录位置信息（前3维）
+                positions = next_camera_pose[:, :3]  # [B, 3]
+                # self.writer.add_histogram('camera_pose/position_x', positions[:, 0], self.global_step)
+                # self.writer.add_histogram('camera_pose/position_y', positions[:, 1], self.global_step)
+                # self.writer.add_histogram('camera_pose/position_z', positions[:, 2], self.global_step)
+                
+                # # 记录四元数信息（后4维）
+                quaternions = next_camera_pose[:, 3:]  # [B, 4]
+                # self.writer.add_histogram('camera_pose/quaternion_x', quaternions[:, 0], self.global_step)
+                # self.writer.add_histogram('camera_pose/quaternion_y', quaternions[:, 1], self.global_step)
+                # self.writer.add_histogram('camera_pose/quaternion_z', quaternions[:, 2], self.global_step)
+                # self.writer.add_histogram('camera_pose/quaternion_w', quaternions[:, 3], self.global_step)
+                
+                # 记录位置的统计信息
+                position_norms = torch.norm(positions, dim=1)  # 计算位置向量的模长
+                self.writer.add_scalar('camera_pose/position_norm_mean', position_norms.mean(), self.global_step)
+                if position_norms.numel() > 1:  # 只有当样本数大于1时才计算标准差
+                    self.writer.add_scalar('camera_pose/position_norm_std', position_norms.std(), self.global_step)
+                
+                # 记录四元数的模长（应该接近1）
+                quaternion_norms = torch.norm(quaternions, dim=1)
+                # self.writer.add_scalar('camera_pose/quaternion_norm_mean', quaternion_norms.mean(), self.global_step)
+                if quaternion_norms.numel() > 1:  # 只有当样本数大于1时才计算标准差
+                    self.writer.add_scalar('camera_pose/quaternion_norm_std', quaternion_norms.std(), self.global_step)
+
+            # 构建包含初始视图和新视图的相机位姿列表
+            camera_poses_batch = camera_poses_batch.to(next_camera_pose.dtype)
+
+            if camera_poses_batch.dim() == 2:
+                camera_poses_batch = camera_poses_batch.unsqueeze(1)
+            combined_camera_poses = torch.cat([
+                camera_poses_batch,
+                next_camera_pose.unsqueeze(1)
+            ], dim=1)  # [B, N+1, 7]
+
+            # 步骤3: 环境交互 - 可微分渲染生成新视图
+            batched_mesh = gt_mesh_data['normalized_mesh'] # 这现在是单个批次化的 Meshes 对象
+
+            # 确保整个批次化的 mesh 对象位于渲染器设备上
+            batched_mesh = batched_mesh.to(self.renderer.device)
+            new_images = self.renderer(
+                gt_mesh=batched_mesh,
+                camera_poses=next_camera_pose,
+                # pose_format=self.policy_network.output_mode,
+                lighting_type="ambient"
+            )
+
+            # 确保与 initial_images 在同一设备
+            if new_images.device != initial_images.device:
+                new_images = new_images.to(initial_images.device)
+            
+            # 步骤4: 质量评估 - VGGT重建并计算质量
+            # 将 new_images 从 [B, 3, H, W] 扩展为 [B, 1, 3, H, W]
+            new_images_expanded = new_images.unsqueeze(1)  # [B, 1, 3, H, W]
+            
+            # 直接在第二个维度上拼接，得到 [B, N+1, 3, H, W]
+            combined_images_batch = torch.cat([initial_images, new_images_expanded], dim=1)
+            
+            # 保存N+1张图片到log_dir下的images文件夹
+            self._save_combined_images(combined_images_batch)
+            
+            # VGGT一次性对整个batch进行重建与评估
+            recon_data = self.vggt_wrapper.reconstruct_and_evaluate(
+                combined_images_batch  # [B, N+1, 3, H, W]
+            )
+            # 计算重建质量损失
+            # 在训练时传递writer和step参数以启用点云可视化
+            if backprop:
+                total_loss, loss_components = self.loss_fn(
+                    recon_data, gt_mesh_data, combined_images_batch,
+                    combined_camera_poses,
+                    return_components=True, writer=self.writer, step=self.global_step,
+                    train_flag=True
+                )
+            else:
+                total_loss, loss_components = self.loss_fn(
+                    recon_data, gt_mesh_data, combined_images_batch,
+                    combined_camera_poses,
+                    return_components=True, writer=self.writer, step=self.val_image_step,
+                    train_flag=False
+                )
         
         # 步骤5: 策略更新 - 反向传播（仅训练时）
         if backprop:
-            total_loss.backward()
+            self.scaler.scale(total_loss).backward()
+            self.scaler.unscale_(self.optimizer)
             # 梯度裁剪
             torch.nn.utils.clip_grad_norm_(self.policy_network.parameters(), max_norm=1.0)
-            self.optimizer.step()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            # 确认记录优化器已步进（某些实现可能未维护 _step_count）
+            try:
+                if hasattr(self.optimizer, "_step_count"):
+                    self.optimizer._step_count += 1
+            except Exception:
+                pass
+            # 标记：已执行过一次优化器步进
+            self._optimizer_stepped = True
         
         # 记录
         loss_dict = {
@@ -198,8 +276,7 @@ class NBVTrainer:
             self.writer.add_scalar('train/weighted_losses/chamfer_loss', loss_dict['weighted_chamfer_loss'], self.global_step)
             self.writer.add_scalar('train/weighted_losses/confidence_loss', loss_dict['weighted_confidence_loss'], self.global_step)
             self.writer.add_scalar('train/weighted_losses/viewpoint_loss', loss_dict['weighted_viewpoint_loss'], self.global_step)
-
-        self.global_step += 1
+            self.global_step += 1
         
         return loss_dict, new_images, initial_images
     
@@ -265,10 +342,11 @@ class NBVTrainer:
                 initial_images_flat = initial_images.view(b * n, c, h, w)
                 
                 initial_grid = torchvision.utils.make_grid(initial_images_flat, nrow=n)
-                self.writer.add_image('val/initial_views', initial_grid, self.global_step)
+                self.writer.add_image('val/initial_views', initial_grid, self.val_image_step)
 
                 new_grid = torchvision.utils.make_grid(new_images, nrow=1)
-                self.writer.add_image('val/next_best_view', new_grid, self.global_step)
+                self.writer.add_image('val/next_best_view', new_grid, self.val_image_step)
+                self.val_image_step += 1
 
             progress_bar.set_postfix({
                 "val_loss": f"{loss_dict['total_loss']:.4f}"
@@ -276,25 +354,24 @@ class NBVTrainer:
         
         avg_loss_dict = self._average_loss_dicts(epoch_losses)
         
-        # 记录验证损失
-        self.writer.add_scalar('val/total_loss', avg_loss_dict['total_loss'], self.global_step)
+        # 记录验证损失（以 epoch 作为 step）
+        self.writer.add_scalar('val/total_loss', avg_loss_dict['total_loss'], self.current_epoch)
         
         # 记录各个验证损失组件（原始值）
-        self.writer.add_scalar('val/losses/chamfer_loss', avg_loss_dict['chamfer_loss'], self.global_step)
-        self.writer.add_scalar('val/losses/confidence_loss', avg_loss_dict['confidence_loss'], self.global_step)
-        self.writer.add_scalar('val/losses/viewpoint_loss', avg_loss_dict['viewpoint_loss'], self.global_step)
+        self.writer.add_scalar('val/losses/chamfer_loss', avg_loss_dict['chamfer_loss'], self.current_epoch)
+        self.writer.add_scalar('val/losses/confidence_loss', avg_loss_dict['confidence_loss'], self.current_epoch)
+        self.writer.add_scalar('val/losses/viewpoint_loss', avg_loss_dict['viewpoint_loss'], self.current_epoch)
         
         # 记录加权后的验证损失组件
-        self.writer.add_scalar('val/weighted_losses/chamfer_loss', avg_loss_dict['weighted_chamfer_loss'], self.global_step)
-        self.writer.add_scalar('val/weighted_losses/confidence_loss', avg_loss_dict['weighted_confidence_loss'], self.global_step)
-        self.writer.add_scalar('val/weighted_losses/viewpoint_loss', avg_loss_dict['weighted_viewpoint_loss'], self.global_step)
+        self.writer.add_scalar('val/weighted_losses/chamfer_loss', avg_loss_dict['weighted_chamfer_loss'], self.current_epoch)
+        self.writer.add_scalar('val/weighted_losses/confidence_loss', avg_loss_dict['weighted_confidence_loss'], self.current_epoch)
+        self.writer.add_scalar('val/weighted_losses/viewpoint_loss', avg_loss_dict['weighted_viewpoint_loss'], self.current_epoch)
 
         return avg_loss_dict
     
     def train(self, 
              train_loader: DataLoader,
              val_loader: Optional[DataLoader] = None,
-             num_epochs: int = 100,
              save_dir: str = "checkpoints"):
         """
         完整训练流程
@@ -302,15 +379,14 @@ class NBVTrainer:
         Args:
             train_loader: 训练数据加载器
             val_loader: 验证数据加载器
-            num_epochs: 训练轮数
             save_dir: 模型保存目录
         """
         os.makedirs(save_dir, exist_ok=True)
         
-        self.logger.info(f"Starting training for {num_epochs} epochs")
+        self.logger.info(f"Starting training for {self.num_epochs} epochs")
         self.logger.info(f"Policy network parameters: {sum(p.numel() for p in self.policy_network.parameters())}")
         
-        for epoch in range(num_epochs):
+        for epoch in range(self.num_epochs):
             self.current_epoch = epoch
             
             # 训练
@@ -322,7 +398,14 @@ class NBVTrainer:
                 val_loss_dict = self.validate_epoch(val_loader)
             
             # 学习率调度
-            self.scheduler.step()
+            # 仅在已至少执行过一次 optimizer.step() 后再调用，以满足 PyTorch 的顺序要求
+            if getattr(self.optimizer, "_step_count", 0) > 0:
+                self.scheduler.step()
+            else:
+                self.logger.warning(
+                    "Skipping lr_scheduler.step() at epoch %d because optimizer.step() has not been called yet.",
+                    self.current_epoch,
+                )
             
             # 日志记录
             self._log_epoch_results(train_loss_dict, val_loss_dict)
@@ -407,3 +490,43 @@ class NBVTrainer:
         self.best_loss = checkpoint["best_loss"]
         
         self.logger.info(f"Checkpoint loaded: {checkpoint_path}")
+    
+    def _save_combined_images(self, combined_images_batch: torch.Tensor):
+        """
+        保存N+1张图片到log_dir下的images文件夹
+        
+        Args:
+            combined_images_batch: [B, N+1, 3, H, W] 的图片张量
+        """
+        # 创建保存图片的目录
+        images_dir = os.path.join(self.log_dir, "images")
+        os.makedirs(images_dir, exist_ok=True)
+        
+        # 创建当前步骤的子目录
+        step_dir = os.path.join(images_dir, f"step_{self.global_step:06d}")
+        os.makedirs(step_dir, exist_ok=True)
+        
+        # 将张量移到CPU并转换为numpy
+        images_cpu = combined_images_batch.detach().cpu()
+        
+        # 遍历batch中的每个样本
+        for batch_idx in range(images_cpu.shape[0]):
+            batch_dir = os.path.join(step_dir, f"batch_{batch_idx:03d}")
+            os.makedirs(batch_dir, exist_ok=True)
+            
+            # 遍历每个样本中的N+1张图片
+            for img_idx in range(images_cpu.shape[1]):
+                # 获取单张图片 [3, H, W]
+                img = images_cpu[batch_idx, img_idx]
+                
+                # 确保像素值在[0, 1]范围内
+                img = torch.clamp(img, 0, 1)
+                
+                # 保存图片
+                img_filename = f"image_{img_idx:02d}.png"
+                img_path = os.path.join(batch_dir, img_filename)
+                
+                # 使用torchvision保存图片
+                torchvision.utils.save_image(img, img_path)
+        
+        self.logger.info(f"Saved {combined_images_batch.shape[0]} batches of {combined_images_batch.shape[1]} images to {step_dir}")
