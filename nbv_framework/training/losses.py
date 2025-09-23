@@ -7,12 +7,14 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Optional, Tuple, List, Literal
+from typing import Dict, Optional, Tuple, List, Literal, TYPE_CHECKING
 import numpy as np
-from pytorch3d.ops import iterative_closest_point
 from pytorch3d.loss import chamfer_distance
 from pytorch3d.structures import Meshes, Pointclouds
 import logging
+
+if TYPE_CHECKING:
+    from ..rendering import DifferentiableRenderer
 
 
 class ChamferDistance(nn.Module):
@@ -20,13 +22,11 @@ class ChamferDistance(nn.Module):
     一个计算对齐后倒角距离的模块，提供了多种鲁棒的归一化方法来对抗离群点。
     """
     def __init__(self, 
-                 icp_iterations: int = 100,
                  normalization_method: str = 'quantile'):
         """
         初始化模块。
         
         Args:
-            icp_iterations (int): ICP算法的迭代次数。
             normalization_method (str): 使用的归一化方法。
                 - 'max': 按最大距离归一化 (对离群点敏感)。
                 - 'std': 按标准差/RMS距离归一化 (鲁棒)。
@@ -35,99 +35,130 @@ class ChamferDistance(nn.Module):
         super().__init__()
         if normalization_method not in ['max', 'std', 'quantile']:
             raise ValueError(f"未知的归一化方法: {normalization_method}")
-            
-        self.icp_iterations = icp_iterations
         self.normalization_method = normalization_method
 
-    def _normalize_point_clouds(self, p_clouds: Pointclouds) -> Pointclouds:
-        """
-        根据选定的方法，将一批点云归一化。
-        """
-        points_list = p_clouds.points_list()
-        if not points_list:
-            return p_clouds
+    def _umeyama_alignment(self, source: torch.Tensor, target: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """估计从 source 到 target 的相似变换。"""
+        device = source.device
+        dtype = source.dtype
 
-        normalized_points_list = []
-        for p_cloud in points_list:
-            if p_cloud.shape[0] == 0:
-                normalized_points_list.append(p_cloud)
-                continue
+        if source.ndim != 2 or target.ndim != 2:
+            raise ValueError("source and target must be rank-2 tensors shaped [N, 3].")
+        if source.shape[0] != target.shape[0]:
+            raise ValueError(
+                f"source and target must contain the same number of points; got {source.shape[0]} and {target.shape[0]}."
+            )
 
-            p_cloud_float = p_cloud.float()
-            
-            # 1. 平移到原点
-            centroid = torch.mean(p_cloud_float, dim=0, keepdim=True)
-            p_cloud_centered = p_cloud_float - centroid
-            
-            # 2. 根据选定的方法计算缩放因子并缩放
-            distances = torch.norm(p_cloud_centered, p=2, dim=1)
-            if distances.shape[0] == 0:
-                scale = torch.tensor(1.0, device=distances.device)
-            elif self.normalization_method == 'max':
-                scale = torch.max(distances)
-            elif self.normalization_method == 'std':
-                scale = torch.sqrt(torch.mean(distances**2))
-            elif self.normalization_method == 'quantile':
-                scale = torch.quantile(distances, q=0.95)
-            
-            p_cloud_normalized = p_cloud_centered / (scale + 1e-8)
-            normalized_points_list.append(p_cloud_normalized)
-        
-        return Pointclouds(points=normalized_points_list)
+        n_points = source.shape[0]
 
-    def forward(self, p_pred: Pointclouds, p_gt: Pointclouds, writer=None, step=None) -> torch.Tensor:
+        if n_points < 3 or target.shape[0] < 3:
+            rotation = torch.eye(3, device=device, dtype=dtype)
+            translation = torch.zeros(3, device=device, dtype=dtype)
+            scale = torch.tensor(1.0, device=device, dtype=dtype)
+            return scale, rotation, translation
+
+        # 使用双精度进行SVD以提升稳定性，但保持结果在输入dtype
+        source64 = source.to(dtype=torch.float64)
+        target64 = target.to(dtype=torch.float64)
+
+        mu_x = source64.mean(dim=0)
+        mu_y = target64.mean(dim=0)
+        X = source64 - mu_x
+        Y = target64 - mu_y
+
+        # Umeyama 协方差矩阵定义为 Y^T @ X / N，其中 Y 为 target
+        cov = (Y.T @ X) / n_points
+
+        U, S, Vh = torch.linalg.svd(cov)
+
+        d = torch.ones(3, device=device, dtype=torch.float64)
+        if torch.det(U @ Vh) < 0:
+            d[-1] = -1
+
+        D = torch.diag(d)
+        rotation = U @ D @ Vh
+
+        var_x = torch.clamp((X ** 2).sum() / n_points, min=1e-8)
+        scale = torch.sum(S * d) / var_x
+
+        translation = mu_y - scale * (rotation @ mu_x)
+
+        return (scale.to(dtype=dtype),
+                rotation.to(dtype=dtype),
+                translation.to(dtype=dtype))
+
+    @staticmethod
+    def _apply_similarity_transform(points: torch.Tensor,
+                                     scale: torch.Tensor,
+                                     rotation: torch.Tensor,
+                                     translation: torch.Tensor) -> torch.Tensor:
+        if points.numel() == 0:
+            return points
+        return scale * (points @ rotation.transpose(0, 1)) + translation
+
+    def forward(self,
+                p_pred: Pointclouds,
+                p_gt: Pointclouds,
+                correspondence_points: Optional[List[torch.Tensor]] = None,
+                writer=None,
+                step=None) -> torch.Tensor:
         """
         计算对齐后的倒角距离。
-        
-        Args:
-            p_pred: 预测点云 (Pointclouds object)
-            p_gt: 真实点云 (Pointclouds object)
-            writer: TensorBoard SummaryWriter for visualization.
-            step: Current training step.
-        """
-        # 步骤 1: 归一化两个点云
-        p_pred_norm = self._normalize_point_clouds(p_pred)
-        p_gt_norm = self._normalize_point_clouds(p_gt)
-        
-        # 步骤 2: 使用ICP将预测点云对齐到GT点云
-        # ICP在pytorch3d中不支持不同点数的批处理，所以我们仍然需要一个循环。
-        aligned_points_list = []
-        with torch.no_grad():
-            with torch.autocast(device_type=p_pred.device.type, enabled=False):
-                X_list = [p.to(dtype=torch.float32) for p in p_pred_norm.points_list()]
-                Y_list = [p.to(dtype=torch.float32) for p in p_gt_norm.points_list()]
 
-                for X, Y in zip(X_list, Y_list):
-                    if X.shape[0] == 0 or Y.shape[0] == 0:
-                        aligned_points_list.append(X) # Append original (empty) points
-                        continue
-                    
-                    icp_result = iterative_closest_point(
-                        X=X.unsqueeze(0),
-                        Y=Y.unsqueeze(0),
-                        max_iterations=self.icp_iterations
-                    )
-                    aligned_points_list.append(icp_result.Xt.squeeze(0))
+        Args:
+            p_pred: 预测点云。
+            p_gt: 真实点云。
+            correspondence_points: 与预测点一一对应的GT点列表。
+        """
+        if correspondence_points is None:
+            raise ValueError("correspondence_points must be provided for Umeyama alignment.")
+
+        pred_list = [p.to(dtype=torch.float32) for p in p_pred.points_list()]
+        gt_list = [p.to(dtype=torch.float32) for p in p_gt.points_list()]
+        corr_list = [cp.to(dtype=torch.float32) for cp in correspondence_points]
+
+        aligned_points_list: List[torch.Tensor] = []
+
+        for pred_points, corr_points in zip(pred_list, corr_list):
+            with torch.autocast(device_type=pred_points.device.type, enabled=False):
+                pred_points_f32 = pred_points.float()
+                corr_points_f32 = corr_points.float()
+
+                if corr_points_f32.numel() >= 3 and pred_points_f32.numel() >= 3:
+                    scale, rotation, translation = self._umeyama_alignment(pred_points_f32, corr_points_f32)
+                    aligned = self._apply_similarity_transform(pred_points_f32, scale, rotation, translation)
+                else:
+                    aligned = pred_points_f32
+            aligned_points_list.append(aligned)
 
         p_pred_aligned = Pointclouds(points=aligned_points_list)
 
-        # 可视化
+        # GT 点云只需转为32位即可
+        p_gt_float = Pointclouds(points=gt_list)
+
         if writer is not None and step is not None:
-            # We need to be careful about batching here.
-            # Let's visualize the first element of the batch.
-            if len(p_pred_norm.points_list()) > 0 and len(p_gt_norm.points_list()) > 0 and len(p_pred_aligned.points_list()) > 0:
-                self._visualize_point_clouds(writer, step,
-                                             Pointclouds(points=[p_pred_norm.points_list()[0]]),
-                                             Pointclouds(points=[p_gt_norm.points_list()[0]]),
-                                             Pointclouds(points=[p_pred_aligned.points_list()[0]]))
-        
-        # 步骤 3: 计算最终的倒角距离 (batched)
-        # chamfer_distance可以处理空的点云
-        loss, _ = chamfer_distance(p_pred_aligned, p_gt_norm)
-        
+            if len(aligned_points_list) > 0 and len(gt_list) > 0:
+                correspondence_cloud = Pointclouds(points=[corr_list[0]]) if len(corr_list) > 0 else None
+                self._visualize_point_clouds(
+                    writer,
+                    step,
+                    Pointclouds(points=[pred_list[0]]),
+                    Pointclouds(points=[gt_list[0]]),
+                    Pointclouds(points=[aligned_points_list[0]]),
+                    correspondence_cloud
+                )
+
+        loss, _ = chamfer_distance(p_pred_aligned, p_gt_float)
+
         return loss
 
-    def _visualize_point_clouds(self, writer, step, p_pred_norm, p_gt_norm, p_pred_aligned):
+    def _visualize_point_clouds(self,
+                                writer,
+                                step,
+                                p_pred_norm,
+                                p_gt_norm,
+                                p_pred_aligned,
+                                p_corr_subset: Optional[Pointclouds] = None):
         """
         使用TensorBoard记录点云以进行可视化
 
@@ -137,6 +168,7 @@ class ChamferDistance(nn.Module):
             p_pred_norm: 预测点云
             p_gt_norm: 真实点云
             p_pred_aligned: 对齐后的预测点云
+            p_corr_subset: 用于对齐的对应点子集
             
         Returns:
             None
@@ -145,6 +177,7 @@ class ChamferDistance(nn.Module):
             - 蓝色：预测点云
             - 绿色：真实点云
             - 红色：对齐后的预测点云
+            - 黄色：Umeyama 对齐使用的对应点
         """
         if writer is None or step is None:
             return
@@ -154,14 +187,33 @@ class ChamferDistance(nn.Module):
         p_gt_norm_np = p_gt_norm.points_list()[0].detach().cpu().numpy()
         p_pred_aligned_np = p_pred_aligned.points_list()[0].detach().cpu().numpy()
 
-        # 为每个点云分配颜色
-        pred_colors = np.array([[0, 0, 255]] * p_pred_norm_np.shape[0], dtype=np.uint8)
-        gt_colors = np.array([[0, 255, 0]] * p_gt_norm_np.shape[0], dtype=np.uint8)
-        aligned_colors = np.array([[255, 0, 0]] * p_pred_aligned_np.shape[0], dtype=np.uint8)
+        clouds_with_colors = [
+            (p_pred_norm_np, np.array([0, 0, 255], dtype=np.uint8)),
+            (p_gt_norm_np, np.array([0, 255, 0], dtype=np.uint8)),
+            (p_pred_aligned_np, np.array([255, 0, 0], dtype=np.uint8)),
+        ]
+
+        if p_corr_subset is not None and len(p_corr_subset.points_list()) > 0:
+            corr_np = p_corr_subset.points_list()[0].detach().cpu().numpy()
+            if corr_np.size > 0:
+                clouds_with_colors.append((corr_np, np.array([255, 255, 0], dtype=np.uint8)))
+
+        vertices_list = []
+        colors_list = []
+        for points_np, color in clouds_with_colors:
+            if points_np.ndim != 2 or points_np.shape[1] != 3:
+                continue
+            if points_np.shape[0] == 0:
+                continue
+            vertices_list.append(points_np)
+            colors_list.append(np.repeat(color[np.newaxis, :], points_np.shape[0], axis=0))
+
+        if not vertices_list:
+            return
 
         # 合并点云和颜色
-        combined_vertices = np.vstack([p_pred_norm_np, p_gt_norm_np, p_pred_aligned_np])
-        combined_colors = np.vstack([pred_colors, gt_colors, aligned_colors])
+        combined_vertices = np.vstack(vertices_list)
+        combined_colors = np.vstack(colors_list)
 
         # 添加到TensorBoard
         writer.add_mesh("Chamfer/Comparison", 
@@ -249,7 +301,7 @@ class ViewpointLoss(nn.Module):
         
         # 计算每个图像的方差 [B]
         variance = torch.var(gray_images.view(gray_images.shape[0], -1), dim=1)
-        print("variance:",variance)
+        # print("variance:",variance)
         # 当方差低于阈值时给予反比例惩罚
         penalty = F.relu(self.low_variance_threshold - variance) * 10.0
         
@@ -305,9 +357,9 @@ class ViewpointLoss(nn.Module):
         variance_penalty = self.compute_low_variance_penalty(images)
         edge_penalty = self.compute_edge_density_penalty(images)
         #输出调试
-        print(f"black_penalty: {black_penalty}")
-        print(f"variance_penalty: {variance_penalty}")
-        print(f"edge_penalty: {edge_penalty}")
+        # print(f"black_penalty: {black_penalty}")
+        # print(f"variance_penalty: {variance_penalty}")
+        # print(f"edge_penalty: {edge_penalty}")
         total_penalty = black_penalty + variance_penalty + edge_penalty
         
         return total_penalty
@@ -322,7 +374,9 @@ class ReconstructionLoss(nn.Module):
     def __init__(self,
                  chamfer_weight: float = 1.0,
                  confidence_weight: float = 0.0,
-                 viewpoint_weight: float = 0.1):
+                 viewpoint_weight: float = 0.1,
+                 renderer: Optional["DifferentiableRenderer"] = None,
+                 gt_lighting_type: str = "ambient"):
         """
         初始化重建损失
         
@@ -336,17 +390,126 @@ class ReconstructionLoss(nn.Module):
         self.chamfer_weight = chamfer_weight
         self.confidence_weight = confidence_weight
         self.viewpoint_weight = viewpoint_weight
+        self.renderer = renderer
+        self.gt_lighting_type = gt_lighting_type
+        self.train_flag = None
         
         self.chamfer_loss = ChamferDistance()
         self.viewpoint_loss = ViewpointLoss()
-    
+
+    def _render_gt_point_maps(
+        self,
+        mesh_batch: Meshes,
+        camera_poses: torch.Tensor,
+        writer=None,
+        step: Optional[int] = None,
+        log_prefix: str = "GTPointMaps"
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """使用可微分渲染器生成GT点映射及有效掩码，并可选记录可视化。"""
+        if self.renderer is None:
+            raise RuntimeError("Renderer is required to derive ground-truth point correspondences.")
+
+        if camera_poses is None:
+            raise ValueError("camera_poses must be provided when computing Chamfer loss.")
+
+        batch_size = len(mesh_batch)
+        if camera_poses.dim() == 2:
+            camera_poses = camera_poses.unsqueeze(1)
+
+        point_maps_list: List[torch.Tensor] = []
+        valid_masks_list: List[torch.Tensor] = []
+
+        mesh_device = self.renderer.device
+        with torch.no_grad():
+            for i in range(batch_size):
+                poses_i = camera_poses[i]
+                if poses_i.numel() == 0:
+                    raise ValueError("camera_poses contains empty view set, cannot compute correspondences.")
+
+                poses_i = poses_i.to(mesh_device).float()
+                mesh_i = mesh_batch[i].to(mesh_device)
+                mesh_i = mesh_i.extend(poses_i.shape[0])
+                render_out = self.renderer(
+                    gt_mesh=mesh_i,
+                    camera_poses=poses_i,
+                    lighting_type=self.gt_lighting_type,
+                    return_point_maps=True
+                )
+
+                if not isinstance(render_out, tuple) or len(render_out) != 3:
+                    raise RuntimeError("Renderer did not return point maps as expected.")
+
+                _, point_maps, valid_masks = render_out
+
+                if writer is not None and step is not None and self.train_flag:
+                    self._log_gt_point_map_tensors(
+                        writer=writer,
+                        step=step,
+                        batch_index=i,
+                        point_maps=point_maps,
+                        valid_masks=valid_masks,
+                        prefix=log_prefix
+                    )
+
+                point_maps = point_maps.permute(0, 2, 3, 1).contiguous()  # [S, H, W, 3]
+                valid_masks = valid_masks.squeeze(1).contiguous()         # [S, H, W]
+
+                point_maps_list.append(point_maps)
+                valid_masks_list.append(valid_masks)
+
+        point_maps_batch = torch.stack(point_maps_list, dim=0)  # [B, S, H, W, 3]
+        valid_masks_batch = torch.stack(valid_masks_list, dim=0)  # [B, S, H, W]
+
+        return point_maps_batch, valid_masks_batch
+
+    @staticmethod
+    def _log_gt_point_map_tensors(
+        writer,
+        step: int,
+        batch_index: int,
+        point_maps: torch.Tensor,
+        valid_masks: torch.Tensor,
+        prefix: str
+    ) -> None:
+        """将GT点映射与有效掩码逐视角写入TensorBoard便于排查。"""
+        if point_maps.ndim != 4 or valid_masks.ndim != 4:
+            return
+
+        point_maps_cpu = point_maps.detach().float().cpu()  # [S, 3, H, W]
+        valid_masks_cpu = valid_masks.detach().float().cpu()  # [S, 1, H, W]
+
+        num_views = point_maps_cpu.shape[0]
+
+        for view_idx in range(num_views):
+            pm = point_maps_cpu[view_idx]# [3, H, W]
+            mask = valid_masks_cpu[view_idx]
+
+            pm_flat = pm.view(3, -1) 
+            coord_min = pm_flat.min(dim=1).values.view(3, 1, 1)
+            coord_max = pm_flat.max(dim=1).values.view(3, 1, 1)
+            denom = (coord_max - coord_min).clamp_min(1e-6)
+            pm_norm = (pm - coord_min) / denom
+
+            writer.add_image(
+                f"{prefix}/point_map_batch{batch_index}_view{view_idx}",
+                pm_norm,
+                global_step=step
+            )
+
+            writer.add_image(
+                f"{prefix}/valid_mask_batch{batch_index}_view{view_idx}",
+                mask,
+                global_step=step
+            )
+
     def extract_point_cloud_from_reconstruction(
         self,
         recon_data: Dict[str, torch.Tensor],
         combined_images_batch: torch.Tensor,
         confidence_threshold: float = 50.0,
-        source: Literal['vggt', 'depth'] = 'depth'
-    ) -> Pointclouds:
+        source: Literal['vggt', 'depth'] = 'depth',
+        gt_valid_masks: Optional[torch.Tensor] = None,
+    ) -> Tuple[Pointclouds, torch.Tensor]:
         """
         从重建数据中为批处理中的每个项目高效地提取高置信度点云。
 
@@ -397,17 +560,25 @@ class ReconstructionLoss(nn.Module):
             if combined_images_batch is not None:
                 # 计算所有像素的平均强度
                 pixel_intensity = combined_images_batch.mean(dim=2)  # Shape: [B, S, H, W]
-                
+
                 # 定义黑色像素阈值
                 black_threshold = 0.05
                 non_black_mask = pixel_intensity > black_threshold  # Shape: [B, S, H, W]
-                
+
                 # 合并两个掩码
                 combined_mask = high_conf_mask & non_black_mask
             else:
                 # 如果没有提供图像，只使用置信度掩码
                 combined_mask = high_conf_mask
-        
+
+            if gt_valid_masks is not None:
+                # 确保形状匹配 [B, S, H, W]
+                if gt_valid_masks.shape != combined_mask.shape:
+                    raise ValueError(
+                        f"gt_valid_masks shape {gt_valid_masks.shape} does not match combined mask shape {combined_mask.shape}"
+                    )
+                combined_mask = combined_mask & gt_valid_masks
+
         # 4. 应用掩码并生成结果列表
         point_clouds_list = []
         for i in range(B):
@@ -419,15 +590,17 @@ class ReconstructionLoss(nn.Module):
                 # 如果没有有效点，添加空张量
                 point_clouds_list.append(torch.empty((0, 3), device=points_data.device, dtype=points_data.dtype))
                 
-        return Pointclouds(points=point_clouds_list)
+        return Pointclouds(points=point_clouds_list), combined_mask
     
     def forward(self, 
                recon_data: Dict[str, torch.Tensor],
                gt_data: Dict[str, torch.Tensor],
                combined_images_batch: Optional[torch.Tensor],
+               combined_camera_poses: Optional[torch.Tensor],
                return_components: bool = False,
                writer=None,
-               step=None) -> torch.Tensor:
+               step=None,
+               train_flag: bool = False) -> torch.Tensor:
         """
         计算综合重建损失
         
@@ -442,6 +615,8 @@ class ReconstructionLoss(nn.Module):
         Returns:
             total_loss: 总损失 或 (总损失, 损失组件字典)
         """
+        self.train_flag = train_flag
+
         device = next(iter(recon_data.values())).device if recon_data else "cpu"
         total_loss = torch.tensor(0.0, device=device)
         loss_components = {}
@@ -449,16 +624,62 @@ class ReconstructionLoss(nn.Module):
         # Chamfer距离损失
         chamfer_loss_value = torch.tensor(0.0, device=device)
         if self.chamfer_weight > 0 and "gt_points" in gt_data:
-            pred_pointclouds = self.extract_point_cloud_from_reconstruction(recon_data, combined_images_batch, source='depth') # 224 效果不好
+            if combined_camera_poses is None:
+                raise ValueError("combined_camera_poses must be provided when Chamfer loss is enabled.")
+
+            normalized_mesh = gt_data.get('normalized_mesh')
+            if normalized_mesh is None:
+                raise KeyError("gt_mesh_data must contain 'normalized_mesh' for Chamfer loss computation.")
+
+            gt_point_maps, gt_valid_masks = self._render_gt_point_maps(
+                normalized_mesh,
+                combined_camera_poses,
+                writer=writer,
+                step=step
+            )
+
+            sample_tensor = None
+            for value in recon_data.values():
+                if isinstance(value, torch.Tensor):
+                    sample_tensor = value
+                    break
+            if sample_tensor is None:
+                raise ValueError("recon_data must contain tensor values for device inference.")
+
+            target_device = sample_tensor.device
+            gt_point_maps = gt_point_maps.to(device=target_device, dtype=torch.float32)
+            gt_valid_masks = gt_valid_masks.to(device=target_device)
+
+            pred_pointclouds, correspondence_mask = self.extract_point_cloud_from_reconstruction(
+                recon_data,
+                combined_images_batch,
+                source='vggt',
+                gt_valid_masks=gt_valid_masks
+            )
             # pred_pointclouds = self.extract_point_cloud_from_reconstruction(recon_data, combined_images_batch, source='vggt')
 
             gt_points_batch = gt_data["gt_points"]
             gt_pointclouds = Pointclouds(points=[p for p in gt_points_batch])
 
+            correspondence_points: List[torch.Tensor] = []
+            for i in range(correspondence_mask.shape[0]):
+                mask_i = correspondence_mask[i]
+                if mask_i.any():
+                    gt_points_i = gt_point_maps[i][mask_i]
+                else:
+                    gt_points_i = torch.empty((0, 3), device=gt_point_maps.device, dtype=gt_point_maps.dtype)
+                correspondence_points.append(gt_points_i)
+
             if len(pred_pointclouds) != len(gt_pointclouds):
                 logging.warning("预测点云列表的批次大小与GT点云不匹配。跳过Chamfer损失计算。")
             else:
-                chamfer_loss_value = self.chamfer_loss(pred_pointclouds, gt_pointclouds, writer, step)
+                chamfer_loss_value = self.chamfer_loss(
+                    pred_pointclouds,
+                    gt_pointclouds,
+                    correspondence_points=correspondence_points,
+                    writer=writer,
+                    step=step
+                )
                 total_loss += self.chamfer_weight * chamfer_loss_value
         
         loss_components['chamfer_loss'] = chamfer_loss_value.item()
@@ -489,7 +710,7 @@ class ReconstructionLoss(nn.Module):
         if self.viewpoint_weight > 0 and combined_images_batch is not None:
             new_images = combined_images_batch[:, -1, :, :, :]
             viewpoint_loss_value = self.viewpoint_loss(new_images)
-            print("viewpoint_loss_value:",viewpoint_loss_value)
+            # print("viewpoint_loss_value:",viewpoint_loss_value)
             total_loss += self.viewpoint_weight * viewpoint_loss_value
         
         loss_components['viewpoint_loss'] = viewpoint_loss_value.item()

@@ -152,7 +152,7 @@ class VGGTWrapper(nn.Module):
         """
         predictions = self.vggt_model(images)
         
-        print(f"Pose enc shape: {predictions['pose_enc'].shape}")
+        # print(f"Pose enc shape: {predictions['pose_enc'].shape}")
         # 将姿态编码转换为外参和内参矩阵
 
         extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])
@@ -161,9 +161,9 @@ class VGGTWrapper(nn.Module):
 
         # 从深度图生成世界坐标点
         depth_map = predictions["depth"]  # (B, S, H, W, 1)
-        print(f"Depth map shape: {depth_map.shape}")
-        print(f"Extrinsic shape: {predictions['extrinsic'].shape}")
-        print(f"Intrinsic shape: {predictions['intrinsic'].shape}")
+        # print(f"Depth map shape: {depth_map.shape}")
+        # print(f"Extrinsic shape: {predictions['extrinsic'].shape}")
+        # print(f"Intrinsic shape: {predictions['intrinsic'].shape}")
         world_points = unproject_depth_map_to_point_map_torch(depth_map, predictions["extrinsic"], predictions["intrinsic"])
         predictions["world_points_from_depth"] = world_points
 

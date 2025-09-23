@@ -131,6 +131,10 @@ class NBVTrainer:
         
         initial_images = batch["initial_images"]  # [B, N, 3, H, W]
         gt_mesh_data = batch["gt_mesh_data"]
+        camera_poses_batch = batch.get("camera_poses")
+
+        if camera_poses_batch is None:
+            raise KeyError("Batch is missing 'camera_poses', which are required for correspondence-guided losses.")
 
         device_type = self.device.split(':')[0]
         with torch.autocast(device_type=device_type, dtype=torch.float16, enabled=self.use_amp):
@@ -171,6 +175,16 @@ class NBVTrainer:
                 if quaternion_norms.numel() > 1:  # 只有当样本数大于1时才计算标准差
                     self.writer.add_scalar('camera_pose/quaternion_norm_std', quaternion_norms.std(), self.global_step)
 
+            # 构建包含初始视图和新视图的相机位姿列表
+            camera_poses_batch = camera_poses_batch.to(next_camera_pose.dtype)
+
+            if camera_poses_batch.dim() == 2:
+                camera_poses_batch = camera_poses_batch.unsqueeze(1)
+            combined_camera_poses = torch.cat([
+                camera_poses_batch,
+                next_camera_pose.unsqueeze(1)
+            ], dim=1)  # [B, N+1, 7]
+
             # 步骤3: 环境交互 - 可微分渲染生成新视图
             batched_mesh = gt_mesh_data['normalized_mesh'] # 这现在是单个批次化的 Meshes 对象
 
@@ -205,12 +219,17 @@ class NBVTrainer:
             # 在训练时传递writer和step参数以启用点云可视化
             if backprop:
                 total_loss, loss_components = self.loss_fn(
-                    recon_data, gt_mesh_data, combined_images_batch, 
-                    return_components=True, writer=self.writer, step=self.global_step
+                    recon_data, gt_mesh_data, combined_images_batch,
+                    combined_camera_poses,
+                    return_components=True, writer=self.writer, step=self.global_step,
+                    train_flag=True
                 )
             else:
                 total_loss, loss_components = self.loss_fn(
-                    recon_data, gt_mesh_data, combined_images_batch, return_components=True, writer=self.writer, step=self.val_image_step
+                    recon_data, gt_mesh_data, combined_images_batch,
+                    combined_camera_poses,
+                    return_components=True, writer=self.writer, step=self.val_image_step,
+                    train_flag=False
                 )
         
         # 步骤5: 策略更新 - 反向传播（仅训练时）

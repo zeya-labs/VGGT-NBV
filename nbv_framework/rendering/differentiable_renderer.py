@@ -7,7 +7,7 @@
 
 import torch
 import torch.nn as nn
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional, List, Union
 import numpy as np
 import os
 import math
@@ -21,6 +21,7 @@ try:
         look_at_view_transform, HardPhongShader, Materials
     )
     from pytorch3d.renderer.mesh import TexturesVertex
+    from pytorch3d.renderer.mesh.utils import interpolate_face_attributes
     from pytorch3d.io import load_objs_as_meshes, load_ply
     from pytorch3d.transforms import quaternion_to_matrix
     PYTORCH3D_AVAILABLE = True
@@ -42,7 +43,7 @@ class DifferentiableRenderer(nn.Module):
     """
     
     def __init__(self, 
-                 image_size: int = 518,
+                 image_size: int = 224,
                  device: str = "cuda",
                  quality: str = "high",
                  downsample_factor: int = 2):
@@ -277,7 +278,8 @@ class DifferentiableRenderer(nn.Module):
     def render_views(self, 
                     meshes: Meshes,
                     cameras: FoVPerspectiveCameras,
-                    lighting_type: str = "ambient") -> torch.Tensor:
+                    lighting_type: str = "ambient",
+                    return_point_maps: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         """
         从已匹配的批次化网格和相机中渲染视图。
         
@@ -291,6 +293,8 @@ class DifferentiableRenderer(nn.Module):
 
         Returns:
             rendered_images: 渲染的图像 [B, 3, H, W]。
+            point_maps (可选): 当 `return_point_maps=True` 时返回对应的世界坐标 [B, 3, H, W]。
+            valid_masks (可选): 对应点的有效掩码 [B, 1, H, W]。
         """
         # 在渲染期间禁用 AMP，强制使用 float32，避免 PyTorch3D 内部与 half 冲突
         with torch.autocast(device_type=meshes.device.type, enabled=False):
@@ -323,6 +327,23 @@ class DifferentiableRenderer(nn.Module):
             final_image = torch.clamp(final_image, 0.0, 1.0)
             rendered_images = final_image.permute(0, 3, 1, 2)[:, :3, :, :]
 
+            point_maps: Optional[torch.Tensor] = None
+            valid_masks: Optional[torch.Tensor] = None
+
+            if return_point_maps:
+                # 将每个像素插值得到的网格顶点位置转换为世界坐标点
+                face_vertices = meshes.verts_packed()[meshes.faces_packed()]  # (F, 3, 3)
+                interpolated = interpolate_face_attributes(
+                    fragments.pix_to_face, fragments.bary_coords, face_vertices
+                )  # (B, H, W, K, 3)
+
+                # 只保留 faces_per_pixel == 1 的第一个面
+                interpolated = interpolated[..., 0, :]
+                point_maps = interpolated.permute(0, 3, 1, 2).contiguous()  # (B, 3, H, W)
+
+                # 有效像素掩码：pix_to_face >= 0 表示命中了一张面
+                valid_masks = (fragments.pix_to_face[..., 0] >= 0).unsqueeze(1).float()
+
             if self.quality == "high" and self.render_image_size != self.image_size:
                 try:
                     rendered_images = F.interpolate(
@@ -335,14 +356,29 @@ class DifferentiableRenderer(nn.Module):
                         mode='bilinear', align_corners=False
                     )
 
+                if return_point_maps and point_maps is not None and valid_masks is not None:
+                    point_maps = F.interpolate(
+                        point_maps, size=(self.image_size, self.image_size),
+                        mode='bilinear', align_corners=False
+                    )
+                    valid_masks = F.interpolate(
+                        valid_masks, size=(self.image_size, self.image_size),
+                        mode='nearest'
+                    )
+
+        if return_point_maps and point_maps is not None and valid_masks is not None:
+            valid_masks = valid_masks > 0.5
+            return rendered_images, point_maps, valid_masks
+
         return rendered_images
-    
+
     def forward(self, 
                gt_mesh: Meshes,
                camera_poses: torch.Tensor,
                pose_format: str = "cartesian",
                fov: float = 60.0,
-               lighting_type: str = "ambient") -> torch.Tensor:
+               lighting_type: str = "ambient",
+               return_point_maps: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         """
         前向传播：渲染新视图
         """
@@ -352,7 +388,13 @@ class DifferentiableRenderer(nn.Module):
             pose_format, 
             fov=fov
         )
-        
+
+        # print("camera_poses:",camera_poses)
         # 2. 调用纯粹的渲染函数
         #    这里隐含了一个假设：len(gt_mesh) == len(camera_poses)
-        return self.render_views(gt_mesh, cameras, lighting_type)
+        return self.render_views(
+            gt_mesh,
+            cameras,
+            lighting_type=lighting_type,
+            return_point_maps=return_point_maps
+        )

@@ -518,30 +518,31 @@ class House3KDataset(BaseDataset):
         """
         # 这里需要获取当前数据项的信息
         # 由于这是在_load_images中调用的，我们需要从虚拟路径中提取信息
-        
+
         # 提取模型名称和视图索引
         model_name = virtual_paths[0].split("//")[1].split("/")[0]
         view_indices = []
-        
+
         for path in virtual_paths:
             index = self._extract_image_index(path)
             if index is not None:
                 view_indices.append(index)
-        
+
         # 从当前处理的数据项中获取已加载的网格数据
         # 这需要在__getitem__中设置上下文
         if hasattr(self, '_current_data_item') and hasattr(self, '_current_gt_mesh_data'):
-            # 生成相机位姿，使用与__getitem__相同的种子
-            max_view_index = max(view_indices) if view_indices else 0
-            # 将hash值限制在numpy随机种子的有效范围内
-            seed = abs(hash(model_name)) % (2**32 - 1)
-            camera_poses = self._generate_camera_poses(max_view_index + 1, seed=seed)
-            
+            if hasattr(self, '_current_camera_poses_list'):
+                camera_poses = self._current_camera_poses_list
+            else:
+                max_view_index = max(view_indices) if view_indices else -1
+                seed = abs(hash(model_name)) % (2**32 - 1)
+                camera_poses = self._generate_camera_poses(max_view_index + 1, seed=seed) if max_view_index >= 0 else []
+
             # 使用已加载的网格数据进行渲染
             rendered_images = self._render_images_from_mesh_data(
                 self._current_gt_mesh_data, camera_poses, view_indices
             )
-            
+
             return rendered_images
         else:
             # 后备方案：返回随机图像
@@ -578,16 +579,20 @@ class House3KDataset(BaseDataset):
             
             # 选择初始视图并获取对应索引
             selected_image_paths, selected_indices = self._select_initial_images(available_image_paths)
-            
+
+            # 预先生成相机位姿，避免在渲染时重复计算
+            if selected_indices:
+                max_view_index = max(selected_indices)
+                seed = abs(hash(data_item["model_name"])) % (2**32 - 1)
+                camera_poses_list = self._generate_camera_poses(max_view_index + 1, seed=seed)
+            else:
+                camera_poses_list = []
+
+            self._current_camera_poses_list = camera_poses_list
+
             # 加载图像（此时gt_mesh_data已可用于渲染）
             initial_images = self._load_images(selected_image_paths)
-            
-            # 动态生成相机位姿，确保与渲染时使用的位姿一致
-            max_view_index = max(selected_indices) if selected_indices else 0
-            # 将hash值限制在numpy随机种子的有效范围内
-            seed = abs(hash(data_item["model_name"])) % (2**32 - 1)
-            camera_poses_list = self._generate_camera_poses(max_view_index + 1, seed=seed)
-            
+
             # 只选择对应的相机位姿
             selected_camera_poses = [camera_poses_list[i] for i in selected_indices]
             
@@ -602,7 +607,7 @@ class House3KDataset(BaseDataset):
                 camera_poses_tensor.append(pose_tensor)
             
             camera_poses = torch.stack(camera_poses_tensor) if camera_poses_tensor else torch.empty(0, 7)
-            
+            # print(camera_poses)
             result = {
                 "initial_images": initial_images,
                 "gt_mesh_data": gt_mesh_data,
@@ -622,6 +627,8 @@ class House3KDataset(BaseDataset):
                 delattr(self, '_current_data_item')
             if hasattr(self, '_current_gt_mesh_data'):
                 delattr(self, '_current_gt_mesh_data')
+            if hasattr(self, '_current_camera_poses_list'):
+                delattr(self, '_current_camera_poses_list')
     
     @property
     def dataset_info(self) -> Dict:

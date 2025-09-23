@@ -127,7 +127,8 @@ def setup_models(config: Dict[str, Any]):
     # 4. 损失函数
     loss_fn = ReconstructionLoss(
         chamfer_weight=1.0,
-        confidence_weight=0.01
+        confidence_weight=0.01,
+        renderer=renderer
     )
     
     print("Models setup completed!")
