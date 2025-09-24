@@ -374,7 +374,7 @@ class ReconstructionLoss(nn.Module):
     def __init__(self,
                  chamfer_weight: float = 1.0,
                  confidence_weight: float = 0.0,
-                 viewpoint_weight: float = 0.1,
+                 viewpoint_weight: float = 0.0,
                  renderer: Optional["DifferentiableRenderer"] = None,
                  gt_lighting_type: str = "ambient"):
         """

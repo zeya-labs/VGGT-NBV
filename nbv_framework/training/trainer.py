@@ -209,7 +209,7 @@ class NBVTrainer:
             combined_images_batch = torch.cat([initial_images, new_images_expanded], dim=1)
             
             # 保存N+1张图片到log_dir下的images文件夹
-            self._save_combined_images(combined_images_batch)
+            # self._save_combined_images(combined_images_batch)
             
             # VGGT一次性对整个batch进行重建与评估
             recon_data = self.vggt_wrapper.reconstruct_and_evaluate(
@@ -322,7 +322,6 @@ class NBVTrainer:
         progress_bar = tqdm(train_loader, desc=f"Epoch {self.current_epoch}")
         
         for batch in progress_bar:
-            print("=============================================")
             # 将数据移到设备
             batch = self._move_batch_to_device(batch)
             

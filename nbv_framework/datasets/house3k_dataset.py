@@ -557,7 +557,7 @@ class House3KDataset(BaseDataset):
         
         重写以支持动态渲染和相机位姿生成
         """
-        print(idx,"worker:",torch.utils.data.get_worker_info(),self.split)
+        # print(idx,"worker:",torch.utils.data.get_worker_info(),self.split)
         data_item = self.data_list[idx]
         
         # 设置当前数据项上下文，供_load_images使用
