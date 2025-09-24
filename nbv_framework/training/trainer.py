@@ -236,6 +236,32 @@ class NBVTrainer:
         if backprop:
             self.scaler.scale(total_loss).backward()
             self.scaler.unscale_(self.optimizer)
+
+            grad_stats, missing = [], []
+            for name, param in self.policy_network.named_parameters():
+                if not param.requires_grad:
+                    continue
+                grad = param.grad
+                if grad is None:
+                    missing.append(name)
+                    continue
+                grad_stats.append((name, grad.norm().item(), grad.abs().mean().item()))
+
+            for name, norm_val, mean_abs in grad_stats[:8]:  # 只打印前几个防止刷屏
+                self.logger.info(
+                    "grad %s |norm| %.4e |mean|grad| %.4e",
+                    name, norm_val, mean_abs
+                )
+            if len(grad_stats) > 8:
+                overall = torch.sqrt(sum(
+                    param.grad.pow(2).sum()
+                    for _, param in self.policy_network.named_parameters()
+                    if param.grad is not None
+                )).item()
+                self.logger.info("total grad norm %.4e (remaining layers truncated)", overall)
+            if missing:
+                self.logger.warning("layers without grad: %s", ", ".join(missing[:5]))
+                
             # 梯度裁剪
             torch.nn.utils.clip_grad_norm_(self.policy_network.parameters(), max_norm=1.0)
             self.scaler.step(self.optimizer)
