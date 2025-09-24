@@ -1,10 +1,8 @@
-"""
-混合数据集类
-支持将多个不同类型的数据集合并成一个统一的数据集
-"""
+"""Utilities for combining multiple datasets into a single deterministic view."""
 
-import random
-from typing import List, Dict, Any, Union
+from bisect import bisect_right
+from typing import Any, Dict, List, Optional, Tuple
+
 import torch
 from torch.utils.data import Dataset
 
@@ -13,184 +11,101 @@ from .dataset_factory import DatasetFactory
 
 
 class MixedDataset(Dataset):
+    """Deterministically concatenates several datasets into a single dataset.
+
+    The dataset returned by this class exposes every sample from all configured
+    child datasets. Samples are ordered by dataset order followed by the
+    dataset-local index. No shuffling, weighting, or probabilistic sampling is
+    performed—``__getitem__`` derives the target dataset and index directly from
+    the requested global index.
     """
-    混合数据集类
-    
-    可以将多个不同类型的数据集（如合成数据集、ShapeNet、ModelNet等）
-    合并成一个统一的数据集进行训练
-    """
-    
-    def __init__(
-        self,
-        dataset_configs: List[Dict[str, Any]],
-        sampling_strategy: str = "uniform",
-        weights: List[float] = None,
-        seed: int = None
-    ):
-        """
-        初始化混合数据集
-        
-        Args:
-            dataset_configs: 数据集配置列表，每个配置包含数据集类型和参数
-            sampling_strategy: 采样策略 ("uniform", "weighted", "sequential")
-            weights: 各数据集的采样权重（仅在weighted策略下使用）
-            seed: 随机种子
-        """
+
+    def __init__(self, dataset_configs: List[Dict[str, Any]], seed: Optional[int] = None) -> None:
+        if not dataset_configs:
+            raise ValueError("dataset_configs must contain at least one dataset configuration")
+
+        # ``seed`` is accepted for backward compatibility but not used because
+        # sampling is now completely deterministic.
         self.dataset_configs = dataset_configs
-        self.sampling_strategy = sampling_strategy
-        self.weights = weights
         self.seed = seed
-        
-        # 创建局部随机数生成器
-        self.rng = random.Random(seed)
-        
-        # 创建各个子数据集
-        self.datasets = []
-        self.dataset_names = []
-        self.cumulative_lengths = []
-        
-        total_length = 0
-        for i, config in enumerate(dataset_configs):
-            # 创建数据集
-            try:
-                dataset = DatasetFactory.create_from_config(config)
-            except Exception as e:
-                print(f"创建数据集失败: {e}")
-                continue
+
+        self.datasets: List[BaseDataset] = []
+        self.dataset_names: List[str] = []
+        self.dataset_lengths: List[int] = []
+        self.cumulative_lengths: List[int] = []
+
+        total = 0
+        for index, config in enumerate(dataset_configs):
+            dataset = DatasetFactory.create_from_config(config)
+            dataset_name = config.get("name", f"dataset_{index}")
+            dataset_length = len(dataset)
+
             self.datasets.append(dataset)
-            
-            # 记录数据集名称
-            dataset_name = config.get('name', f'dataset_{i}')
             self.dataset_names.append(dataset_name)
-            
-            # 记录累积长度（用于sequential策略）
-            total_length += len(dataset)
-            self.cumulative_lengths.append(total_length)
-        
-        self.total_length = total_length
-        
-        # 验证权重
-        if sampling_strategy == "weighted":
-            if weights is None:
-                # 默认权重为各数据集长度的比例
-                self.weights = [len(ds) / self.total_length for ds in self.datasets]
-            else:
-                assert len(weights) == len(self.datasets), \
-                    f"权重数量({len(weights)})必须等于数据集数量({len(self.datasets)})"
-                # 归一化权重
-                weight_sum = sum(weights)
-                self.weights = [w / weight_sum for w in weights]
-        
-        print(f"混合数据集创建成功:")
-        for i, (name, dataset) in enumerate(zip(self.dataset_names, self.datasets)):
-            weight_info = f", 权重: {self.weights[i]:.3f}" if self.weights else ""
-            print(f"  - {name}: {len(dataset)} 样本{weight_info}")
+            self.dataset_lengths.append(dataset_length)
+
+            total += dataset_length
+            self.cumulative_lengths.append(total)
+
+        if total == 0:
+            raise ValueError("All configured datasets are empty; MixedDataset has no samples to expose")
+
+        self.total_length = total
+
+        print("混合数据集创建成功 (deterministic mode):")
+        for name, length in zip(self.dataset_names, self.dataset_lengths):
+            print(f"  - {name}: {length} 样本")
         print(f"总计: {self.total_length} 样本")
-    
+
     def __len__(self) -> int:
         return self.total_length
-    
+
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        """
-        获取样本
-        
-        根据采样策略从不同的子数据集中获取样本
-        """
-        if self.sampling_strategy == "sequential":
-            return self._get_sequential_sample(idx)
-        elif self.sampling_strategy == "uniform":
-            return self._get_uniform_sample(idx)
-        elif self.sampling_strategy == "weighted":
-            return self._get_weighted_sample(idx)
-        else:
-            raise ValueError(f"不支持的采样策略: {self.sampling_strategy}")
-    
-    def _get_sequential_sample(self, idx: int) -> Dict[str, torch.Tensor]:
-        """顺序采样：按数据集顺序依次获取样本"""
-        for i, cumulative_length in enumerate(self.cumulative_lengths):
-            if idx < cumulative_length:
-                # 计算在当前数据集中的索引
-                if i == 0:
-                    dataset_idx = idx
-                else:
-                    dataset_idx = idx - self.cumulative_lengths[i-1]
-                
-                sample = self.datasets[i][dataset_idx]
-                # 添加数据集来源信息
-                sample["source_dataset"] = self.dataset_names[i]
-                sample["source_dataset_idx"] = i
-                return sample
-        
-        raise IndexError(f"索引 {idx} 超出范围")
-    
-    def _get_uniform_sample(self, idx: int) -> Dict[str, torch.Tensor]:
-        """均匀采样：随机选择数据集，然后随机选择样本"""
-        # 使用局部RNG随机选择一个数据集
-        dataset_idx = self.rng.randint(0, len(self.datasets) - 1)
-        dataset = self.datasets[dataset_idx]
-        
-        # 使用局部RNG随机选择该数据集中的一个样本
-        sample_idx = self.rng.randint(0, len(dataset) - 1)
-        sample = dataset[sample_idx]
-        
-        # 添加数据集来源信息
+        dataset_idx, sample_idx = self._resolve_indices(idx)
+        sample = self.datasets[dataset_idx][sample_idx]
+
+        # Annotate provenance for downstream logging/debugging.
         sample["source_dataset"] = self.dataset_names[dataset_idx]
         sample["source_dataset_idx"] = dataset_idx
+        sample["source_dataset_sample_idx"] = sample_idx
         return sample
-    
-    def _get_weighted_sample(self, idx: int) -> Dict[str, torch.Tensor]:
-        """加权采样：根据权重随机选择数据集"""
-        # 使用局部RNG根据权重随机选择数据集
-        dataset_idx = self.rng.choices(
-            range(len(self.datasets)), 
-            weights=self.weights, 
-            k=1
-        )[0]
-        
-        dataset = self.datasets[dataset_idx]
-        
-        # 使用局部RNG随机选择该数据集中的一个样本
-        sample_idx = self.rng.randint(0, len(dataset) - 1)
-        sample = dataset[sample_idx]
-        
-        # 添加数据集来源信息
-        sample["source_dataset"] = self.dataset_names[dataset_idx]
-        sample["source_dataset_idx"] = dataset_idx
-        return sample
-    
+
+    def _resolve_indices(self, idx: int) -> Tuple[int, int]:
+        """Translate a global index into ``(dataset_idx, local_sample_idx)``."""
+
+        if self.total_length == 0:
+            raise IndexError("MixedDataset is empty; no indices are valid")
+
+        adjusted_idx = idx + self.total_length if idx < 0 else idx
+        if adjusted_idx < 0 or adjusted_idx >= self.total_length:
+            raise IndexError(f"Index {idx} is out of range for MixedDataset of length {self.total_length}")
+
+        dataset_idx = bisect_right(self.cumulative_lengths, adjusted_idx)
+        dataset_start = 0 if dataset_idx == 0 else self.cumulative_lengths[dataset_idx - 1]
+        sample_idx = adjusted_idx - dataset_start
+        return dataset_idx, sample_idx
+
     def get_dataset_info(self) -> Dict[str, Any]:
-        """获取混合数据集信息"""
+        """Return descriptive metadata about the mixed dataset."""
+
         return {
             "mixed_dataset": True,
             "total_samples": self.total_length,
             "num_datasets": len(self.datasets),
-            "sampling_strategy": self.sampling_strategy,
-            "weights": self.weights,
             "datasets": [
                 {
                     "name": name,
                     "type": dataset.__class__.__name__,
-                    "samples": len(dataset),
-                    "info": dataset.dataset_info if hasattr(dataset, 'dataset_info') else {}
+                    "samples": length,
+                    "info": dataset.dataset_info if hasattr(dataset, "dataset_info") else {},
                 }
-                for name, dataset in zip(self.dataset_names, self.datasets)
-            ]
+                for name, dataset, length in zip(self.dataset_names, self.datasets, self.dataset_lengths)
+            ],
         }
-    
+
     def get_dataset_by_name(self, name: str) -> BaseDataset:
-        """根据名称获取子数据集"""
         for dataset_name, dataset in zip(self.dataset_names, self.datasets):
             if dataset_name == name:
                 return dataset
         raise ValueError(f"未找到名称为 '{name}' 的数据集")
-    
-    def get_samples_by_dataset(self, dataset_name: str, num_samples: int = 5) -> List[Dict]:
-        """获取指定数据集的样本用于检查"""
-        dataset = self.get_dataset_by_name(dataset_name)
-        samples = []
-        for i in range(min(num_samples, len(dataset))):
-            sample = dataset[i]
-            sample["source_dataset"] = dataset_name
-            samples.append(sample)
-        return samples
 

@@ -145,6 +145,7 @@ class House3KDataset(BaseDataset):
             rng = random.Random(42)
             rng.shuffle(all_objects)
             all_objects = all_objects[:self.max_meshes]
+            # print(all_objects)
             print(f"[House3K数据集] 应用全局mesh限制，从 {original_count} 个减少到 {self.max_meshes} 个")
         
         # 按分割比例划分数据集
@@ -556,6 +557,7 @@ class House3KDataset(BaseDataset):
         
         重写以支持动态渲染和相机位姿生成
         """
+        print(idx,"worker:",torch.utils.data.get_worker_info(),self.split)
         data_item = self.data_list[idx]
         
         # 设置当前数据项上下文，供_load_images使用

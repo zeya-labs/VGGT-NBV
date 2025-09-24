@@ -62,7 +62,7 @@ def setup_config() -> Dict[str, Any]:
         "num_initial_views": 3,
         "image_size": 224,
         "up_axis": "Y",  # 数据集模型默认上方向 ('Y' 或 'Z')
-        "max_meshes": 1,  # 限制加载的mesh数量，用于控制训练规模
+        "max_meshes": 2,  # 限制加载的mesh数量，用于控制训练规模
         
         # 设备配置
         "device": "cuda" if torch.cuda.is_available() else "cpu",
@@ -189,14 +189,12 @@ def setup_data_loaders(config: Dict[str, Any]):
     # 训练数据集
     train_dataset = MixedDataset(
         dataset_configs=dataset_train_configs,
-        sampling_strategy="weighted",
         seed=42
     )
     
     # 验证数据集
     val_dataset = MixedDataset(
         dataset_configs=dataset_val_configs,
-        sampling_strategy="weighted",
         seed=42
     )
     
@@ -204,13 +202,13 @@ def setup_data_loaders(config: Dict[str, Any]):
     train_loader = create_train_loader(
         train_dataset,
         batch_size=config["batch_size"],
-        num_workers=8,
+        num_workers=1,
     )
     
     val_loader = create_val_loader(
         val_dataset,
         batch_size=config["batch_size"],
-        num_workers=8,
+        num_workers=1,
     )
     
     print(f"Data loaders created - Train: {len(train_dataset)}, Val: {len(val_dataset)}")
