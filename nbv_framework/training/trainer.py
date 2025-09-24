@@ -296,6 +296,7 @@ class NBVTrainer:
         progress_bar = tqdm(train_loader, desc=f"Epoch {self.current_epoch}")
         
         for batch in progress_bar:
+            print("=============================================")
             # 将数据移到设备
             batch = self._move_batch_to_device(batch)
             
@@ -307,6 +308,7 @@ class NBVTrainer:
                 initial_images_flat = initial_images.view(b * n, c, h, w)
                 
                 initial_grid = torchvision.utils.make_grid(initial_images_flat, nrow=n)
+                # print(self.global_step)
                 self.writer.add_image('train/initial_views', initial_grid, self.global_step)
 
                 new_grid = torchvision.utils.make_grid(new_images, nrow=1)
