@@ -152,17 +152,10 @@ class NBVTrainer:
             if self.global_step % 1 == 0:  # 每10步记录一次，避免过于频繁
                 # 记录位置信息（前3维）
                 positions = next_camera_pose[:, :3]  # [B, 3]
-                # self.writer.add_histogram('camera_pose/position_x', positions[:, 0], self.global_step)
-                # self.writer.add_histogram('camera_pose/position_y', positions[:, 1], self.global_step)
-                # self.writer.add_histogram('camera_pose/position_z', positions[:, 2], self.global_step)
                 
-                # # 记录四元数信息（后4维）
+                # 记录四元数信息（后4维）
                 quaternions = next_camera_pose[:, 3:]  # [B, 4]
-                # self.writer.add_histogram('camera_pose/quaternion_x', quaternions[:, 0], self.global_step)
-                # self.writer.add_histogram('camera_pose/quaternion_y', quaternions[:, 1], self.global_step)
-                # self.writer.add_histogram('camera_pose/quaternion_z', quaternions[:, 2], self.global_step)
-                # self.writer.add_histogram('camera_pose/quaternion_w', quaternions[:, 3], self.global_step)
-                
+
                 # 记录位置的统计信息
                 position_norms = torch.norm(positions, dim=1)  # 计算位置向量的模长
                 self.writer.add_scalar('camera_pose/position_norm_mean', position_norms.mean(), self.global_step)
