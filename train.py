@@ -55,11 +55,10 @@ def setup_config() -> Dict[str, Any]:
         "num_epochs": 1000,
         "num_samples": 20000,
         "weight_decay": 1e-5,
-        "use_amp": True,
         
         # 数据配置
         "synthetic_data_root": "./models/synthetic_data",
-        "num_initial_views": 3,
+        "num_initial_views": 1,
         "image_size": 224,
         "up_axis": "Y",  # 数据集模型默认上方向 ('Y' 或 'Z')
         "max_meshes": 2,  # 限制加载的mesh数量，用于控制训练规模
@@ -126,8 +125,6 @@ def setup_models(config: Dict[str, Any]):
     
     # 4. 损失函数
     loss_fn = ReconstructionLoss(
-        chamfer_weight=1.0,
-        confidence_weight=0.01,
         renderer=renderer
     )
     
@@ -259,8 +256,7 @@ def train_nbv_policy(config: Dict[str, Any],
         learning_rate=config["learning_rate"],
         weight_decay=config["weight_decay"],
         device=config["device"],
-        log_dir=config["log_dir"],
-        use_amp=config["use_amp"]
+        log_dir=config["log_dir"]
     )
     
     # 断点续训逻辑

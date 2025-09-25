@@ -120,15 +120,14 @@ class ChamferDistance(nn.Module):
         aligned_points_list: List[torch.Tensor] = []
 
         for pred_points, corr_points in zip(pred_list, corr_list):
-            with torch.autocast(device_type=pred_points.device.type, enabled=False):
-                pred_points_f32 = pred_points.float()
-                corr_points_f32 = corr_points.float()
+            pred_points_f32 = pred_points.float()
+            corr_points_f32 = corr_points.float()
 
-                if corr_points_f32.numel() >= 3 and pred_points_f32.numel() >= 3:
-                    scale, rotation, translation = self._umeyama_alignment(pred_points_f32, corr_points_f32)
-                    aligned = self._apply_similarity_transform(pred_points_f32, scale, rotation, translation)
-                else:
-                    aligned = pred_points_f32
+            if corr_points_f32.numel() >= 3 and pred_points_f32.numel() >= 3:
+                scale, rotation, translation = self._umeyama_alignment(pred_points_f32, corr_points_f32)
+                aligned = self._apply_similarity_transform(pred_points_f32, scale, rotation, translation)
+            else:
+                aligned = pred_points_f32
             aligned_points_list.append(aligned)
 
         p_pred_aligned = Pointclouds(points=aligned_points_list)
@@ -374,7 +373,7 @@ class ReconstructionLoss(nn.Module):
     def __init__(self,
                  chamfer_weight: float = 1.0,
                  confidence_weight: float = 0.0,
-                 viewpoint_weight: float = 0.1,
+                 viewpoint_weight: float = 0.0,
                  renderer: Optional["DifferentiableRenderer"] = None,
                  gt_lighting_type: str = "ambient"):
         """

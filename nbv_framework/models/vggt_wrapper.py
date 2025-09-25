@@ -48,8 +48,6 @@ class VGGTWrapper(nn.Module):
         super().__init__()
         
         self.device = device
-        self.dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
-        
         # 加载预训练的VGGT模型
         print(f"Loading VGGT model: {model_name}")
         self.vggt_model = VGGT.from_pretrained(model_name).to(device)
@@ -77,21 +75,20 @@ class VGGTWrapper(nn.Module):
         Returns:
             scene_features: 场景特征张量 [B, S, P, 2048] （不做池化，保留所有tokens）
         """
-        with torch.cuda.amp.autocast(dtype=self.dtype):
-            # 确保输入有batch维度
-            if len(images.shape) == 4:
-                images = images.unsqueeze(0)
-            
-            # 获取aggregated tokens列表
-            # aggregated_tokens_list长度=24, 每个元素形状=[B, S, P, 2048]
-            aggregated_tokens_list, patch_start_idx = self.vggt_model.aggregator(images)
-            
-            # 选择指定层的tokens
-            if layer_idx == -1:
-                layer_idx = len(aggregated_tokens_list) - 1
-            
-            tokens = aggregated_tokens_list[layer_idx]  # [B, S, P, 2048]
-            return tokens
+        # 确保输入有batch维度
+        if len(images.shape) == 4:
+            images = images.unsqueeze(0)
+        
+        # 获取aggregated tokens列表
+        # aggregated_tokens_list长度=24, 每个元素形状=[B, S, P, 2048]
+        aggregated_tokens_list, patch_start_idx = self.vggt_model.aggregator(images)
+        
+        # 选择指定层的tokens
+        if layer_idx == -1:
+            layer_idx = len(aggregated_tokens_list) - 1
+        
+        tokens = aggregated_tokens_list[layer_idx]  # [B, S, P, 2048]
+        return tokens
     
     def extract_token_features(self, images: torch.Tensor, layer_idx: int = -1, 
                               token_type: str = "all") -> torch.Tensor:
@@ -106,34 +103,33 @@ class VGGTWrapper(nn.Module):
         Returns:
             token_features: 对应类型的token特征
         """
-        with torch.autocast(device_type=self.device, dtype=self.dtype):
-            # 确保输入有batch维度
-            if len(images.shape) == 4:
-                images = images.unsqueeze(0)
-            
-            # 获取aggregated tokens列表
-            aggregated_tokens_list, patch_start_idx = self.vggt_model.aggregator(images)
-            
-            # 选择指定层的tokens
-            if layer_idx == -1:
-                layer_idx = len(aggregated_tokens_list) - 1
-            
-            tokens = aggregated_tokens_list[layer_idx]  # [B, S, P, 2048]
-            
-            if token_type == "camera":
-                # 只返回camera token (索引0)
-                return tokens[:, :, 0, :]  # [B, S, 2048]
-            elif token_type == "register":
-                # 返回register tokens (索引1-4)
-                return tokens[:, :, 1:5, :]  # [B, S, 4, 2048]
-            elif token_type == "patch":
-                # 返回patch tokens (索引5以后)
-                return tokens[:, :, patch_start_idx:, :]  # [B, S, patch_num, 2048]
-            elif token_type == "all":
-                # 返回所有tokens
-                return tokens  # [B, S, P, 2048]
-            else:
-                raise ValueError(f"Unknown token_type: {token_type}")
+        # 确保输入有batch维度
+        if len(images.shape) == 4:
+            images = images.unsqueeze(0)
+        
+        # 获取aggregated tokens列表
+        aggregated_tokens_list, patch_start_idx = self.vggt_model.aggregator(images)
+        
+        # 选择指定层的tokens
+        if layer_idx == -1:
+            layer_idx = len(aggregated_tokens_list) - 1
+        
+        tokens = aggregated_tokens_list[layer_idx]  # [B, S, P, 2048]
+        
+        if token_type == "camera":
+            # 只返回camera token (索引0)
+            return tokens[:, :, 0, :]  # [B, S, 2048]
+        elif token_type == "register":
+            # 返回register tokens (索引1-4)
+            return tokens[:, :, 1:5, :]  # [B, S, 4, 2048]
+        elif token_type == "patch":
+            # 返回patch tokens (索引5以后)
+            return tokens[:, :, patch_start_idx:, :]  # [B, S, patch_num, 2048]
+        elif token_type == "all":
+            # 返回所有tokens
+            return tokens  # [B, S, P, 2048]
+        else:
+            raise ValueError(f"Unknown token_type: {token_type}")
     
     def reconstruct_and_evaluate(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
