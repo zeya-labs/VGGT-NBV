@@ -43,8 +43,7 @@ class NBVTrainer:
                  learning_rate: float = 1e-4,
                  weight_decay: float = 1e-5,
                  log_dir: str = "runs/nbv_experiment",
-                 device: str = "cuda",
-                 use_amp: bool = True):
+                 device: str = "cuda"):
         """
         初始化训练器
         
@@ -65,7 +64,6 @@ class NBVTrainer:
         self.device = device
         self.num_epochs = num_epochs
         self.log_dir = log_dir
-        self.use_amp = use_amp
         
         # 初始化TensorBoard Writer
         self.writer = SummaryWriter(self.log_dir)
@@ -82,7 +80,6 @@ class NBVTrainer:
             self.optimizer, T_max=self.num_epochs, eta_min=1e-6
         )
         
-        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
         # 训练状态
         self.current_epoch = 0
         self.global_step = 0
@@ -136,99 +133,96 @@ class NBVTrainer:
         if camera_poses_batch is None:
             raise KeyError("Batch is missing 'camera_poses', which are required for correspondence-guided losses.")
 
-        device_type = self.device.split(':')[0]
-        with torch.autocast(device_type=device_type, dtype=torch.float16, enabled=self.use_amp):
-            # 步骤1: 状态编码 - VGGT提取场景特征
-            scene_features = self.vggt_wrapper.extract_scene_features(initial_images)
+        # 步骤1: 状态编码 - VGGT提取场景特征
+        scene_features = self.vggt_wrapper.extract_scene_features(initial_images)
+        
+        # 步骤2: 动作提议 - 策略网络输出下一个相机位姿
+        next_camera_pose = self.policy_network(scene_features)
+        
+        # 检查输出维度，如果是[B,3]则转换为[B,7]
+        if next_camera_pose.shape[-1] == 3:
+            next_camera_pose = position_to_pose_tensor(next_camera_pose)
+        
+        # 记录位姿数据到TensorBoard
+        if self.global_step % 1 == 0:  # 每10步记录一次，避免过于频繁
+            # 记录位置信息（前3维）
+            positions = next_camera_pose[:, :3]  # [B, 3]
             
-            # 步骤2: 动作提议 - 策略网络输出下一个相机位姿
-            next_camera_pose = self.policy_network(scene_features)
+            # 记录四元数信息（后4维）
+            quaternions = next_camera_pose[:, 3:]  # [B, 4]
+
+            # 记录位置的统计信息
+            position_norms = torch.norm(positions, dim=1)  # 计算位置向量的模长
+            self.writer.add_scalar('camera_pose/position_norm_mean', position_norms.mean(), self.global_step)
+            if position_norms.numel() > 1:  # 只有当样本数大于1时才计算标准差
+                self.writer.add_scalar('camera_pose/position_norm_std', position_norms.std(), self.global_step)
             
-            # 检查输出维度，如果是[B,3]则转换为[B,7]
-            if next_camera_pose.shape[-1] == 3:
-                next_camera_pose = position_to_pose_tensor(next_camera_pose)
-            
-            # 记录位姿数据到TensorBoard
-            if self.global_step % 1 == 0:  # 每10步记录一次，避免过于频繁
-                # 记录位置信息（前3维）
-                positions = next_camera_pose[:, :3]  # [B, 3]
-                
-                # 记录四元数信息（后4维）
-                quaternions = next_camera_pose[:, 3:]  # [B, 4]
+            # 记录四元数的模长（应该接近1）
+            quaternion_norms = torch.norm(quaternions, dim=1)
+            # self.writer.add_scalar('camera_pose/quaternion_norm_mean', quaternion_norms.mean(), self.global_step)
+            if quaternion_norms.numel() > 1:  # 只有当样本数大于1时才计算标准差
+                self.writer.add_scalar('camera_pose/quaternion_norm_std', quaternion_norms.std(), self.global_step)
 
-                # 记录位置的统计信息
-                position_norms = torch.norm(positions, dim=1)  # 计算位置向量的模长
-                self.writer.add_scalar('camera_pose/position_norm_mean', position_norms.mean(), self.global_step)
-                if position_norms.numel() > 1:  # 只有当样本数大于1时才计算标准差
-                    self.writer.add_scalar('camera_pose/position_norm_std', position_norms.std(), self.global_step)
-                
-                # 记录四元数的模长（应该接近1）
-                quaternion_norms = torch.norm(quaternions, dim=1)
-                # self.writer.add_scalar('camera_pose/quaternion_norm_mean', quaternion_norms.mean(), self.global_step)
-                if quaternion_norms.numel() > 1:  # 只有当样本数大于1时才计算标准差
-                    self.writer.add_scalar('camera_pose/quaternion_norm_std', quaternion_norms.std(), self.global_step)
+        # 构建包含初始视图和新视图的相机位姿列表
+        camera_poses_batch = camera_poses_batch.to(next_camera_pose.dtype)
 
-            # 构建包含初始视图和新视图的相机位姿列表
-            camera_poses_batch = camera_poses_batch.to(next_camera_pose.dtype)
+        if camera_poses_batch.dim() == 2:
+            camera_poses_batch = camera_poses_batch.unsqueeze(1)
+        combined_camera_poses = torch.cat([
+            camera_poses_batch,
+            next_camera_pose.unsqueeze(1)
+        ], dim=1)  # [B, N+1, 7]
 
-            if camera_poses_batch.dim() == 2:
-                camera_poses_batch = camera_poses_batch.unsqueeze(1)
-            combined_camera_poses = torch.cat([
-                camera_poses_batch,
-                next_camera_pose.unsqueeze(1)
-            ], dim=1)  # [B, N+1, 7]
+        # 步骤3: 环境交互 - 可微分渲染生成新视图
+        batched_mesh = gt_mesh_data['normalized_mesh'] # 这现在是单个批次化的 Meshes 对象
 
-            # 步骤3: 环境交互 - 可微分渲染生成新视图
-            batched_mesh = gt_mesh_data['normalized_mesh'] # 这现在是单个批次化的 Meshes 对象
+        # 确保整个批次化的 mesh 对象位于渲染器设备上
+        batched_mesh = batched_mesh.to(self.renderer.device)
+        new_images = self.renderer(
+            gt_mesh=batched_mesh,
+            camera_poses=next_camera_pose,
+            # pose_format=self.policy_network.output_mode,
+            lighting_type="ambient"
+        )
 
-            # 确保整个批次化的 mesh 对象位于渲染器设备上
-            batched_mesh = batched_mesh.to(self.renderer.device)
-            new_images = self.renderer(
-                gt_mesh=batched_mesh,
-                camera_poses=next_camera_pose,
-                # pose_format=self.policy_network.output_mode,
-                lighting_type="ambient"
+        # 确保与 initial_images 在同一设备
+        if new_images.device != initial_images.device:
+            new_images = new_images.to(initial_images.device)
+        
+        # 步骤4: 质量评估 - VGGT重建并计算质量
+        # 将 new_images 从 [B, 3, H, W] 扩展为 [B, 1, 3, H, W]
+        new_images_expanded = new_images.unsqueeze(1)  # [B, 1, 3, H, W]
+        
+        # 直接在第二个维度上拼接，得到 [B, N+1, 3, H, W]
+        combined_images_batch = torch.cat([initial_images, new_images_expanded], dim=1)
+        
+        # 保存N+1张图片到log_dir下的images文件夹
+        # self._save_combined_images(combined_images_batch)
+        
+        # VGGT一次性对整个batch进行重建与评估
+        recon_data = self.vggt_wrapper.reconstruct_and_evaluate(
+            combined_images_batch  # [B, N+1, 3, H, W]
+        )
+        # 计算重建质量损失
+        # 在训练时传递writer和step参数以启用点云可视化
+        if backprop:
+            total_loss, loss_components = self.loss_fn(
+                recon_data, gt_mesh_data, combined_images_batch,
+                combined_camera_poses,
+                return_components=True, writer=self.writer, step=self.global_step,
+                train_flag=True
             )
-
-            # 确保与 initial_images 在同一设备
-            if new_images.device != initial_images.device:
-                new_images = new_images.to(initial_images.device)
-            
-            # 步骤4: 质量评估 - VGGT重建并计算质量
-            # 将 new_images 从 [B, 3, H, W] 扩展为 [B, 1, 3, H, W]
-            new_images_expanded = new_images.unsqueeze(1)  # [B, 1, 3, H, W]
-            
-            # 直接在第二个维度上拼接，得到 [B, N+1, 3, H, W]
-            combined_images_batch = torch.cat([initial_images, new_images_expanded], dim=1)
-            
-            # 保存N+1张图片到log_dir下的images文件夹
-            # self._save_combined_images(combined_images_batch)
-            
-            # VGGT一次性对整个batch进行重建与评估
-            recon_data = self.vggt_wrapper.reconstruct_and_evaluate(
-                combined_images_batch  # [B, N+1, 3, H, W]
+        else:
+            total_loss, loss_components = self.loss_fn(
+                recon_data, gt_mesh_data, combined_images_batch,
+                combined_camera_poses,
+                return_components=True, writer=self.writer, step=self.val_image_step,
+                train_flag=False
             )
-            # 计算重建质量损失
-            # 在训练时传递writer和step参数以启用点云可视化
-            if backprop:
-                total_loss, loss_components = self.loss_fn(
-                    recon_data, gt_mesh_data, combined_images_batch,
-                    combined_camera_poses,
-                    return_components=True, writer=self.writer, step=self.global_step,
-                    train_flag=True
-                )
-            else:
-                total_loss, loss_components = self.loss_fn(
-                    recon_data, gt_mesh_data, combined_images_batch,
-                    combined_camera_poses,
-                    return_components=True, writer=self.writer, step=self.val_image_step,
-                    train_flag=False
-                )
         
         # 步骤5: 策略更新 - 反向传播（仅训练时）
         if backprop:
-            self.scaler.scale(total_loss).backward()
-            self.scaler.unscale_(self.optimizer)
+            total_loss.backward()
 
             grad_stats, missing = [], []
             for name, param in self.policy_network.named_parameters():
@@ -257,8 +251,7 @@ class NBVTrainer:
                 
             # 梯度裁剪
             torch.nn.utils.clip_grad_norm_(self.policy_network.parameters(), max_norm=1.0)
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+            self.optimizer.step()
             # 确认记录优化器已步进（某些实现可能未维护 _step_count）
             try:
                 if hasattr(self.optimizer, "_step_count"):
