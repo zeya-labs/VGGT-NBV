@@ -13,7 +13,7 @@ VGGT基础模型封装类
 
 import torch
 import torch.nn as nn
-from typing import List, Dict, Tuple, Optional, Union
+from typing import List, Dict, Tuple, Optional, Sequence, Union
 import sys
 import os
 
@@ -58,6 +58,85 @@ class VGGTWrapper(nn.Module):
         
         self.vggt_model.eval()
         print("VGGT model loaded and frozen successfully")
+
+        # 梯度捕获配置（用于TensorBoard分析）
+        self._capture_gradients: bool = False
+        self._grad_capture_keys: Tuple[str, ...] = ("depth")
+        self._capture_input_grad: bool = False
+        self._captured_tensors: Dict[str, torch.Tensor] = {}
+        self._captured_input: Optional[torch.Tensor] = None
+
+    def configure_gradient_capture(self,
+                                   enable: bool = True,
+                                   keys: Optional[Sequence[str]] = None,
+                                   capture_input: bool = True) -> None:
+        """配置VGGT输出的梯度捕获，用于调试和TensorBoard记录。
+
+        Args:
+            enable: 是否启用梯度捕获。
+            keys: 需要观察梯度的`predictions`键集合。
+            capture_input: 是否捕获输入图像张量的梯度。
+        """
+        self._capture_gradients = enable
+        self._capture_input_grad = capture_input
+
+        if keys is not None:
+            self._grad_capture_keys = tuple(keys)
+
+        if not enable:
+            self._captured_tensors.clear()
+            self._captured_input = None
+
+    def _prepare_gradient_logging(self,
+                                   images: torch.Tensor,
+                                   predictions: Dict[str, torch.Tensor]) -> None:
+        """在需要时对指定张量调用retain_grad以便后续记录梯度。"""
+        if not self._capture_gradients:
+            return
+
+        # 捕获输出张量梯度
+        self._captured_tensors = {}
+        for key in self._grad_capture_keys:
+            tensor = predictions.get(key)
+            if tensor is None or not torch.is_tensor(tensor):
+                continue
+            if not tensor.requires_grad:
+                continue
+            tensor.retain_grad()
+            self._captured_tensors[key] = tensor
+
+        # 捕获输入图像梯度
+        if self._capture_input_grad and images.requires_grad:
+            images.retain_grad()
+            self._captured_input = images
+        else:
+            self._captured_input = None
+
+    def collect_gradient_stats(self) -> Dict[str, float]:
+        """收集最近一次前向传播中保留的梯度统计信息。"""
+        if not self._capture_gradients:
+            return {}
+
+        grad_stats: Dict[str, float] = {}
+
+        for key, tensor in list(self._captured_tensors.items()):
+            grad = tensor.grad
+            # print(key, grad)
+            if grad is None:
+                continue
+            grad_stats[f"{key}/grad_norm"] = grad.norm().detach().item()
+            grad_stats[f"{key}/grad_mean_abs"] = grad.abs().mean().detach().item()
+
+        if self._capture_input_grad and self._captured_input is not None:
+            grad = self._captured_input.grad
+            if grad is not None:
+                grad_stats["input/grad_norm"] = grad.norm().detach().item()
+                grad_stats["input/grad_mean_abs"] = grad.abs().mean().detach().item()
+
+        self._captured_tensors.clear()
+        self._captured_input = None
+
+        return grad_stats
     
     def extract_scene_features(self, images: torch.Tensor, layer_idx: int = -1) -> torch.Tensor:
         """
@@ -147,7 +226,12 @@ class VGGTWrapper(nn.Module):
                 - pose_enc: 相机位姿编码 [B, S, 9]
         """
         predictions = self.vggt_model(images)
-        
+
+        # # 输出predictions每个键的requires_grad
+        # for key, tensor in predictions.items():
+        #     if tensor is not None and torch.is_tensor(tensor):
+        #         print(f"{key}: {tensor.requires_grad}")
+
         # print(f"Pose enc shape: {predictions['pose_enc'].shape}")
         # 将姿态编码转换为外参和内参矩阵
 
@@ -162,6 +246,9 @@ class VGGTWrapper(nn.Module):
         # print(f"Intrinsic shape: {predictions['intrinsic'].shape}")
         world_points = unproject_depth_map_to_point_map_torch(depth_map, predictions["extrinsic"], predictions["intrinsic"])
         predictions["world_points_from_depth"] = world_points
+
+        # 如果启用了梯度捕获，则在返回前保留梯度信息
+        self._prepare_gradient_logging(images, predictions)
 
         return predictions
     

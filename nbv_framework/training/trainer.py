@@ -64,7 +64,15 @@ class NBVTrainer:
         self.device = device
         self.num_epochs = num_epochs
         self.log_dir = log_dir
-        
+
+        # 启用VGGT梯度捕获，便于调试NBV梯度链路
+        self._vggt_grad_keys = ("world_points", "world_points_conf")
+        self.vggt_wrapper.configure_gradient_capture(
+            enable=True,
+            keys=self._vggt_grad_keys,
+            capture_input=True
+        )
+
         # 初始化TensorBoard Writer
         self.writer = SummaryWriter(self.log_dir)
         
@@ -89,8 +97,6 @@ class NBVTrainer:
         # 日志
         self.setup_logging()
 
-        # 标记是否已执行过一次优化器步进，用于保证scheduler.step()调用顺序
-        self._optimizer_stepped = False
     
     def setup_logging(self):
         """设置日志"""
@@ -103,6 +109,44 @@ class NBVTrainer:
             ]
         )
         self.logger = logging.getLogger(__name__)
+
+    def _log_vggt_gradient_stats(self, new_images: torch.Tensor) -> None:
+        """记录VGGT相关的梯度统计信息到TensorBoard。"""
+        grad_stats = self.vggt_wrapper.collect_gradient_stats()
+
+        for key in getattr(self, "_vggt_grad_keys", ("depth", "world_points_from_depth")):
+            norm_key = f"{key}/grad_norm"
+            mean_key = f"{key}/grad_mean_abs"
+
+            norm_val = grad_stats.get(norm_key, 0.0)
+            mean_val = grad_stats.get(mean_key, 0.0)
+            has_grad = 1.0 if norm_key in grad_stats else 0.0
+
+            self.writer.add_scalar(f'train/gradients/vggt/{key}_grad_norm', norm_val, self.global_step)
+            self.writer.add_scalar(f'train/gradients/vggt/{key}_grad_mean_abs', mean_val, self.global_step)
+            self.writer.add_scalar(f'train/gradients/vggt/{key}_has_grad', has_grad, self.global_step)
+
+        input_norm = grad_stats.get('input/grad_norm', 0.0)
+        input_mean = grad_stats.get('input/grad_mean_abs', 0.0)
+        input_has_grad = 1.0 if 'input/grad_norm' in grad_stats else 0.0
+
+        self.writer.add_scalar('train/gradients/vggt/input_grad_norm', input_norm, self.global_step)
+        self.writer.add_scalar('train/gradients/vggt/input_grad_mean_abs', input_mean, self.global_step)
+        self.writer.add_scalar('train/gradients/vggt/input_has_grad', input_has_grad, self.global_step)
+
+        has_new_grad = 1.0 if new_images.grad is not None else 0.0
+        self.writer.add_scalar('train/gradients/new_view_has_grad', has_new_grad, self.global_step)
+
+        if new_images.grad is not None:
+            new_view_norm = new_images.grad.norm().detach().item()
+            new_view_mean = new_images.grad.abs().mean().detach().item()
+        else:
+            new_view_norm = 0.0
+            new_view_mean = 0.0
+            self.logger.warning("new_images gradient is None at global step %d", self.global_step)
+
+        self.writer.add_scalar('train/gradients/new_view_grad_norm', new_view_norm, self.global_step)
+        self.writer.add_scalar('train/gradients/new_view_grad_mean_abs', new_view_mean, self.global_step)
     
     def training_step(self, 
                      batch: Dict[str, torch.Tensor],
@@ -142,7 +186,10 @@ class NBVTrainer:
         # 检查输出维度，如果是[B,3]则转换为[B,7]
         if next_camera_pose.shape[-1] == 3:
             next_camera_pose = position_to_pose_tensor(next_camera_pose)
-        
+
+        if backprop and next_camera_pose.requires_grad:
+            next_camera_pose.retain_grad()
+
         # 记录位姿数据到TensorBoard
         if self.global_step % 1 == 0:  # 每10步记录一次，避免过于频繁
             # 记录位置信息（前3维）
@@ -188,6 +235,9 @@ class NBVTrainer:
         # 确保与 initial_images 在同一设备
         if new_images.device != initial_images.device:
             new_images = new_images.to(initial_images.device)
+
+        if backprop and new_images.requires_grad:
+            new_images.retain_grad()
         
         # 步骤4: 质量评估 - VGGT重建并计算质量
         # 将 new_images 从 [B, 3, H, W] 扩展为 [B, 1, 3, H, W]
@@ -224,6 +274,17 @@ class NBVTrainer:
         if backprop:
             total_loss.backward()
 
+            pose_grad = next_camera_pose.grad
+            pose_grad_norm = pose_grad.norm().detach().item() if pose_grad is not None else 0.0
+            pose_grad_mean = pose_grad.abs().mean().detach().item() if pose_grad is not None else 0.0
+
+            if pose_grad is None:
+                self.logger.warning("next_camera_pose grad is None")
+
+            self.writer.add_scalar('train/gradients/next_camera_grad_norm', pose_grad_norm, self.global_step)
+            self.writer.add_scalar('train/gradients/next_camera_grad_mean_abs', pose_grad_mean, self.global_step)
+            self.writer.add_scalar('train/gradients/next_camera_has_grad', 1.0 if pose_grad is not None else 0.0, self.global_step)
+
             grad_stats, missing = [], []
             for name, param in self.policy_network.named_parameters():
                 if not param.requires_grad:
@@ -234,7 +295,7 @@ class NBVTrainer:
                     continue
                 grad_stats.append((name, grad.norm().item(), grad.abs().mean().item()))
 
-            for name, norm_val, mean_abs in grad_stats[:8]:  # 只打印前几个防止刷屏
+            for name, norm_val, mean_abs in grad_stats:  # 只打印前几个防止刷屏
                 self.logger.info(
                     "grad %s |norm| %.4e |mean|grad| %.4e",
                     name, norm_val, mean_abs
@@ -248,18 +309,18 @@ class NBVTrainer:
                 self.logger.info("total grad norm %.4e (remaining layers truncated)", overall)
             if missing:
                 self.logger.warning("layers without grad: %s", ", ".join(missing[:5]))
-                
-            # 梯度裁剪
-            torch.nn.utils.clip_grad_norm_(self.policy_network.parameters(), max_norm=1.0)
+
+            # 记录VGGT与新视图的梯度统计信息
+            self._log_vggt_gradient_stats(new_images)
+
+            # 记录策略网络梯度的整体范数（clip_grad_norm_返回裁剪前范数）
+            total_policy_norm = torch.nn.utils.clip_grad_norm_(
+                self.policy_network.parameters(), max_norm=1.0
+            )
+            self.writer.add_scalar('train/gradients/policy_total_norm', total_policy_norm.item(), self.global_step)
+            # self.writer.add_scalar('train/gradients/policy_missing_params', float(len(missing)), self.global_step)
+
             self.optimizer.step()
-            # 确认记录优化器已步进（某些实现可能未维护 _step_count）
-            try:
-                if hasattr(self.optimizer, "_step_count"):
-                    self.optimizer._step_count += 1
-            except Exception:
-                pass
-            # 标记：已执行过一次优化器步进
-            self._optimizer_stepped = True
         
         # 记录
         loss_dict = {
@@ -281,13 +342,13 @@ class NBVTrainer:
             
             # 记录各个损失组件（原始值）
             self.writer.add_scalar('train/losses/chamfer_loss', loss_dict['chamfer_loss'], self.global_step)
-            self.writer.add_scalar('train/losses/confidence_loss', loss_dict['confidence_loss'], self.global_step)
-            self.writer.add_scalar('train/losses/viewpoint_loss', loss_dict['viewpoint_loss'], self.global_step)
+            # self.writer.add_scalar('train/losses/confidence_loss', loss_dict['confidence_loss'], self.global_step)
+            # self.writer.add_scalar('train/losses/viewpoint_loss', loss_dict['viewpoint_loss'], self.global_step)
             
-            # 记录加权后的损失组件
-            self.writer.add_scalar('train/weighted_losses/chamfer_loss', loss_dict['weighted_chamfer_loss'], self.global_step)
-            self.writer.add_scalar('train/weighted_losses/confidence_loss', loss_dict['weighted_confidence_loss'], self.global_step)
-            self.writer.add_scalar('train/weighted_losses/viewpoint_loss', loss_dict['weighted_viewpoint_loss'], self.global_step)
+            # # 记录加权后的损失组件
+            # self.writer.add_scalar('train/weighted_losses/chamfer_loss', loss_dict['weighted_chamfer_loss'], self.global_step)
+            # self.writer.add_scalar('train/weighted_losses/confidence_loss', loss_dict['weighted_confidence_loss'], self.global_step)
+            # self.writer.add_scalar('train/weighted_losses/viewpoint_loss', loss_dict['weighted_viewpoint_loss'], self.global_step)
             self.global_step += 1
         
         return loss_dict, new_images, initial_images
@@ -411,14 +472,13 @@ class NBVTrainer:
                 val_loss_dict = self.validate_epoch(val_loader)
             
             # 学习率调度
-            # 仅在已至少执行过一次 optimizer.step() 后再调用，以满足 PyTorch 的顺序要求
-            if getattr(self.optimizer, "_step_count", 0) > 0:
-                self.scheduler.step()
-            else:
+            if self.global_step == 0:
                 self.logger.warning(
                     "Skipping lr_scheduler.step() at epoch %d because optimizer.step() has not been called yet.",
                     self.current_epoch,
                 )
+            else:
+                self.scheduler.step()
             
             # 日志记录
             self._log_epoch_results(train_loss_dict, val_loss_dict)
