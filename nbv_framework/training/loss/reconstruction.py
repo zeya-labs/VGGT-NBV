@@ -158,7 +158,7 @@ class ReconstructionLoss(nn.Module):
         self,
         recon_data: Dict[str, torch.Tensor],
         combined_images_batch: torch.Tensor,
-        confidence_threshold: float = 50.0,
+        confidence_threshold: float = 0.0,
         source: Literal["vggt", "depth"] = "depth",
         gt_valid_masks: Optional[torch.Tensor] = None,
     ) -> Tuple[Pointclouds, torch.Tensor]:
@@ -197,13 +197,13 @@ class ReconstructionLoss(nn.Module):
                 (conf_data >= conf_threshold_value) & (conf_data > 1e-5)
             )
 
-            if combined_images_batch is not None:
-                pixel_intensity = combined_images_batch.mean(dim=2)
-                black_threshold = 0.05
-                non_black_mask = pixel_intensity > black_threshold
-                combined_mask = high_conf_mask & non_black_mask
-            else:
-                combined_mask = high_conf_mask
+            # if combined_images_batch is not None:
+            #     pixel_intensity = combined_images_batch.mean(dim=2)
+            #     black_threshold = 0.05
+            #     non_black_mask = pixel_intensity > black_threshold
+            #     combined_mask = high_conf_mask & non_black_mask
+            # else:
+            #     combined_mask = high_conf_mask
 
             if gt_valid_masks is not None:
                 if gt_valid_masks.shape != combined_mask.shape:
@@ -235,10 +235,10 @@ class ReconstructionLoss(nn.Module):
         writer,
         step,
         device: torch.device,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         zero = torch.tensor(0.0, device=device)
         if self.chamfer_weight <= 0 or "gt_points" not in gt_data:
-            return zero, zero
+            return zero, zero, None
 
         if combined_camera_poses is None:
             raise ValueError(
@@ -293,7 +293,7 @@ class ReconstructionLoss(nn.Module):
             logging.warning(
                 "预测点云列表的批次大小与GT点云不匹配。跳过Chamfer损失计算。"
             )
-            return zero, zero
+            return zero, zero, correspondence_mask
 
         chamfer_loss_value = self.chamfer_loss(
             pred_pointclouds,
@@ -304,12 +304,13 @@ class ReconstructionLoss(nn.Module):
         )
 
         weighted_loss = self.chamfer_weight * chamfer_loss_value
-        return weighted_loss, chamfer_loss_value
+        return weighted_loss, chamfer_loss_value, correspondence_mask
 
     def _compute_confidence_component(
         self,
         recon_data: Dict[str, torch.Tensor],
         device: torch.device,
+        confidence_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         zero = torch.tensor(0.0, device=device)
         if self.confidence_weight <= 0:
@@ -320,10 +321,24 @@ class ReconstructionLoss(nn.Module):
 
         loss = zero
         if world_points_conf is not None:
-            loss = loss - torch.log(world_points_conf.mean() + 1e-8)
+            if confidence_mask is not None:
+                if confidence_mask.shape != world_points_conf.shape:
+                    raise ValueError(
+                        "confidence_mask shape {confidence_mask.shape} does not match "
+                        f"world_points_conf shape {world_points_conf.shape}"
+                    )
+                mask = confidence_mask.to(device=world_points_conf.device, dtype=world_points_conf.dtype)
+                valid_count = mask.sum()
+                if valid_count.item() > 0:
+                    masked_mean = (world_points_conf * mask).sum() / valid_count
+                else:
+                    masked_mean = world_points_conf.new_tensor(1.0)
+                loss = loss - torch.log(masked_mean + 1e-8)
+            else:
+                loss = loss - torch.log(world_points_conf.mean() + 1e-8)
 
-        if depth_conf is not None:
-            loss = loss - torch.log(depth_conf.mean() + 1e-8)
+        # if depth_conf is not None:
+        #     loss = loss - torch.log(depth_conf.mean() + 1e-8)
 
         weighted_loss = self.confidence_weight * loss
         return weighted_loss, loss
@@ -365,7 +380,7 @@ class ReconstructionLoss(nn.Module):
         total_loss = torch.tensor(0.0, device=device)
         loss_components: Dict[str, float] = {}
 
-        weighted_chamfer, chamfer_raw = self._compute_chamfer_component(
+        weighted_chamfer, chamfer_raw, confidence_mask = self._compute_chamfer_component(
             recon_data,
             gt_data,
             combined_images_batch,
@@ -381,6 +396,7 @@ class ReconstructionLoss(nn.Module):
         weighted_confidence, confidence_raw = self._compute_confidence_component(
             recon_data,
             device,
+            confidence_mask=confidence_mask,
         )
         total_loss = total_loss + weighted_confidence
         loss_components["confidence_loss"] = confidence_raw.item()
