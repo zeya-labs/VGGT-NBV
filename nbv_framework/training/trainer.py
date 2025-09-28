@@ -43,7 +43,8 @@ class NBVTrainer:
                  learning_rate: float = 1e-4,
                  weight_decay: float = 1e-5,
                  log_dir: str = "runs/nbv_experiment",
-                 device: str = "cuda"):
+                 device: str = "cuda",
+                 enable_validation: bool = False):
         """
         初始化训练器
         
@@ -56,6 +57,7 @@ class NBVTrainer:
             weight_decay: 权重衰减
             log_dir: TensorBoard日志目录
             device: 计算设备
+            enable_validation: 是否在训练过程中执行验证流程
         """
         self.vggt_wrapper = vggt_wrapper
         self.policy_network = policy_network
@@ -64,6 +66,7 @@ class NBVTrainer:
         self.device = device
         self.num_epochs = num_epochs
         self.log_dir = log_dir
+        self.enable_validation = enable_validation
 
         # 启用VGGT梯度捕获，便于调试NBV梯度链路
         self._vggt_grad_keys = ("world_points", "world_points_conf")
@@ -464,6 +467,12 @@ class NBVTrainer:
         
         self.logger.info(f"Starting training for {self.num_epochs} epochs")
         self.logger.info(f"Policy network parameters: {sum(p.numel() for p in self.policy_network.parameters())}")
+
+        if self.enable_validation:
+            if val_loader is None:
+                self.logger.warning("Validation is enabled but no val_loader is provided; validation will be skipped.")
+        elif val_loader is not None:
+            self.logger.info("Validation loader supplied but validation is disabled; it will be ignored.")
         
         for epoch in range(self.num_epochs):
             self.current_epoch = epoch
@@ -472,10 +481,10 @@ class NBVTrainer:
             train_loss_dict = self.train_epoch(train_loader)
             
             # 验证
-            # val_loss_dict = None
-            # if val_loader is not None:
-            #     val_loss_dict = self.validate_epoch(val_loader)
-            
+            val_loss_dict = None
+            if self.enable_validation and val_loader is not None:
+                val_loss_dict = self.validate_epoch(val_loader)
+
             # 学习率调度
             if self.global_step == 0:
                 self.logger.warning(
@@ -486,14 +495,14 @@ class NBVTrainer:
                 self.scheduler.step()
             
             # 日志记录
-            # self._log_epoch_results(train_loss_dict, val_loss_dict)
-            
+            self._log_epoch_results(train_loss_dict, val_loss_dict)
+
             # 模型保存
-            # if val_loss_dict is not None:
-            #     val_loss = val_loss_dict["total_loss"]
-            #     if val_loss < self.best_loss:
-            #         self.best_loss = val_loss
-            #         self._save_checkpoint(save_dir, "best_model.pth")
+            if val_loss_dict is not None:
+                val_loss = val_loss_dict["total_loss"]
+                if val_loss < self.best_loss:
+                    self.best_loss = val_loss
+                    self._save_checkpoint(save_dir, "best_model.pth")
             
             # 定期保存
             if (epoch + 1) % 10 == 0:
