@@ -472,9 +472,9 @@ class NBVTrainer:
             train_loss_dict = self.train_epoch(train_loader)
             
             # 验证
-            val_loss_dict = None
-            if val_loader is not None:
-                val_loss_dict = self.validate_epoch(val_loader)
+            # val_loss_dict = None
+            # if val_loader is not None:
+            #     val_loss_dict = self.validate_epoch(val_loader)
             
             # 学习率调度
             if self.global_step == 0:
@@ -486,14 +486,14 @@ class NBVTrainer:
                 self.scheduler.step()
             
             # 日志记录
-            self._log_epoch_results(train_loss_dict, val_loss_dict)
+            # self._log_epoch_results(train_loss_dict, val_loss_dict)
             
             # 模型保存
-            if val_loss_dict is not None:
-                val_loss = val_loss_dict["total_loss"]
-                if val_loss < self.best_loss:
-                    self.best_loss = val_loss
-                    self._save_checkpoint(save_dir, "best_model.pth")
+            # if val_loss_dict is not None:
+            #     val_loss = val_loss_dict["total_loss"]
+            #     if val_loss < self.best_loss:
+            #         self.best_loss = val_loss
+            #         self._save_checkpoint(save_dir, "best_model.pth")
             
             # 定期保存
             if (epoch + 1) % 10 == 0:

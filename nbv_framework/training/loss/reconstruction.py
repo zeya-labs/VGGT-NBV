@@ -39,7 +39,8 @@ class ReconstructionLoss(nn.Module):
 
         self.chamfer_loss = ChamferDistance()
         self.viewpoint_loss = ViewpointLoss()
-        self.pose_coordinate_limit = 3.0
+        self.pose_outer_radius = 5.0
+        self.pose_inner_radius = 1.0
 
     @staticmethod
     def _infer_device(tensor_dict: Dict[str, torch.Tensor]) -> Optional[torch.device]:
@@ -362,40 +363,46 @@ class ReconstructionLoss(nn.Module):
 
     def _compute_pose_penalty_component(
         self,
-        combined_camera_poses: Optional[torch.Tensor],
+        combined_camera_poses: torch.Tensor,
         device: torch.device,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
+        """
+        Computes a pose penalty based on the Euclidean distance from the origin.
+        This constrains poses to a spherical shell.
+        """
         zero = torch.tensor(0.0, device=device)
-        if self.pose_penalty_weight <= 0:
+        pose_penalty_weight = getattr(self, "pose_penalty_weight", 0.0)
+        if pose_penalty_weight <= 0:
             return zero, zero
 
-        if combined_camera_poses is None:
-            logging.warning("combined_camera_poses is required when pose penalty is enabled.")
-            return zero, zero
-
-        if combined_camera_poses.dim() < 2 or combined_camera_poses.shape[-1] < 3:
-            logging.warning(
-                "combined_camera_poses has incompatible shape %s for pose penalty computation.",
-                combined_camera_poses.shape,
-            )
-            return zero, zero
-
+        # Get target positions (e.g., camera centers)
         if combined_camera_poses.dim() == 2:
             target_positions = combined_camera_poses[:, :3]
         else:
             target_positions = combined_camera_poses[:, -1, :3]
 
-        target_positions = target_positions.to(device=device, dtype=torch.float32)
+        # Define the spherical shell boundaries
+        outer_radius = float(getattr(self, "pose_outer_radius", 4.0)) # 最大允许半径
+        inner_radius = float(getattr(self, "pose_inner_radius", 2.0)) # 最小允许半径
 
-        lower_bound = -self.pose_coordinate_limit
-        upper_bound = self.pose_coordinate_limit
+        # Calculate the Euclidean distance (L2 norm) from the origin for each pose
+        # torch.linalg.norm is efficient for this
+        distances = torch.linalg.norm(target_positions, ord=2, dim=-1)
 
-        lower_violation = torch.clamp(lower_bound - target_positions, min=0.0)
-        upper_violation = torch.clamp(target_positions - upper_bound, min=0.0)
-        violation = lower_violation + upper_violation
+        # Calculate violations
+        # Violation for being too close (distance < inner_radius)
+        inner_violation = torch.clamp(inner_radius - distances, min=0.0) * 10
+        
+        # Violation for being too far (distance > outer_radius)
+        outer_violation = torch.clamp(distances - outer_radius, min=0.0)
 
+        # Total violation per camera pose
+        violation = inner_violation + outer_violation
+        
+        # Final penalty is the mean squared violation
         penalty_value = (violation.pow(2)).mean()
-        weighted_penalty = self.pose_penalty_weight * penalty_value
+        weighted_penalty = pose_penalty_weight * penalty_value
+        
         return weighted_penalty, penalty_value
 
     def forward(
