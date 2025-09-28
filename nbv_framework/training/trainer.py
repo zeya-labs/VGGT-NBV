@@ -23,7 +23,7 @@ import torchvision
 
 from ..models import VGGTWrapper, BaseNBVPolicy
 from ..rendering import DifferentiableRenderer
-from .losses import ReconstructionLoss, ChamferDistance
+from .loss import ReconstructionLoss, ChamferDistance
 from ..utils.camera_utils import position_to_pose_tensor
 
 
@@ -285,30 +285,30 @@ class NBVTrainer:
             self.writer.add_scalar('train/gradients/next_camera_grad_mean_abs', pose_grad_mean, self.global_step)
             self.writer.add_scalar('train/gradients/next_camera_has_grad', 1.0 if pose_grad is not None else 0.0, self.global_step)
 
-            grad_stats, missing = [], []
-            for name, param in self.policy_network.named_parameters():
-                if not param.requires_grad:
-                    continue
-                grad = param.grad
-                if grad is None:
-                    missing.append(name)
-                    continue
-                grad_stats.append((name, grad.norm().item(), grad.abs().mean().item()))
+            # grad_stats, missing = [], []
+            # for name, param in self.policy_network.named_parameters():
+            #     if not param.requires_grad:
+            #         continue
+            #     grad = param.grad
+            #     if grad is None:
+            #         missing.append(name)
+            #         continue
+            #     grad_stats.append((name, grad.norm().item(), grad.abs().mean().item()))
 
-            for name, norm_val, mean_abs in grad_stats:  # 只打印前几个防止刷屏
-                self.logger.info(
-                    "grad %s |norm| %.4e |mean|grad| %.4e",
-                    name, norm_val, mean_abs
-                )
-            if len(grad_stats) > 8:
-                overall = torch.sqrt(sum(
-                    param.grad.pow(2).sum()
-                    for _, param in self.policy_network.named_parameters()
-                    if param.grad is not None
-                )).item()
-                self.logger.info("total grad norm %.4e (remaining layers truncated)", overall)
-            if missing:
-                self.logger.warning("layers without grad: %s", ", ".join(missing[:5]))
+            # for name, norm_val, mean_abs in grad_stats:  # 只打印前几个防止刷屏
+            #     self.logger.info(
+            #         "grad %s |norm| %.4e |mean|grad| %.4e",
+            #         name, norm_val, mean_abs
+            #     )
+            # if len(grad_stats) > 8:
+            #     overall = torch.sqrt(sum(
+            #         param.grad.pow(2).sum()
+            #         for _, param in self.policy_network.named_parameters()
+            #         if param.grad is not None
+            #     )).item()
+            #     self.logger.info("total grad norm %.4e (remaining layers truncated)", overall)
+            # if missing:
+            #     self.logger.warning("layers without grad: %s", ", ".join(missing[:5]))
 
             # 记录VGGT与新视图的梯度统计信息
             self._log_vggt_gradient_stats(new_images)

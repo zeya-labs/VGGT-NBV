@@ -4,7 +4,7 @@
 包含端到端的NBV策略训练框架。
 """
 
+from .loss import ChamferDistance, ReconstructionLoss, ViewpointLoss
 from .trainer import NBVTrainer
-from .losses import ReconstructionLoss, ChamferDistance
 
-__all__ = ["NBVTrainer", "ReconstructionLoss", "ChamferDistance"]
+__all__ = ["NBVTrainer", "ReconstructionLoss", "ChamferDistance", "ViewpointLoss"]

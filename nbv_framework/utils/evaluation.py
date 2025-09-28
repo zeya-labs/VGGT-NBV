@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 from ..models import VGGTWrapper, BaseNBVPolicy
 from ..rendering import DifferentiableRenderer
-from ..training.losses import ChamferDistance
+from ..training.loss import ChamferDistance
 
 
 def evaluate_nbv_policy(policy_network: BaseNBVPolicy,
