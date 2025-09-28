@@ -125,7 +125,8 @@ def setup_models(config: Dict[str, Any]):
     
     # 4. 损失函数
     loss_fn = ReconstructionLoss(
-        renderer=renderer
+        renderer=renderer,
+        pose_up_axis=config["up_axis"]
     )
     
     print("Models setup completed!")

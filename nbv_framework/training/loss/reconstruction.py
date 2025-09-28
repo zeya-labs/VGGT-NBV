@@ -26,6 +26,7 @@ class ReconstructionLoss(nn.Module):
         pose_penalty_weight: float = 1.0,
         renderer: Optional["DifferentiableRenderer"] = None,
         gt_lighting_type: str = "ambient",
+        pose_up_axis: str = "Y",
     ) -> None:
         super().__init__()
 
@@ -36,6 +37,9 @@ class ReconstructionLoss(nn.Module):
         self.renderer = renderer
         self.gt_lighting_type = gt_lighting_type
         self.train_flag = None
+        self.pose_up_axis = pose_up_axis.upper()
+        if self.pose_up_axis not in {"X", "Y", "Z"}:
+            raise ValueError("pose_up_axis must be one of {'X', 'Y', 'Z'}.")
 
         self.chamfer_loss = ChamferDistance()
         self.viewpoint_loss = ViewpointLoss()
@@ -363,23 +367,30 @@ class ReconstructionLoss(nn.Module):
 
     def _compute_pose_penalty_component(
         self,
-        combined_camera_poses: torch.Tensor,
+        combined_camera_poses: Optional[torch.Tensor],
         device: torch.device,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Computes a pose penalty based on the Euclidean distance from the origin.
         This constrains poses to a spherical shell.
         """
         zero = torch.tensor(0.0, device=device)
         pose_penalty_weight = getattr(self, "pose_penalty_weight", 0.0)
-        if pose_penalty_weight <= 0:
-            return zero, zero
+        if pose_penalty_weight <= 0 or combined_camera_poses is None:
+            return zero, zero, {
+                "pose_penalty_inner": zero,
+                "pose_penalty_outer": zero,
+                "pose_penalty_floor": zero,
+            }
 
         # Get target positions (e.g., camera centers)
         if combined_camera_poses.dim() == 2:
             target_positions = combined_camera_poses[:, :3]
         else:
             target_positions = combined_camera_poses[:, -1, :3]
+
+        axis_to_index = {"X": 0, "Y": 1, "Z": 2}
+        up_axis_index = axis_to_index.get(getattr(self, "pose_up_axis", "Y"), 1)
 
         # Define the spherical shell boundaries
         outer_radius = float(getattr(self, "pose_outer_radius", 4.0)) # 最大允许半径
@@ -391,19 +402,30 @@ class ReconstructionLoss(nn.Module):
 
         # Calculate violations
         # Violation for being too close (distance < inner_radius)
-        inner_violation = torch.clamp(inner_radius - distances, min=0.0) * 10
+        inner_violation = torch.clamp(inner_radius - distances, min=0.0) * 2
         
         # Violation for being too far (distance > outer_radius)
         outer_violation = torch.clamp(distances - outer_radius, min=0.0)
 
-        # Total violation per camera pose
-        violation = inner_violation + outer_violation
-        
-        # Final penalty is the mean squared violation
-        penalty_value = (violation.pow(2)).mean()
+        # Penalise camera poses that fall below the configured up-axis plane (default Y=0)
+        up_axis_values = target_positions[..., up_axis_index]
+        floor_violation = torch.clamp(-up_axis_values - 2, min=0.0) * 2
+
+        # Square each component separately to avoid cross-term amplification
+        inner_penalty = inner_violation.pow(2).mean()
+        outer_penalty = outer_violation.pow(2).mean()
+        floor_penalty = floor_violation.pow(2).mean()
+
+        penalty_terms = {
+            "pose_penalty_inner": inner_penalty,
+            "pose_penalty_outer": outer_penalty,
+            "pose_penalty_floor": floor_penalty,
+        }
+
+        penalty_value = torch.stack(list(penalty_terms.values())).sum()
         weighted_penalty = pose_penalty_weight * penalty_value
-        
-        return weighted_penalty, penalty_value
+
+        return weighted_penalty, penalty_value, penalty_terms
 
     def forward(
         self,
@@ -458,13 +480,15 @@ class ReconstructionLoss(nn.Module):
         loss_components["viewpoint_loss"] = viewpoint_raw.item()
         loss_components["weighted_viewpoint_loss"] = weighted_viewpoint.item()
 
-        weighted_pose_penalty, pose_penalty_raw = self._compute_pose_penalty_component(
+        weighted_pose_penalty, pose_penalty_raw, pose_penalty_terms = self._compute_pose_penalty_component(
             combined_camera_poses,
             device,
         )
         total_loss = total_loss + weighted_pose_penalty
         loss_components["pose_penalty_loss"] = pose_penalty_raw.item()
         loss_components["weighted_pose_penalty_loss"] = weighted_pose_penalty.item()
+        for term_name, term_value in pose_penalty_terms.items():
+            loss_components[term_name] = term_value.item()
 
         loss_components["total_loss"] = total_loss.item()
 
