@@ -23,6 +23,7 @@ class ReconstructionLoss(nn.Module):
         chamfer_weight: float = 1.0,
         confidence_weight: float = 0.0,
         viewpoint_weight: float = 0.0,
+        pose_penalty_weight: float = 1.0,
         renderer: Optional["DifferentiableRenderer"] = None,
         gt_lighting_type: str = "ambient",
     ) -> None:
@@ -31,12 +32,14 @@ class ReconstructionLoss(nn.Module):
         self.chamfer_weight = chamfer_weight
         self.confidence_weight = confidence_weight
         self.viewpoint_weight = viewpoint_weight
+        self.pose_penalty_weight = pose_penalty_weight
         self.renderer = renderer
         self.gt_lighting_type = gt_lighting_type
         self.train_flag = None
 
         self.chamfer_loss = ChamferDistance()
         self.viewpoint_loss = ViewpointLoss()
+        self.pose_coordinate_limit = 3.0
 
     @staticmethod
     def _infer_device(tensor_dict: Dict[str, torch.Tensor]) -> Optional[torch.device]:
@@ -197,13 +200,13 @@ class ReconstructionLoss(nn.Module):
                 (conf_data >= conf_threshold_value) & (conf_data > 1e-5)
             )
 
-            # if combined_images_batch is not None:
-            #     pixel_intensity = combined_images_batch.mean(dim=2)
-            #     black_threshold = 0.05
-            #     non_black_mask = pixel_intensity > black_threshold
-            #     combined_mask = high_conf_mask & non_black_mask
-            # else:
-            #     combined_mask = high_conf_mask
+            if combined_images_batch is not None:
+                pixel_intensity = combined_images_batch.mean(dim=2)
+                black_threshold = 0.05
+                non_black_mask = pixel_intensity > black_threshold
+                combined_mask = high_conf_mask & non_black_mask
+            else:
+                combined_mask = high_conf_mask
 
             if gt_valid_masks is not None:
                 if gt_valid_masks.shape != combined_mask.shape:
@@ -357,6 +360,44 @@ class ReconstructionLoss(nn.Module):
         weighted_loss = self.viewpoint_weight * viewpoint_loss_value
         return weighted_loss, viewpoint_loss_value
 
+    def _compute_pose_penalty_component(
+        self,
+        combined_camera_poses: Optional[torch.Tensor],
+        device: torch.device,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        zero = torch.tensor(0.0, device=device)
+        if self.pose_penalty_weight <= 0:
+            return zero, zero
+
+        if combined_camera_poses is None:
+            logging.warning("combined_camera_poses is required when pose penalty is enabled.")
+            return zero, zero
+
+        if combined_camera_poses.dim() < 2 or combined_camera_poses.shape[-1] < 3:
+            logging.warning(
+                "combined_camera_poses has incompatible shape %s for pose penalty computation.",
+                combined_camera_poses.shape,
+            )
+            return zero, zero
+
+        if combined_camera_poses.dim() == 2:
+            target_positions = combined_camera_poses[:, :3]
+        else:
+            target_positions = combined_camera_poses[:, -1, :3]
+
+        target_positions = target_positions.to(device=device, dtype=torch.float32)
+
+        lower_bound = -self.pose_coordinate_limit
+        upper_bound = self.pose_coordinate_limit
+
+        lower_violation = torch.clamp(lower_bound - target_positions, min=0.0)
+        upper_violation = torch.clamp(target_positions - upper_bound, min=0.0)
+        violation = lower_violation + upper_violation
+
+        penalty_value = (violation.pow(2)).mean()
+        weighted_penalty = self.pose_penalty_weight * penalty_value
+        return weighted_penalty, penalty_value
+
     def forward(
         self,
         recon_data: Dict[str, torch.Tensor],
@@ -409,6 +450,14 @@ class ReconstructionLoss(nn.Module):
         total_loss = total_loss + weighted_viewpoint
         loss_components["viewpoint_loss"] = viewpoint_raw.item()
         loss_components["weighted_viewpoint_loss"] = weighted_viewpoint.item()
+
+        weighted_pose_penalty, pose_penalty_raw = self._compute_pose_penalty_component(
+            combined_camera_poses,
+            device,
+        )
+        total_loss = total_loss + weighted_pose_penalty
+        loss_components["pose_penalty_loss"] = pose_penalty_raw.item()
+        loss_components["weighted_pose_penalty_loss"] = weighted_pose_penalty.item()
 
         loss_components["total_loss"] = total_loss.item()
 

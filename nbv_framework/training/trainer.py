@@ -331,6 +331,8 @@ class NBVTrainer:
             "weighted_confidence_loss": loss_components['weighted_confidence_loss'],
             "viewpoint_loss": loss_components['viewpoint_loss'],
             "weighted_viewpoint_loss": loss_components['weighted_viewpoint_loss'],
+            "pose_penalty_loss": loss_components['pose_penalty_loss'],
+            "weighted_pose_penalty_loss": loss_components['weighted_pose_penalty_loss'],
             "learning_rate": self.optimizer.param_groups[0]['lr']
         }
         
@@ -349,6 +351,9 @@ class NBVTrainer:
             # self.writer.add_scalar('train/weighted_losses/chamfer_loss', loss_dict['weighted_chamfer_loss'], self.global_step)
             # self.writer.add_scalar('train/weighted_losses/confidence_loss', loss_dict['weighted_confidence_loss'], self.global_step)
             # self.writer.add_scalar('train/weighted_losses/viewpoint_loss', loss_dict['weighted_viewpoint_loss'], self.global_step)
+            self.writer.add_scalar('train/losses/pose_penalty_loss', loss_dict['pose_penalty_loss'], self.global_step)
+            # self.writer.add_scalar('train/weighted_losses/pose_penalty_loss', loss_dict['weighted_pose_penalty_loss'], self.global_step)
+            
             self.global_step += 1
         
         return loss_dict, new_images, initial_images
