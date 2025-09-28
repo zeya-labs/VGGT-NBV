@@ -106,12 +106,16 @@ class BaseNBVPolicy(nn.Module):
             
         elif self.output_mode == "position_only":
             # 仅笛卡尔位置: x, y, z (姿态将由其他方式自动确定)
-            lower, upper = self.position_bounds
-            # 平滑限制在[min, max]区间，避免训练过程中位置发散
-            position = torch.tanh(nbv[:, :3])
-            midpoint = (upper + lower) * 0.5
-            half_range = (upper - lower) * 0.5
-            position = position * half_range + midpoint
+            # lower, upper = self.position_bounds
+            # 强制限制在[min, max]区间，避免训练过程中位置发散
+            # position = torch.tanh(nbv[:, :3])
+            # midpoint = (upper + lower) * 0.5
+            # half_range = (upper - lower) * 0.5
+            # position = position * half_range + midpoint
+
+            # position = torch.clamp(nbv[:, :3], min=lower, max=upper)
+            
+            position = nbv[:, :3]
             return position
     
     def _initialize_weights(self):
