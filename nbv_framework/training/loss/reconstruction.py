@@ -43,8 +43,8 @@ class ReconstructionLoss(nn.Module):
 
         self.chamfer_loss = ChamferDistance()
         self.viewpoint_loss = ViewpointLoss()
-        self.pose_outer_radius = 5.0
-        self.pose_inner_radius = 1.0
+        self.pose_outer_radius = 3.0
+        self.pose_inner_radius = 1.2
 
     @staticmethod
     def _infer_device(tensor_dict: Dict[str, torch.Tensor]) -> Optional[torch.device]:
@@ -402,7 +402,11 @@ class ReconstructionLoss(nn.Module):
 
         # Calculate violations
         # Violation for being too close (distance < inner_radius)
-        inner_violation = torch.clamp(inner_radius - distances, min=0.0) * 2
+        eps_tensor = distances.new_full((), 1e-6)
+        inner_violation = torch.clamp(
+            (inner_radius - distances) / (distances + eps_tensor),
+            min=0.0,
+        )
         
         # Violation for being too far (distance > outer_radius)
         outer_violation = torch.clamp(distances - outer_radius, min=0.0)
@@ -421,6 +425,12 @@ class ReconstructionLoss(nn.Module):
             "pose_penalty_outer": outer_penalty,
             "pose_penalty_floor": floor_penalty,
         }
+        # print("target_positions:",target_positions)
+        # print("distances:",distances)
+
+        # print("pose_penalty_inner:", inner_violation)
+        # print("pose_penalty_outer:", outer_violation)
+        # print("pose_penalty_floor:", floor_violation)
 
         penalty_value = torch.stack(list(penalty_terms.values())).sum()
         weighted_penalty = pose_penalty_weight * penalty_value
