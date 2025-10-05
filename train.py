@@ -29,7 +29,7 @@ def set_random_seed(seed: int = 42):
 
 # 导入NBV框架组件
 from nbv_framework import VGGTWrapper,BaseNBVPolicy, BasicNBVPolicy, DifferentiableRenderer, NBVTrainer
-from nbv_framework.training.losses import ReconstructionLoss
+from nbv_framework.training.loss import ReconstructionLoss
 from nbv_framework.datasets import SyntheticDataset, MixedDataset
 from nbv_framework.datasets.data_loaders import create_train_loader, create_val_loader
 from nbv_framework.utils.data_utils import create_synthetic_training_data
@@ -125,7 +125,8 @@ def setup_models(config: Dict[str, Any]):
     
     # 4. 损失函数
     loss_fn = ReconstructionLoss(
-        renderer=renderer
+        renderer=renderer,
+        pose_up_axis=config["up_axis"]
     )
     
     print("Models setup completed!")
