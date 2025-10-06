@@ -22,6 +22,8 @@ from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 import torchvision
 from pytorch3d.transforms import quaternion_to_matrix
+from pytorch3d.renderer.cameras import PerspectiveCameras
+from pytorch3d.utils.camera_conversions import opencv_from_cameras_projection
 
 from ..models import VGGTWrapper, BaseNBVPolicy
 from ..rendering import DifferentiableRenderer
@@ -261,6 +263,7 @@ class NBVTrainer:
         recon_data = self.vggt_wrapper.reconstruct_and_evaluate(
             combined_images_batch  # [B, N+1, 3, H, W]
         )
+        # print("===================loss开始计算===================")
         # 计算重建质量损失
         # 在训练时传递writer和step参数以启用点云可视化
         if backprop:
@@ -277,7 +280,7 @@ class NBVTrainer:
                 return_components=True, writer=self.writer, step=self.val_image_step,
                 train_flag=False
             )
-        
+        # print("===================loss计算完成===================")
         # 步骤5: 策略更新 - 反向传播（仅训练时）
         if backprop:
             total_loss.backward()
@@ -597,35 +600,115 @@ class NBVTrainer:
         ], dtype=torch.float32)
         return intrinsics
 
-    def _pose_to_cam2world(self, pose: torch.Tensor) -> torch.Tensor:
-        """将[x,y,z,qx,qy,qz,qw]格式的位姿转换为4x4的cam2world矩阵。"""
+    # def pose_to_opencv_cam2world(self, pose: torch.Tensor) -> torch.Tensor:
+    #     """
+    #     将 PyTorch3D 格式的位姿 (+X Left, +Y Up, +Z Forward)
+    #     转换为 OpenCV 约定 (+X Right, +Y Down, +Z Forward) 的 4x4 cam2world 矩阵。
+    #     """
+    #     if pose.numel() != 7:
+    #         raise ValueError(f"Expected pose tensor with 7 elements, got shape {pose.shape}.")
+
+    #     pose = pose.to(dtype=torch.float32)
+    #     device = pose.device
+
+    #     # 1. 提取位置 C
+    #     position = pose[:3]
+
+    #     # 2. 计算 PyTorch3D 相机的 cam2world 旋转
+    #     quaternion_xyzw = pose[3:]
+    #     quaternion_wxyz = torch.tensor([
+    #         quaternion_xyzw[3], quaternion_xyzw[0],
+    #         quaternion_xyzw[1], quaternion_xyzw[2],
+    #     ], device=device).unsqueeze(0)
+
+    #     # quaternion_to_matrix 得到 R_w2c_pytorch3d
+    #     R_w2c_pyt = quaternion_to_matrix(quaternion_wxyz)[0]
+    #     # 转置得到 R_c2w_pytorch3d (+X Left, +Y Up, +Z Forward)
+    #     R_c2w_pyt = R_w2c_pyt.T
+        
+    #     # 3. 定义从 PyTorch3D 相机到 OpenCV 相机的变换
+    #     # PyT (+X_L, +Y_U, +Z_F) -> OpenCV (+X_R, +Y_D, +Z_F)
+    #     # X翻转(-1), Y翻转(-1), Z不变(1)
+    #     axis_flip = torch.tensor([
+    #         [-1.0,  0.0,  0.0],
+    #         [ 0.0, -1.0,  0.0],
+    #         [ 0.0,  0.0,  1.0],
+    #     ], dtype=pose.dtype, device=device)
+
+    #     # 4. 计算 OpenCV cam2world 的最终旋转矩阵
+    #     # R_c2w_opencv = R_c2w_pyt @ axis_flip
+    #     R_c2w_opencv = torch.matmul(R_c2w_pyt, axis_flip)
+
+    #     # 5. 组装最终的 4x4 cam2world 矩阵
+    #     cam2world = torch.eye(4, dtype=pose.dtype, device=device)
+    #     cam2world[:3, :3] = R_c2w_opencv
+    #     cam2world[:3, 3] = position
+
+    #     return cam2world
+
+    def pose_to_opencv_cam2world_with_official_func(
+        self,
+        pose: torch.Tensor,
+        image_size: Tuple[int, int] = (224, 224)
+    ) -> torch.Tensor:
+        """
+        使用官方的 _opencv_from_cameras_projection 函数，
+        将 PyTorch3D 格式的位姿转换为 OpenCV 约定 的 4x4 cam2world 矩阵。
+        """
         if pose.numel() != 7:
             raise ValueError(f"Expected pose tensor with 7 elements, got shape {pose.shape}.")
 
         pose = pose.to(dtype=torch.float32)
-        position = pose[:3]
+        device = pose.device
+
+        # === 第1步: 将您的 cam2world `pose` 转换为 Pytorch3D `world2cam` (R, T) ===
+        # 这是我们之前验证过的，从您的位姿到Pytorch3D相机参数的正确转换
+        position_c2w = pose[:3]  # 相机在世界中的位置 C
         quaternion_xyzw = pose[3:]
-        quaternion_wxyz = torch.stack([
-            quaternion_xyzw[3],
-            quaternion_xyzw[0],
-            quaternion_xyzw[1],
-            quaternion_xyzw[2],
-        ])
+        quaternion_wxyz = torch.tensor([
+            quaternion_xyzw[3], quaternion_xyzw[0],
+            quaternion_xyzw[1], quaternion_xyzw[2],
+        ], device=device).unsqueeze(0)
 
-        rotation_world_to_cam = quaternion_to_matrix(quaternion_wxyz.unsqueeze(0))[0]
-        rotation_cam_to_world = rotation_world_to_cam.transpose(0, 1)
+        # 从四元数得到 Pytorch3D 的 world-to-camera 旋转
+        R_w2c_pyt = quaternion_to_matrix(quaternion_wxyz) # Shape: [1, 3, 3]
 
-        # PyTorch3D (+X left, +Y up) -> OpenCV (+X right, +Y down) camera axes
-        axis_conversion = rotation_cam_to_world.new_tensor([
-            [-1.0, 0.0, 0.0],
-            [0.0, -1.0, 0.0],
-            [0.0, 0.0, 1.0],
-        ])
-        rotation_cam_to_world = rotation_cam_to_world @ axis_conversion
+        # 从世界位置 C 和 R_w2c 计算 Pytorch3D 的 world-to-camera 平移 T
+        # T = -C @ R  (行向量约定)
+        T_w2c_pyt = -(position_c2w.unsqueeze(0).unsqueeze(0) @ R_w2c_pyt).squeeze(1) # Shape: [1, 3]
 
-        cam2world = torch.eye(4, dtype=rotation_cam_to_world.dtype, device=rotation_cam_to_world.device)
-        cam2world[:3, :3] = rotation_cam_to_world
-        cam2world[:3, 3] = position
+        # 创建一个临时的 PyTorch3D 相机对象
+        # 注意：相机内参(focal_length, principal_point)对于位姿转换是无关的，
+        # 但创建对象时需要它们，所以我们使用默认值。
+        cameras = PerspectiveCameras(
+            R=R_w2c_pyt,
+            T=T_w2c_pyt,
+            device=device
+        )
+        
+        image_size_tensor = torch.tensor([image_size], device=device, dtype=torch.float32)
+
+        # === 第2步: 调用官方函数，得到 OpenCV 风格的 `world2cam` 参数 ===
+        # R_w2c_opencv: 从世界旋转到OpenCV相机的旋转矩阵
+        # t_w2c_opencv: 从世界平移到OpenCV相机的平移向量
+        R_w2c_opencv, t_w2c_opencv, _ = opencv_from_cameras_projection(
+            cameras,
+            image_size_tensor
+        )
+
+        # === 第3步: 将 OpenCV `world2cam` (R, t) 转换为 `cam2world` 4x4 矩阵 ===
+        # 这是标准的逆变换操作
+        
+        # cam2world 的旋转是 world2cam 旋转的逆(转置)
+        R_c2w_opencv = R_w2c_opencv.transpose(1, 2)  # Shape: [1, 3, 3]
+
+        # cam2world 的平移(即相机世界位置) C = -R_c2w @ t_w2c
+        position_c2w_opencv = -torch.bmm(R_c2w_opencv, t_w2c_opencv.unsqueeze(-1)).squeeze(-1) # Shape: [1, 3]
+
+        # 组装最终的 4x4 cam2world 矩阵
+        cam2world = torch.eye(4, dtype=pose.dtype, device=device)
+        cam2world[:3, :3] = R_c2w_opencv[0]
+        cam2world[:3, 3] = position_c2w_opencv[0]
 
         return cam2world
 
@@ -665,6 +748,8 @@ class NBVTrainer:
         poses_cpu = combined_camera_poses.detach().cpu()
 
         batch_size, num_views, _, height, width = images_cpu.shape
+        # print("combined_images_batch.shape",combined_images_batch.shape)
+        # print("combined_camera_poses.shape",combined_camera_poses.shape)
         intrinsics = self._compute_intrinsics(height, width, fov_degrees)
 
         for batch_idx in range(batch_size):
@@ -682,13 +767,14 @@ class NBVTrainer:
 
                 # 视图数据按(H, W, 3)且像素范围[0,255]
                 img_uint8 = (png_img.permute(1, 2, 0) * 255.0).round().to(torch.uint8)
-                cam2world = self._pose_to_cam2world(pose_tensor)
+                # print("保存",pose_tensor)
+                cam2world = self.pose_to_opencv_cam2world_with_official_func(pose_tensor)
 
                 view_payload = {
                     "img": img_uint8,
                     "intrinsics": intrinsics.clone(),
                     "camera_poses": cam2world,
-                    "is_metric_scale": torch.tensor([True], dtype=torch.bool),
+                    "is_metric_scale": torch.tensor([False], dtype=torch.bool),
                 }
 
                 payload_path = os.path.join(batch_dir, f"view_{view_idx:02d}.pt")

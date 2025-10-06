@@ -124,6 +124,7 @@ class DifferentiableRenderer(nn.Module):
         """
         从相机位姿（位置+四元数）计算PyTorch3D所需的旋转矩阵R和平移向量T。
         """
+        # print(camera_poses)
         # 1. 分离位置和四元数
         positions = camera_poses[:, :3]      # [B, 3] (x, y, z)
         quaternions = camera_poses[:, 3:7]  # [B, 4] (qx, qy, qz, qw)
