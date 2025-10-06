@@ -602,10 +602,12 @@ class House3KDataset(BaseDataset):
             camera_poses_tensor = []
             for pose in selected_camera_poses:
                 # 转换为 [x, y, z, qx, qy, qz, qw] 格式
+                # print(pose)
                 pose_tensor = torch.tensor(
                     pose["position"] + pose["quaternion"], 
                     dtype=torch.float32
                 )
+                # print(pose_tensor)
                 camera_poses_tensor.append(pose_tensor)
             
             camera_poses = torch.stack(camera_poses_tensor) if camera_poses_tensor else torch.empty(0, 7)
