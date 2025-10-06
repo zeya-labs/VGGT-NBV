@@ -235,8 +235,6 @@ class NBVTrainer:
         new_images = self.renderer(
             gt_mesh=batched_mesh,
             camera_poses=next_camera_pose,
-            # pose_format=self.policy_network.output_mode,
-            lighting_type="ambient"
         )
 
         # 确保与 initial_images 在同一设备

@@ -190,7 +190,7 @@ class DifferentiableRenderer(nn.Module):
                 "diffuse_color": (0.125, 0.125, 0.125),
                 "specular_color": (0.0, 0.0, 0.0),
             })
-            self.base_ambient_color = (0.15, 0.15, 0.15)
+            self.base_ambient_color = (0.5, 0.5, 0.5)
         else:
             raise ValueError(f"Unknown lighting_type: {lighting_type}")
 
