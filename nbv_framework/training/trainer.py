@@ -17,9 +17,11 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import os
 import logging
+import math
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 import torchvision
+from pytorch3d.transforms import quaternion_to_matrix
 
 from ..models import VGGTWrapper, BaseNBVPolicy
 from ..rendering import DifferentiableRenderer
@@ -249,8 +251,11 @@ class NBVTrainer:
         # 直接在第二个维度上拼接，得到 [B, N+1, 3, H, W]
         combined_images_batch = torch.cat([initial_images, new_images_expanded], dim=1)
         
-        # 保存N+1张图片到log_dir下的images文件夹
-        # self._save_combined_images(combined_images_batch)
+        # 保存视图数据（图像 + 相机标定）到日志目录
+        self._save_combined_images(
+            combined_images_batch=combined_images_batch,
+            combined_camera_poses=combined_camera_poses
+        )
         
         # VGGT一次性对整个batch进行重建与评估
         recon_data = self.vggt_wrapper.reconstruct_and_evaluate(
@@ -578,42 +583,120 @@ class NBVTrainer:
         
         self.logger.info(f"Checkpoint loaded: {checkpoint_path}")
     
-    def _save_combined_images(self, combined_images_batch: torch.Tensor):
+    def _compute_intrinsics(self, height: int, width: int, fov_degrees: float) -> torch.Tensor:
+        """构建简单的针孔相机内参矩阵。"""
+        fov_radians = math.radians(float(fov_degrees))
+        fy = 0.5 * height / math.tan(fov_radians / 2.0)
+        fx = 0.5 * width / math.tan(fov_radians / 2.0)
+        cx = (width - 1) / 2.0
+        cy = (height - 1) / 2.0
+        intrinsics = torch.tensor([
+            [fx, 0.0, cx],
+            [0.0, fy, cy],
+            [0.0, 0.0, 1.0],
+        ], dtype=torch.float32)
+        return intrinsics
+
+    def _pose_to_cam2world(self, pose: torch.Tensor) -> torch.Tensor:
+        """将[x,y,z,qx,qy,qz,qw]格式的位姿转换为4x4的cam2world矩阵。"""
+        if pose.numel() != 7:
+            raise ValueError(f"Expected pose tensor with 7 elements, got shape {pose.shape}.")
+
+        pose = pose.to(dtype=torch.float32)
+        position = pose[:3]
+        quaternion_xyzw = pose[3:]
+        quaternion_wxyz = torch.stack([
+            quaternion_xyzw[3],
+            quaternion_xyzw[0],
+            quaternion_xyzw[1],
+            quaternion_xyzw[2],
+        ])
+
+        rotation_world_to_cam = quaternion_to_matrix(quaternion_wxyz.unsqueeze(0))[0]
+        rotation_cam_to_world = rotation_world_to_cam.transpose(0, 1)
+
+        # PyTorch3D (+X left, +Y up) -> OpenCV (+X right, +Y down) camera axes
+        axis_conversion = rotation_cam_to_world.new_tensor([
+            [-1.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ])
+        rotation_cam_to_world = rotation_cam_to_world @ axis_conversion
+
+        cam2world = torch.eye(4, dtype=rotation_cam_to_world.dtype, device=rotation_cam_to_world.device)
+        cam2world[:3, :3] = rotation_cam_to_world
+        cam2world[:3, 3] = position
+
+        return cam2world
+
+    def _save_combined_images(
+        self,
+        combined_images_batch: torch.Tensor,
+        combined_camera_poses: torch.Tensor,
+        fov_degrees: float = 60.0,
+    ) -> None:
         """
-        保存N+1张图片到log_dir下的images文件夹
-        
+        保存视图的图像与标定数据到log_dir下的images文件夹。
+
         Args:
             combined_images_batch: [B, N+1, 3, H, W] 的图片张量
+            combined_camera_poses: [B, N+1, 7] 的相机位姿张量
+            fov_degrees: 渲染视场角（默认60°），用于构造内参矩阵
         """
-        # 创建保存图片的目录
+        if combined_images_batch is None or combined_camera_poses is None:
+            return
+
+        # 确保形状匹配
+        if combined_images_batch.shape[:2] != combined_camera_poses.shape[:2]:
+            self.logger.warning(
+                "Skip saving combined views: image batch shape %s incompatible with pose batch shape %s.",
+                combined_images_batch.shape,
+                combined_camera_poses.shape,
+            )
+            return
+
         images_dir = os.path.join(self.log_dir, "images")
         os.makedirs(images_dir, exist_ok=True)
-        
-        # 创建当前步骤的子目录
+
         step_dir = os.path.join(images_dir, f"step_{self.global_step:06d}")
         os.makedirs(step_dir, exist_ok=True)
-        
-        # 将张量移到CPU并转换为numpy
+
         images_cpu = combined_images_batch.detach().cpu()
-        
-        # 遍历batch中的每个样本
-        for batch_idx in range(images_cpu.shape[0]):
+        poses_cpu = combined_camera_poses.detach().cpu()
+
+        batch_size, num_views, _, height, width = images_cpu.shape
+        intrinsics = self._compute_intrinsics(height, width, fov_degrees)
+
+        for batch_idx in range(batch_size):
             batch_dir = os.path.join(step_dir, f"batch_{batch_idx:03d}")
             os.makedirs(batch_dir, exist_ok=True)
-            
-            # 遍历每个样本中的N+1张图片
-            for img_idx in range(images_cpu.shape[1]):
-                # 获取单张图片 [3, H, W]
-                img = images_cpu[batch_idx, img_idx]
-                
-                # 确保像素值在[0, 1]范围内
-                img = torch.clamp(img, 0, 1)
-                
-                # 保存图片
-                img_filename = f"image_{img_idx:02d}.png"
-                img_path = os.path.join(batch_dir, img_filename)
-                
-                # 使用torchvision保存图片
-                torchvision.utils.save_image(img, img_path)
-        
-        self.logger.info(f"Saved {combined_images_batch.shape[0]} batches of {combined_images_batch.shape[1]} images to {step_dir}")
+
+            for view_idx in range(num_views):
+                raw_img = images_cpu[batch_idx, view_idx]
+                pose_tensor = poses_cpu[batch_idx, view_idx]
+
+                # PNG保存仍使用[3,H,W]且范围[0,1]
+                png_img = torch.clamp(raw_img, 0.0, 1.0)
+                png_path = os.path.join(batch_dir, f"image_{view_idx:02d}.png")
+                torchvision.utils.save_image(png_img, png_path)
+
+                # 视图数据按(H, W, 3)且像素范围[0,255]
+                img_uint8 = (png_img.permute(1, 2, 0) * 255.0).round().to(torch.uint8)
+                cam2world = self._pose_to_cam2world(pose_tensor)
+
+                view_payload = {
+                    "img": img_uint8,
+                    "intrinsics": intrinsics.clone(),
+                    "camera_poses": cam2world,
+                    "is_metric_scale": torch.tensor([True], dtype=torch.bool),
+                }
+
+                payload_path = os.path.join(batch_dir, f"view_{view_idx:02d}.pt")
+                torch.save(view_payload, payload_path)
+
+        self.logger.info(
+            "Saved view data for %d batches (%d views each) to %s",
+            batch_size,
+            num_views,
+            step_dir,
+        )
