@@ -6,7 +6,7 @@ NBV Framework: 目标驱动的策略学习框架
 基于基础模型监督的主动三维重建
 
 核心组件:
-- VGGTWrapper: 冻结的VGGT基础模型封装
+- MapAnythingWrapper: 冻结的 MapAnything 基础模型封装
 - BaseNBVPolicy: 可训练的NBV策略网络基类
 - DifferentiableRenderer: 可微分渲染器
 - NBVTrainer: 端到端训练框架
@@ -15,12 +15,12 @@ NBV Framework: 目标驱动的策略学习框架
 __version__ = "0.1.0"
 __author__ = "NBV Research Team"
 
-from .models import VGGTWrapper, BaseNBVPolicy, BasicNBVPolicy, AttentionNBVPolicy, IterativeNBVPolicy, MultiScaleNBVPolicy, HybridNBVPolicy, GeometryAwareNBVPolicy
+from .models import MapAnythingWrapper, BaseNBVPolicy, BasicNBVPolicy, AttentionNBVPolicy, IterativeNBVPolicy, MultiScaleNBVPolicy, HybridNBVPolicy, GeometryAwareNBVPolicy
 from .rendering import DifferentiableRenderer
 from .training import NBVTrainer
 
 __all__ = [
-    "VGGTWrapper",
+    "MapAnythingWrapper",
     "BaseNBVPolicy", 
     "DifferentiableRenderer",
     "NBVTrainer",

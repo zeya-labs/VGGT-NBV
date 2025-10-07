@@ -1,3 +1,5 @@
+outputs/
+
 # Project specific directories
 runs/
 checkpoints/

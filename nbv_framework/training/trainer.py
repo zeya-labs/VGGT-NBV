@@ -2,7 +2,7 @@
 NBV策略训练器
 
 实现端到端的目标驱动策略学习训练流程：
-1. 状态编码：VGGT提取场景特征
+1. 状态编码：MapAnything 提取场景特征
 2. 动作提议：策略网络输出相机位姿
 3. 环境交互：可微分渲染生成新视图
 4. 质量评估：VGGT重建并计算质量损失
@@ -25,7 +25,7 @@ from pytorch3d.transforms import quaternion_to_matrix
 from pytorch3d.renderer.cameras import PerspectiveCameras
 from pytorch3d.utils.camera_conversions import opencv_from_cameras_projection
 
-from ..models import VGGTWrapper, BaseNBVPolicy
+from ..models import MapAnythingWrapper, BaseNBVPolicy
 from ..rendering import DifferentiableRenderer
 from .loss import ReconstructionLoss, ChamferDistance
 from ..utils.camera_utils import position_to_pose_tensor
@@ -39,7 +39,7 @@ class NBVTrainer:
     """
     
     def __init__(self,
-                 vggt_wrapper: VGGTWrapper,
+                 vggt_wrapper: MapAnythingWrapper,
                  policy_network: BaseNBVPolicy,
                  renderer: DifferentiableRenderer,
                  loss_fn: ReconstructionLoss,
@@ -53,7 +53,7 @@ class NBVTrainer:
         初始化训练器
         
         Args:
-            vggt_wrapper: 冻结的VGGT基础模型
+            vggt_wrapper: 冻结的 MapAnything 基础模型
             policy_network: 可训练的NBV策略网络
             renderer: 可微分渲染器
             loss_fn: 重建质量损失函数
@@ -186,7 +186,7 @@ class NBVTrainer:
 
         # 步骤1: 状态编码 - VGGT提取场景特征
         scene_features = self.vggt_wrapper.extract_scene_features(initial_images)
-        
+        print(scene_features.shape)
         # 步骤2: 动作提议 - 策略网络输出下一个相机位姿
         next_camera_pose = self.policy_network(scene_features)
         

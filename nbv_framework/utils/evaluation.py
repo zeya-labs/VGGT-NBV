@@ -11,13 +11,13 @@ from typing import Dict, List, Tuple, Optional
 import time
 from tqdm import tqdm
 
-from ..models import VGGTWrapper, BaseNBVPolicy
+from ..models import MapAnythingWrapper, BaseNBVPolicy
 from ..rendering import DifferentiableRenderer
 from ..training.loss import ChamferDistance
 
 
 def evaluate_nbv_policy(policy_network: BaseNBVPolicy,
-                       vggt_wrapper: VGGTWrapper,
+                       vggt_wrapper: MapAnythingWrapper,
                        renderer: DifferentiableRenderer,
                        test_data: List[Dict],
                        max_views: int = 10,
@@ -73,7 +73,7 @@ def evaluate_nbv_policy(policy_network: BaseNBVPolicy,
 
 def _evaluate_single_sample(test_sample: Dict,
                            policy_network: BaseNBVPolicy,
-                           vggt_wrapper: VGGTWrapper,
+                           vggt_wrapper: MapAnythingWrapper,
                            renderer: DifferentiableRenderer,
                            chamfer_loss: ChamferDistance,
                            max_views: int,
@@ -199,7 +199,7 @@ def _create_mesh_from_data(mesh_data: Dict) -> 'Meshes':
 
 
 def compare_with_baselines(policy_network: BaseNBVPolicy,
-                          vggt_wrapper: VGGTWrapper,
+                          vggt_wrapper: MapAnythingWrapper,
                           renderer: DifferentiableRenderer,
                           test_data: List[Dict],
                           device: str = "cuda") -> Dict[str, Dict[str, float]]:
@@ -243,7 +243,7 @@ def compare_with_baselines(policy_network: BaseNBVPolicy,
 
 
 def _evaluate_baseline_method(method_name: str,
-                            vggt_wrapper: VGGTWrapper,
+                            vggt_wrapper: MapAnythingWrapper,
                             renderer: DifferentiableRenderer,
                             test_data: List[Dict],
                             device: str) -> Dict[str, float]:
@@ -291,7 +291,7 @@ def _evaluate_baseline_method(method_name: str,
 
 
 def _evaluate_random_sampling(test_sample: Dict,
-                            vggt_wrapper: VGGTWrapper,
+                            vggt_wrapper: MapAnythingWrapper,
                             renderer: DifferentiableRenderer,
                             chamfer_loss: ChamferDistance,
                             device: str) -> Dict[str, float]:
@@ -307,7 +307,7 @@ def _evaluate_random_sampling(test_sample: Dict,
 
 
 def _evaluate_frontier_based(test_sample: Dict,
-                           vggt_wrapper: VGGTWrapper,
+                           vggt_wrapper: MapAnythingWrapper,
                            renderer: DifferentiableRenderer,
                            chamfer_loss: ChamferDistance,
                            device: str) -> Dict[str, float]:
@@ -322,7 +322,7 @@ def _evaluate_frontier_based(test_sample: Dict,
 
 
 def _evaluate_entropy_based(test_sample: Dict,
-                          vggt_wrapper: VGGTWrapper,
+                          vggt_wrapper: MapAnythingWrapper,
                           renderer: DifferentiableRenderer,
                           chamfer_loss: ChamferDistance,
                           device: str) -> Dict[str, float]:
