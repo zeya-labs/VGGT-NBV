@@ -300,22 +300,19 @@ class MapAnythingWrapper(nn.Module):
         self._feature_dim = dim
 
     def _gather_tokens(self, feature_list: Sequence[torch.Tensor]) -> torch.Tensor:
+        if not feature_list:
+            raise ValueError("MapAnything 返回空特征列表")
+
         processed: List[torch.Tensor] = []
         for feat in feature_list:
-            tensor = feat
-            if tensor.dim() == 4:  # [B, C, H, W]
-                tensor = tensor.flatten(2).transpose(1, 2)
-            elif tensor.dim() == 3:
-                if tensor.shape[1] > tensor.shape[2]:
-                    tensor = tensor.transpose(1, 2)
-            elif tensor.dim() == 2:
-                tensor = tensor.unsqueeze(1)
-            else:
-                tensor = tensor.view(tensor.shape[0], -1).unsqueeze(1)
-            processed.append(tensor)
+            if feat.dim() != 4:
+                raise ValueError(
+                    f"期望特征维度为 [B, C, H, W], 实际收到 {feat.shape}"
+                )
+            tokens = feat.flatten(2).transpose(1, 2)
+            processed.append(tokens)
 
-        scene_features = torch.stack(processed, dim=1)
-        return scene_features
+        return torch.stack(processed, dim=1)
 
     def _stack_predictions(self, predictions: PredList) -> TensorDict:
         stacked: Dict[str, List[torch.Tensor]] = {}
