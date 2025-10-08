@@ -9,15 +9,14 @@
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
-import numpy as np
 import torch
 import torch.nn as nn
-import torchvision.transforms as tvf
-from PIL import Image
+import torch.nn.functional as F
 
 # 将 map-anything 仓库加入 Python 搜索路径
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -28,7 +27,6 @@ if _MAP_ANYTHING_ROOT not in sys.path:
 try:  # noqa: SIM105
     from mapanything.models import MapAnything  # type: ignore
     from mapanything.utils.image import IMAGE_NORMALIZATION_DICT, find_closest_aspect_ratio  # type: ignore
-    from mapanything.utils.cropping import crop_resize_if_necessary  # type: ignore
     from uniception.models.info_sharing.base import MultiViewTransformerInput  # type: ignore
 except ModuleNotFoundError as exc:  # pragma: no cover - 运行时缺依赖由用户环境负责
     missing = "uniception" if "uniception" in str(exc) else "mapanything"
@@ -71,7 +69,7 @@ class MapAnythingWrapper(nn.Module):
 
         encoder_dim = getattr(self.base_model.encoder, "enc_embed_dim", None)
 
-        self.resolution_set: int = 518
+        self.resolution_set: int = 224
 
         self._capture_gradients: bool = False
         self._grad_capture_keys: Tuple[str, ...] = tuple()
@@ -196,6 +194,7 @@ class MapAnythingWrapper(nn.Module):
     def _prepare_views(self, images: torch.Tensor) -> Tuple[List[TensorDict], torch.Tensor]:
         images = self._ensure_batch(images)
         images = images.clamp(0.0, 1.0)
+        images = images.to(self.device)
 
         batch_size, num_views, _, _, _ = images.shape
         is_metric = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
@@ -213,8 +212,9 @@ class MapAnythingWrapper(nn.Module):
             raise ValueError("无法从输入图像中计算长宽比")
 
         average_aspect_ratio = sum(aspect_ratios) / len(aspect_ratios)
-        # target_width, target_height = find_closest_aspect_ratio(average_aspect_ratio, self.resolution_set)
-        target_width, target_height = (224,224)
+        target_width, target_height = find_closest_aspect_ratio(
+            average_aspect_ratio, self.resolution_set
+        )
 
         patch_size = getattr(self.base_model.encoder, "patch_size", 14)
         if patch_size <= 0:
@@ -230,37 +230,46 @@ class MapAnythingWrapper(nn.Module):
             mean = norm_cfg.mean
             std = norm_cfg.std
 
-        ImgNorm = tvf.Compose([tvf.ToTensor(), tvf.Normalize(mean=mean, std=std)])
+        mean_tensor = torch.as_tensor(mean, dtype=images.dtype, device=self.device).view(1, 3, 1, 1)
+        std_tensor = torch.as_tensor(std, dtype=images.dtype, device=self.device).view(1, 3, 1, 1)
 
         views: List[TensorDict] = []
+        normalized_views: List[torch.Tensor] = []
         for view_idx in range(num_views):
-            normalized_stack: List[torch.Tensor] = []
-            for batch_idx in range(batch_size):
-                tensor = images[batch_idx, view_idx].detach().cpu()
-                np_img = tensor.permute(1, 2, 0).numpy()
-                pil_img = Image.fromarray((np_img * 255.0).clip(0, 255).astype(np.uint8))
+            view_tensor = images[:, view_idx]  # [B, 3, H, W]
+            _, _, h, w = view_tensor.shape
+            scale = max(target_height / h, target_width / w)
+            scaled_h = max(target_height, int(math.floor(h * scale)))
+            scaled_w = max(target_width, int(math.floor(w * scale)))
 
-                resized_img = crop_resize_if_necessary(
-                    image=pil_img,
-                    resolution=(target_width, target_height),
-                )[0]
+            if scaled_h != h or scaled_w != w:
+                resized = F.interpolate(
+                    view_tensor,
+                    size=(scaled_h, scaled_w),
+                    mode="bilinear",
+                    align_corners=False,
+                )
+            else:
+                resized = view_tensor
 
-                norm_img = ImgNorm(resized_img)
-                normalized_stack.append(norm_img)
+            top = max((scaled_h - target_height) // 2, 0)
+            left = max((scaled_w - target_width) // 2, 0)
+            bottom = top + target_height
+            right = left + target_width
+            cropped = resized[:, :, top:bottom, left:right]
 
-            view_tensor = torch.stack(normalized_stack, dim=0).to(self.device)
+            normalized_view = (cropped - mean_tensor) / std_tensor
+            normalized_views.append(normalized_view)
             views.append(
                 {
-                    "img": view_tensor,
+                    "img": normalized_view,
                     "data_norm_type": [self.data_norm_type],
                     "is_metric_scale": is_metric.clone(),
                 }
             )
 
-        normalized = torch.stack(
-            [view["img"] for view in views], dim=1
-        )  # [B, S, 3, H, W]
-
+        normalized = torch.stack(normalized_views, dim=1)  # [B, S, 3, H, W]
+        # print("normalized shape:", normalized.shape)
         return views, normalized
 
     def _gather_tokens(self, feature_list: Sequence[torch.Tensor]) -> torch.Tensor:
