@@ -77,7 +77,7 @@ class NBVTrainer:
         self.vggt_wrapper.configure_gradient_capture(
             enable=True,
             keys=self._vggt_grad_keys,
-            capture_input=True
+            capture_input=False
         )
 
         # 初始化TensorBoard Writer
@@ -133,13 +133,13 @@ class NBVTrainer:
             self.writer.add_scalar(f'train/gradients/vggt/{key}_grad_mean_abs', mean_val, self.global_step)
             self.writer.add_scalar(f'train/gradients/vggt/{key}_has_grad', has_grad, self.global_step)
 
-        input_norm = grad_stats.get('input/grad_norm', 0.0)
-        input_mean = grad_stats.get('input/grad_mean_abs', 0.0)
-        input_has_grad = 1.0 if 'input/grad_norm' in grad_stats else 0.0
+        # input_norm = grad_stats.get('input/grad_norm', 0.0)
+        # input_mean = grad_stats.get('input/grad_mean_abs', 0.0)
+        # input_has_grad = 1.0 if 'input/grad_norm' in grad_stats else 0.0
 
-        self.writer.add_scalar('train/gradients/vggt/input_grad_norm', input_norm, self.global_step)
-        self.writer.add_scalar('train/gradients/vggt/input_grad_mean_abs', input_mean, self.global_step)
-        self.writer.add_scalar('train/gradients/vggt/input_has_grad', input_has_grad, self.global_step)
+        # self.writer.add_scalar('train/gradients/vggt/input_grad_norm', input_norm, self.global_step)
+        # self.writer.add_scalar('train/gradients/vggt/input_grad_mean_abs', input_mean, self.global_step)
+        # self.writer.add_scalar('train/gradients/vggt/input_has_grad', input_has_grad, self.global_step)
 
         has_new_grad = 1.0 if new_images.grad is not None else 0.0
         self.writer.add_scalar('train/gradients/new_view_has_grad', has_new_grad, self.global_step)
@@ -186,7 +186,6 @@ class NBVTrainer:
 
         # 步骤1: 状态编码 - VGGT提取场景特征
         scene_features = self.vggt_wrapper.extract_scene_features(initial_images)
-        print(scene_features.shape)
         # 步骤2: 动作提议 - 策略网络输出下一个相机位姿
         next_camera_pose = self.policy_network(scene_features)
         

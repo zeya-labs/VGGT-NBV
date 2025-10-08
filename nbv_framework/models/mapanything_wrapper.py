@@ -76,9 +76,10 @@ class MapAnythingWrapper(nn.Module):
         self.resolution_set: int = 518
 
         self._capture_gradients: bool = False
-        self._capture_input_grad: bool = False
         self._grad_capture_keys: Tuple[str, ...] = tuple()
         self._captured_tensors: Dict[str, torch.Tensor] = {}
+        
+        self._capture_input_grad: bool = False
         self._captured_input: Optional[torch.Tensor] = None
 
         self._disable_geometric_inputs()
@@ -125,18 +126,21 @@ class MapAnythingWrapper(nn.Module):
         """提取多视角场景特征, 返回形状 [B, S, P, D]."""
         views, normalized = self._prepare_views(images)
         batch_size = normalized.shape[0]
-
+        # print("views shape:", views[0]["img"].shape)
         encoder_features = self.base_model._encode_n_views(views)
+        # print("encoder_features shape:", [i.shape for i in encoder_features])
         with torch.autocast("cuda", enabled=False):
             fused_features = self.base_model._encode_and_fuse_optional_geometric_inputs(
                 views, encoder_features
             )
-
         scale_token = (
             self.base_model.scale_token.unsqueeze(0)
             .unsqueeze(-1)
             .repeat(batch_size, 1, 1)
         )
+        
+        # print("fused_features shape:", [i.shape for i in fused_features])
+        # print("scale_token shape:", scale_token.shape)
         info_sharing_input = MultiViewTransformerInput(
             features=fused_features, additional_input_tokens=scale_token
         )
@@ -144,10 +148,11 @@ class MapAnythingWrapper(nn.Module):
             final_feat = self.base_model.info_sharing(info_sharing_input)
         else:
             final_feat, _ = self.base_model.info_sharing(info_sharing_input)
-        print("info_sharing features shape:", [i.shape for i in final_feat.features])
-        scene_features = self._gather_tokens(final_feat.features)
-        self._update_feature_dim(scene_features.shape[-1])
+        # print("info_sharing features shape:", [i.shape for i in final_feat.features])
+        scene_features = self._gather_tokens(final_feat.features) # [B, S, P, D]
+        self._feature_dim = scene_features.shape[-1]
         self._maybe_retain_grad(scene_features, normalized)
+        # print("scene_features shape:", scene_features.shape)
         return scene_features
 
     def reconstruct_and_evaluate(self, images: torch.Tensor) -> TensorDict:
@@ -293,11 +298,6 @@ class MapAnythingWrapper(nn.Module):
         if self._default_feature_dim is not None:
             return self._default_feature_dim
         raise RuntimeError("MapAnythingWrapper 尚未确定特征维度")
-
-    def _update_feature_dim(self, dim: int) -> None:
-        if dim <= 0:
-            return
-        self._feature_dim = dim
 
     def _gather_tokens(self, feature_list: Sequence[torch.Tensor]) -> torch.Tensor:
         if not feature_list:
