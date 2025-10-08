@@ -597,52 +597,6 @@ class NBVTrainer:
         ], dtype=torch.float32)
         return intrinsics
 
-    # def pose_to_opencv_cam2world(self, pose: torch.Tensor) -> torch.Tensor:
-    #     """
-    #     将 PyTorch3D 格式的位姿 (+X Left, +Y Up, +Z Forward)
-    #     转换为 OpenCV 约定 (+X Right, +Y Down, +Z Forward) 的 4x4 cam2world 矩阵。
-    #     """
-    #     if pose.numel() != 7:
-    #         raise ValueError(f"Expected pose tensor with 7 elements, got shape {pose.shape}.")
-
-    #     pose = pose.to(dtype=torch.float32)
-    #     device = pose.device
-
-    #     # 1. 提取位置 C
-    #     position = pose[:3]
-
-    #     # 2. 计算 PyTorch3D 相机的 cam2world 旋转
-    #     quaternion_xyzw = pose[3:]
-    #     quaternion_wxyz = torch.tensor([
-    #         quaternion_xyzw[3], quaternion_xyzw[0],
-    #         quaternion_xyzw[1], quaternion_xyzw[2],
-    #     ], device=device).unsqueeze(0)
-
-    #     # quaternion_to_matrix 得到 R_w2c_pytorch3d
-    #     R_w2c_pyt = quaternion_to_matrix(quaternion_wxyz)[0]
-    #     # 转置得到 R_c2w_pytorch3d (+X Left, +Y Up, +Z Forward)
-    #     R_c2w_pyt = R_w2c_pyt.T
-        
-    #     # 3. 定义从 PyTorch3D 相机到 OpenCV 相机的变换
-    #     # PyT (+X_L, +Y_U, +Z_F) -> OpenCV (+X_R, +Y_D, +Z_F)
-    #     # X翻转(-1), Y翻转(-1), Z不变(1)
-    #     axis_flip = torch.tensor([
-    #         [-1.0,  0.0,  0.0],
-    #         [ 0.0, -1.0,  0.0],
-    #         [ 0.0,  0.0,  1.0],
-    #     ], dtype=pose.dtype, device=device)
-
-    #     # 4. 计算 OpenCV cam2world 的最终旋转矩阵
-    #     # R_c2w_opencv = R_c2w_pyt @ axis_flip
-    #     R_c2w_opencv = torch.matmul(R_c2w_pyt, axis_flip)
-
-    #     # 5. 组装最终的 4x4 cam2world 矩阵
-    #     cam2world = torch.eye(4, dtype=pose.dtype, device=device)
-    #     cam2world[:3, :3] = R_c2w_opencv
-    #     cam2world[:3, 3] = position
-
-    #     return cam2world
-
     def pose_to_opencv_cam2world_with_official_func(
         self,
         pose: torch.Tensor,
