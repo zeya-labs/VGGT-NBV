@@ -18,7 +18,7 @@
 ```
 NBV Framework
 ├── models/
-│   ├── vggt_wrapper.py      # VGGT基础模型封装
+│   ├── mapanything_wrapper.py  # MapAnything基础模型封装
 │   └── policy_network.py    # NBV策略网络
 ├── rendering/
 │   └── differentiable_renderer.py  # 可微分渲染器
@@ -33,7 +33,7 @@ NBV Framework
 
 ## 核心组件
 
-### 1. VGGTWrapper - 冻结的基础模型
+### 1. MapAnythingWrapper - 冻结的基础模型
 - **场景编码器**：从多视图提取高维场景特征
 - **质量评估器**：生成三维重建并评估质量
 - 所有参数冻结，仅作为特征提取和监督信号生成
@@ -91,10 +91,10 @@ python demo_nbv_framework.py --mode eval
 ### 自定义使用
 
 ```python
-from nbv_framework import VGGTWrapper, NBVPolicyNetwork, DifferentiableRenderer, NBVTrainer
+from nbv_framework import MapAnythingWrapper, NBVPolicyNetwork, DifferentiableRenderer, NBVTrainer
 
 # 设置模型
-vggt_wrapper = VGGTWrapper("facebook/VGGT-1B")
+vggt_wrapper = MapAnythingWrapper("facebook/map-anything")
 policy_network = NBVPolicyNetwork(scene_feature_dim=9, hidden_dim=256)
 renderer = DifferentiableRenderer(image_size=518)
 

@@ -1,21 +1,19 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-Core NBV logic lives in `nbv_framework/`, split into `models/` (policy networks + VGGT wrapper), `rendering/` (PyTorch3D renderer), `training/` (losses and trainer), `datasets/` (House3K and synthetic loaders), and `utils/` (camera, mesh, visualization helpers). The vendor `vggt/` tree hosts the pretrained VGGT model. Root-level `models/` stores geometry assets; treat it as read-only. Runtime artifacts land in `checkpoints/` and TensorBoard logs in `runs/`. Scripts like `train.py` and `test_depth.py` cover end-to-end workflows.
+Core NBV logic lives in `nbv_framework/`, split into `models/` (policy networks + VGGT wrapper), `rendering/` (PyTorch3D renderer), `training/` (losses, trainer), `datasets/` (House3K and synthetic loaders), and `utils/` (camera, mesh, visualization helpers). Vendor code resides under `vggt/`. Geometry assets in root-level `models/` are read-only. Generated artifacts go to `checkpoints/` and TensorBoard logs land in `runs/`. Top-level scripts such as `train.py` and `test_depth.py` provide end-to-end workflows and demos.
 
 ## Build, Test, and Development Commands
-- `conda activate /mnt/sdb/chenmohan/env/vggt/` — enter the shared CUDA-ready environment with all dependencies preinstalled.
-- `python train.py --mode train` — start policy training.
-- `python train.py --mode eval` — run the evaluation loop on saved checkpoints.
+Activate the shared environment with `conda activate /mnt/sdb/chenmohan/env/mapanything/`. Kick off training via `python train.py --mode train`; reuse the loop for evaluation with `python train.py --mode eval`. Run the regression combo using `python train.py --mode all --no_auto_resume`. Scripts expect CUDA; check `nvidia-smi` before long jobs.
 
 ## Coding Style & Naming Conventions
-Follow PEP 8 with four-space indentation, meaningful type hints, and concise module docstrings. Keep configuration dictionaries snake_case and pass them explicitly rather than relying on globals. Prefer descriptive class names (`BasicNBVPolicy`, `DifferentiableRenderer`) and prefix experimental scripts with `demo_` to distinguish them from library code.
+Follow PEP 8, four-space indentation, and explicit type hints. Keep configuration dictionaries snake_case and pass them explicitly instead of relying on globals. Use descriptive class names such as `BasicNBVPolicy` or `DifferentiableRenderer`. Prefix exploratory scripts with `demo_` to distinguish them from library code. Document non-obvious blocks with brief comments.
 
 ## Testing Guidelines
-Prefer GPU-enabled runs and verify deterministic seeds via `set_random_seed`. Extend integration coverage by adding scenario-specific scripts under the repository root or in a future `tests/` folder named `test_<module>.py`. Use `python train.py --mode all --no_auto_resume` for regression checks covering training and evaluation. When adding datasets, confirm loaders finish a dry run and capture key metrics in the PR notes.
+Prefer GPU-enabled runs and seed deterministically with `set_random_seed`. Place future integration tests under a `tests/` directory using `test_<module>.py` naming. For dataset additions, run a dry loader pass and capture key metrics alongside logs from `python train.py --mode all --no_auto_resume`. Include failure repro steps in PR notes whenever possible.
 
 ## Commit & Pull Request Guidelines
-Commit history follows Conventional Commit prefixes (`feat`, `fix`, `refactor`, etc.) with optional scopes, e.g. `feat(camera): add hemispheric sampler`. Keep summaries under 72 characters and describe motivation plus outcomes in the body. In PRs, link tracking issues, list required assets (dataset folders, checkpoints), and attach brief logs or TensorBoard screenshots for new training behaviour. Highlight any dependency upgrades or environment assumptions so reviewers can reproduce locally.
+Use Conventional Commit prefixes, e.g., `feat(camera): add hemispheric sampler`, keeping summaries under 72 characters. PRs should reference related issues, list required assets or checkpoints, and attach concise training logs or TensorBoard screenshots for new behaviors. Highlight dependency or environment assumptions so reviewers can reproduce locally. Avoid committing large assets from `models/` or generated data from `synthetic_data/`.
 
 ## Security & Configuration Tips
- Large geometry assets under `models/` and generated data under `synthetic_data/` should never be committed. Before sharing checkpoints, scrub paths and confirm no proprietary meshes leak through auxiliary files.
+Never commit geometry assets or generated datasets. Scrub checkpoint metadata for sensitive paths before sharing. Document any new environment variables or config knobs in the PR so other contributors can align their setups.

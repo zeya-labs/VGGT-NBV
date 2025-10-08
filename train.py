@@ -28,7 +28,7 @@ def set_random_seed(seed: int = 42):
 
 
 # 导入NBV框架组件
-from nbv_framework import VGGTWrapper,BaseNBVPolicy, BasicNBVPolicy, DifferentiableRenderer, NBVTrainer
+from nbv_framework import MapAnythingWrapper, BaseNBVPolicy, BasicNBVPolicy, DifferentiableRenderer, NBVTrainer
 from nbv_framework.training.loss import ReconstructionLoss
 from nbv_framework.datasets import SyntheticDataset, MixedDataset
 from nbv_framework.datasets.data_loaders import create_train_loader, create_val_loader
@@ -43,7 +43,7 @@ def setup_config() -> Dict[str, Any]:
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     config = {
         # 模型配置
-        "scene_feature_dim": 2048,
+        "scene_feature_dim": 768,
         "policy_hidden_dim": 256,
         "policy_num_layers": 3,
         # "policy_output_mode": "cartesian",
@@ -99,12 +99,12 @@ def setup_models(config: Dict[str, Any]):
     print(f"Setting up models on device: {device}")
     
     # 1. VGGT基础模型（冻结）
-    print("Loading VGGT wrapper...")
-    vggt_wrapper = VGGTWrapper(
-        model_name="facebook/VGGT-1B",
+    print("Loading MapAnything wrapper...")
+    mapanything_wrapper = MapAnythingWrapper(
+        model_name="facebook/map-anything",
         device=device
     )
-    
+
     # 2. NBV策略网络（可训练）
     print("Creating NBV policy network...")
     policy_network = BasicNBVPolicy(
@@ -131,7 +131,7 @@ def setup_models(config: Dict[str, Any]):
     
     print("Models setup completed!")
     
-    return vggt_wrapper, policy_network, renderer, loss_fn
+    return mapanything_wrapper, policy_network, renderer, loss_fn
 
 
 def setup_data_loaders(config: Dict[str, Any]):
@@ -238,7 +238,7 @@ def find_latest_checkpoint(save_dir: str) -> str:
 
 
 def train_nbv_policy(config: Dict[str, Any],
-                    vggt_wrapper: VGGTWrapper,
+                    mapanything_wrapper: MapAnythingWrapper,
                     policy_network: BaseNBVPolicy,
                     renderer: DifferentiableRenderer,
                     loss_fn: ReconstructionLoss,
@@ -249,7 +249,7 @@ def train_nbv_policy(config: Dict[str, Any],
     
     # 创建训练器
     trainer = NBVTrainer(
-        vggt_wrapper=vggt_wrapper,
+        vggt_wrapper=mapanything_wrapper,
         policy_network=policy_network,
         renderer=renderer,
         loss_fn=loss_fn,
@@ -298,7 +298,7 @@ def train_nbv_policy(config: Dict[str, Any],
     return trainer
 
 def run_evaluation(config: Dict[str, Any],
-                  vggt_wrapper: VGGTWrapper,
+                  mapanything_wrapper: MapAnythingWrapper,
                   policy_network: BaseNBVPolicy,
                   renderer: DifferentiableRenderer):
     """运行评估"""
@@ -320,7 +320,7 @@ def run_evaluation(config: Dict[str, Any],
     # 评估策略性能
     evaluation_results = evaluate_nbv_policy(
         policy_network=policy_network,
-        vggt_wrapper=vggt_wrapper,
+        vggt_wrapper=mapanything_wrapper,
         renderer=renderer,
         test_data=test_data,
         max_views=8,
@@ -392,7 +392,7 @@ def main():
         create_synthetic_data(config)
     
     # 设置模型
-    vggt_wrapper, policy_network, renderer, loss_fn = setup_models(config)
+    mapanything_wrapper, policy_network, renderer, loss_fn = setup_models(config)
     
     if args.mode in ["train", "all"]:
         # 设置数据加载器
@@ -400,13 +400,13 @@ def main():
         
         # 训练
         trainer = train_nbv_policy(
-            config, vggt_wrapper, policy_network, renderer, 
+            config, mapanything_wrapper, policy_network, renderer,
             loss_fn, train_loader, val_loader
         )
 
     if args.mode in ["eval", "all"]:
         # 评估
-        run_evaluation(config, vggt_wrapper, policy_network, renderer)
+        run_evaluation(config, mapanything_wrapper, policy_network, renderer)
     
     print("\nDemo completed successfully!")
 

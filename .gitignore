@@ -1,3 +1,6 @@
+outputs/
+.serena/
+
 # Project specific directories
 runs/
 checkpoints/
