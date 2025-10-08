@@ -43,7 +43,7 @@ def setup_config() -> Dict[str, Any]:
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     config = {
         # 模型配置
-        "scene_feature_dim": "auto",
+        "scene_feature_dim": 768,
         "policy_hidden_dim": 256,
         "policy_num_layers": 3,
         # "policy_output_mode": "cartesian",
@@ -107,15 +107,8 @@ def setup_models(config: Dict[str, Any]):
 
     # 2. NBV策略网络（可训练）
     print("Creating NBV policy network...")
-    if config["scene_feature_dim"] == "auto":
-        feature_dim = mapanything_wrapper.infer_feature_dim(
-            image_size=config["image_size"],
-            num_views=config["num_initial_views"]
-        )
-    else:
-        feature_dim = config["scene_feature_dim"]
     policy_network = BasicNBVPolicy(
-        scene_feature_dim=feature_dim,
+        scene_feature_dim=config["scene_feature_dim"],
         hidden_dim=config["policy_hidden_dim"],
         num_layers=config["policy_num_layers"],
         output_mode=config["policy_output_mode"]

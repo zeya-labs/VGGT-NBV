@@ -12,7 +12,7 @@
 ### MapAnythingWrapper
 - 通过 `MapAnything._encode_n_views` 和 `_encode_and_fuse_optional_geometric_inputs` 获得每视角的稠密特征图，再进入多视角 Transformer。见 `nbv_framework/models/mapanything_wrapper.py:124-148`。
 - `_gather_tokens` 会将 `[B, C, H, W]` 或 `[B, tokens, D]` 的特征统一展开为 `[B, tokens, D]`，并按视角堆叠为 `[B, S, P, D]`，但**不包含 VGGT 的相机 / register token 语义**。见 `nbv_framework/models/mapanything_wrapper.py:301-317`。
-- 特征维度取决于 MapAnything 配置（默认 dinov2-large 为 1536），由 `MapAnythingWrapper.feature_dim` 暴露。见 `nbv_framework/models/mapanything_wrapper.py:288-294`。
+- 特征维度取决于 MapAnything 配置（默认 dinov2-large 为 1024），后转768
 
 ## 2. Token 语义差异
 

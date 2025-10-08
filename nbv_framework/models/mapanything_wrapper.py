@@ -70,8 +70,6 @@ class MapAnythingWrapper(nn.Module):
         print("MapAnything model loaded and frozen successfully")
 
         encoder_dim = getattr(self.base_model.encoder, "enc_embed_dim", None)
-        self._default_feature_dim: Optional[int] = int(encoder_dim) if encoder_dim is not None else None
-        self._feature_dim: Optional[int] = None
 
         self.resolution_set: int = 518
 
@@ -150,7 +148,6 @@ class MapAnythingWrapper(nn.Module):
             final_feat, _ = self.base_model.info_sharing(info_sharing_input)
         # print("info_sharing features shape:", [i.shape for i in final_feat.features])
         scene_features = self._gather_tokens(final_feat.features) # [B, S, P, D]
-        self._feature_dim = scene_features.shape[-1]
         self._maybe_retain_grad(scene_features, normalized)
         # print("scene_features shape:", scene_features.shape)
         return scene_features
@@ -265,39 +262,6 @@ class MapAnythingWrapper(nn.Module):
         )  # [B, S, 3, H, W]
 
         return views, normalized
-
-    def infer_feature_dim(self, image_size: int, num_views: int) -> int:
-        """使用零样本推理确认当前配置下的特征维度."""
-        if self._feature_dim is not None:
-            return self._feature_dim
-
-        patch_size = getattr(self.base_model.encoder, "patch_size", 14)
-        if patch_size <= 0:
-            patch_size = 14
-        height = max(patch_size, (image_size // patch_size) * patch_size)
-        width = height
-        dummy = torch.zeros(
-            1,
-            max(1, num_views),
-            3,
-            height,
-            width,
-            device=self.device,
-            dtype=torch.float32,
-        )
-        with torch.no_grad():
-            _ = self.extract_scene_features(dummy)
-        if self._feature_dim is None:
-            raise RuntimeError("无法推断 MapAnything 特征维度")
-        return self._feature_dim
-
-    @property
-    def feature_dim(self) -> int:
-        if self._feature_dim is not None:
-            return self._feature_dim
-        if self._default_feature_dim is not None:
-            return self._default_feature_dim
-        raise RuntimeError("MapAnythingWrapper 尚未确定特征维度")
 
     def _gather_tokens(self, feature_list: Sequence[torch.Tensor]) -> torch.Tensor:
         if not feature_list:
