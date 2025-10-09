@@ -4,19 +4,17 @@
 1. 场景编码特征抽取接口, 返回每视角的 Transformer token 特征
 2. 基于图像的 3D 几何推理接口, 输出与原 VGGTWrapper 相同关键字段
 
-当前实现仅启用图像输入路径, 不使用外部相机或深度先验.
+当前实现默认启用图像 + 标定(内参/位姿)多模态输入, 暂不使用深度先验.
 """
 
 from __future__ import annotations
 
-import math
 import os
 import sys
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 # 将 map-anything 仓库加入 Python 搜索路径
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -26,7 +24,7 @@ if _MAP_ANYTHING_ROOT not in sys.path:
 
 try:  # noqa: SIM105
     from mapanything.models import MapAnything  # type: ignore
-    from mapanything.utils.image import IMAGE_NORMALIZATION_DICT, find_closest_aspect_ratio  # type: ignore
+    from mapanything.utils.inference import postprocess_model_outputs_for_inference  # type: ignore
     from uniception.models.info_sharing.base import MultiViewTransformerInput  # type: ignore
 except ModuleNotFoundError as exc:  # pragma: no cover - 运行时缺依赖由用户环境负责
     missing = "uniception" if "uniception" in str(exc) else "mapanything"
@@ -35,8 +33,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - 运行时缺依赖由�
     ) from exc
 
 
-_DEFAULT_MEAN = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32)
-_DEFAULT_STD = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32)
+from ..utils.mapanything_views import prepare_mapanything_views
 
 TensorDict = Dict[str, torch.Tensor]
 PredList = List[TensorDict]
@@ -70,6 +67,8 @@ class MapAnythingWrapper(nn.Module):
         encoder_dim = getattr(self.base_model.encoder, "enc_embed_dim", None)
 
         self.resolution_set: int = 224
+        self.patch_size: int = getattr(self.base_model.encoder, "patch_size", 14)
+        self.default_fov_degrees: float = 60.0
 
         self._capture_gradients: bool = False
         self._grad_capture_keys: Tuple[str, ...] = tuple()
@@ -77,8 +76,6 @@ class MapAnythingWrapper(nn.Module):
         
         self._capture_input_grad: bool = False
         self._captured_input: Optional[torch.Tensor] = None
-
-        self._disable_geometric_inputs()
 
     # ------------------------------------------------------------------
     # 公共接口
@@ -118,17 +115,39 @@ class MapAnythingWrapper(nn.Module):
         self._captured_input = None
         return grad_stats
 
-    def extract_scene_features(self, images: torch.Tensor) -> torch.Tensor:
+    def extract_scene_features(
+        self,
+        images: torch.Tensor,
+        camera_poses: torch.Tensor,
+        *,
+        is_metric_scale: bool = False,
+        fov_degrees: Optional[float] = None,
+    ) -> torch.Tensor:
         """提取多视角场景特征, 返回形状 [B, S, P, D]."""
-        views, normalized = self._prepare_views(images)
+        effective_fov = self.default_fov_degrees if fov_degrees is None else fov_degrees
+        views, normalized = prepare_mapanything_views(
+            images,
+            camera_poses,
+            data_norm_type=self.data_norm_type,
+            resolution_set=self.resolution_set,
+            device=self.device,
+            patch_size=self.patch_size,
+            fov_degrees=effective_fov,
+            is_metric_scale=is_metric_scale,
+        )
         batch_size = normalized.shape[0]
-        # print("views shape:", views[0]["img"].shape)
-        encoder_features = self.base_model._encode_n_views(views)
-        # print("encoder_features shape:", [i.shape for i in encoder_features])
-        with torch.autocast("cuda", enabled=False):
-            fused_features = self.base_model._encode_and_fuse_optional_geometric_inputs(
-                views, encoder_features
-            )
+        self._configure_geometric_inputs(
+            use_calibration=True,
+            use_pose=True,
+        )
+        try:
+            encoder_features = self.base_model._encode_n_views(views)
+            with torch.autocast("cuda", enabled=False):
+                fused_features = self.base_model._encode_and_fuse_optional_geometric_inputs(
+                    views, encoder_features
+                )
+        finally:
+            self._restore_geometric_inputs()
         scale_token = (
             self.base_model.scale_token.unsqueeze(0)
             .unsqueeze(-1)
@@ -150,127 +169,99 @@ class MapAnythingWrapper(nn.Module):
         # print("scene_features shape:", scene_features.shape)
         return scene_features
 
-    def reconstruct_and_evaluate(self, images: torch.Tensor) -> TensorDict:
+    def reconstruct_and_evaluate(
+        self,
+        images: torch.Tensor,
+        camera_poses: torch.Tensor,
+        *,
+        is_metric_scale: bool = False,
+        fov_degrees: Optional[float] = None,
+    ) -> TensorDict:
         """运行 MapAnything 前向, 返回与 VGGTWrapper 对齐的关键输出."""
-        views, normalized = self._prepare_views(images)
-        predictions = self.base_model.forward(
-            views, memory_efficient_inference=self.memory_efficient_inference
+        effective_fov = self.default_fov_degrees if fov_degrees is None else fov_degrees
+        views, normalized = prepare_mapanything_views(
+            images,
+            camera_poses,
+            data_norm_type=self.data_norm_type,
+            resolution_set=self.resolution_set,
+            device=self.device,
+            patch_size=self.patch_size,
+            fov_degrees=effective_fov,
+            is_metric_scale=is_metric_scale,
         )
+        self._configure_geometric_inputs(
+            use_calibration=True,
+            use_pose=True,
+        )
+        try:
+            predictions = self.base_model.forward(
+                views, memory_efficient_inference=self.memory_efficient_inference
+            )
+        finally:
+            self._restore_geometric_inputs()
+        # predictions = postprocess_model_outputs_for_inference(
+        #     raw_outputs=predictions,
+        #     input_views=views,
+        #     apply_mask=True,
+        #     mask_edges=True,
+        #     edge_normal_threshold=5.0,
+        #     edge_depth_threshold=0.03,
+        #     apply_confidence_mask=False,
+        #     confidence_percentile=10,
+        # )
         recon = self._stack_predictions(predictions)
         self._maybe_retain_grad_from_result(recon, normalized)
         return recon
 
     def forward(
-        self, images: torch.Tensor, mode: str = "encode"
+        self,
+        images: torch.Tensor,
+        camera_poses: torch.Tensor,
+        *,
+        mode: str = "encode",
+        is_metric_scale: bool = False,
+        fov_degrees: Optional[float] = None,
     ) -> Union[torch.Tensor, TensorDict]:
         if mode == "encode":
-            return self.extract_scene_features(images)
+            return self.extract_scene_features(
+                images,
+                camera_poses,
+                is_metric_scale=is_metric_scale,
+                fov_degrees=fov_degrees,
+            )
         if mode == "reconstruct":
-            return self.reconstruct_and_evaluate(images)
+            return self.reconstruct_and_evaluate(
+                images,
+                camera_poses,
+                is_metric_scale=is_metric_scale,
+                fov_degrees=fov_degrees,
+            )
         raise ValueError(f"Unknown mode: {mode}. Supported modes: encode, reconstruct")
 
     # ------------------------------------------------------------------
     # 内部工具函数
     # ------------------------------------------------------------------
-    def _disable_geometric_inputs(self) -> None:
+    def _configure_geometric_inputs(
+        self,
+        use_calibration: bool,
+        use_pose: bool,
+        use_depth: bool = False,
+        use_depth_scale: bool = False,
+        use_pose_scale: bool = False,
+    ) -> None:
         if hasattr(self.base_model, "_configure_geometric_input_config"):
             self.base_model._configure_geometric_input_config(
-                use_calibration=False,
-                use_depth=False,
-                use_pose=False,
-                use_depth_scale=False,
-                use_pose_scale=False,
+                use_calibration=use_calibration,
+                use_depth=use_depth,
+                use_pose=use_pose,
+                use_depth_scale=use_depth_scale,
+                use_pose_scale=use_pose_scale,
             )
 
-    def _ensure_batch(self, images: torch.Tensor) -> torch.Tensor:
-        if images.dim() == 4:
-            return images.unsqueeze(0)
-        if images.dim() != 5:
-            raise ValueError(
-                f"Expected images with shape [B, S, 3, H, W] or [S, 3, H, W], got {images.shape}"
-            )
-        return images
+    def _restore_geometric_inputs(self) -> None:
+        if hasattr(self.base_model, "_restore_original_geometric_input_config"):
+            self.base_model._restore_original_geometric_input_config()
 
-    def _prepare_views(self, images: torch.Tensor) -> Tuple[List[TensorDict], torch.Tensor]:
-        images = self._ensure_batch(images)
-        images = images.clamp(0.0, 1.0)
-        images = images.to(self.device)
-
-        batch_size, num_views, _, _, _ = images.shape
-        is_metric = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
-
-        # 计算所有视图的平均长宽比
-        aspect_ratios: List[float] = []
-        for b in range(batch_size):
-            for v in range(num_views):
-                img = images[b, v]
-                h, w = int(img.shape[-2]), int(img.shape[-1])
-                if h > 0 and w > 0:
-                    aspect_ratios.append(w / h)
-
-        if not aspect_ratios:
-            raise ValueError("无法从输入图像中计算长宽比")
-
-        average_aspect_ratio = sum(aspect_ratios) / len(aspect_ratios)
-        target_width, target_height = find_closest_aspect_ratio(
-            average_aspect_ratio, self.resolution_set
-        )
-
-        patch_size = getattr(self.base_model.encoder, "patch_size", 14)
-        if patch_size <= 0:
-            patch_size = 14
-        target_width = max(patch_size, (target_width // patch_size) * patch_size)
-        target_height = max(patch_size, (target_height // patch_size) * patch_size)
-
-        norm_cfg = IMAGE_NORMALIZATION_DICT.get(self.data_norm_type)
-        if norm_cfg is None:
-            mean = _DEFAULT_MEAN
-            std = _DEFAULT_STD
-        else:
-            mean = norm_cfg.mean
-            std = norm_cfg.std
-
-        mean_tensor = torch.as_tensor(mean, dtype=images.dtype, device=self.device).view(1, 3, 1, 1)
-        std_tensor = torch.as_tensor(std, dtype=images.dtype, device=self.device).view(1, 3, 1, 1)
-
-        views: List[TensorDict] = []
-        normalized_views: List[torch.Tensor] = []
-        for view_idx in range(num_views):
-            view_tensor = images[:, view_idx]  # [B, 3, H, W]
-            _, _, h, w = view_tensor.shape
-            scale = max(target_height / h, target_width / w)
-            scaled_h = max(target_height, int(math.floor(h * scale)))
-            scaled_w = max(target_width, int(math.floor(w * scale)))
-
-            if scaled_h != h or scaled_w != w:
-                resized = F.interpolate(
-                    view_tensor,
-                    size=(scaled_h, scaled_w),
-                    mode="bilinear",
-                    align_corners=False,
-                )
-            else:
-                resized = view_tensor
-
-            top = max((scaled_h - target_height) // 2, 0)
-            left = max((scaled_w - target_width) // 2, 0)
-            bottom = top + target_height
-            right = left + target_width
-            cropped = resized[:, :, top:bottom, left:right]
-
-            normalized_view = (cropped - mean_tensor) / std_tensor
-            normalized_views.append(normalized_view)
-            views.append(
-                {
-                    "img": normalized_view,
-                    "data_norm_type": [self.data_norm_type],
-                    "is_metric_scale": is_metric.clone(),
-                }
-            )
-
-        normalized = torch.stack(normalized_views, dim=1)  # [B, S, 3, H, W]
-        # print("normalized shape:", normalized.shape)
-        return views, normalized
 
     def _gather_tokens(self, feature_list: Sequence[torch.Tensor]) -> torch.Tensor:
         if not feature_list:
@@ -310,8 +301,6 @@ class MapAnythingWrapper(nn.Module):
             result["world_points_conf"] = conf
         if "pts3d_cam" in result and "depth" not in result:
             result["depth"] = result["pts3d_cam"][..., 2:3]
-        elif "depth_along_ray" in result and "depth" not in result:
-            result["depth"] = result["depth_along_ray"]
         return result
 
     def _maybe_retain_grad(self, scene_features: torch.Tensor, images: torch.Tensor) -> None:
