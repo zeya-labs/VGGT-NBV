@@ -7,17 +7,17 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, TYPE_CHECKING
 import time
 from tqdm import tqdm
 
-from ..models import MapAnythingWrapper, BaseNBVPolicy
 from ..rendering import DifferentiableRenderer
 from ..training.loss import ChamferDistance
+if TYPE_CHECKING:
+    from ..models import MapAnythingWrapper, BaseNBVPolicy
 
-
-def evaluate_nbv_policy(policy_network: BaseNBVPolicy,
-                       vggt_wrapper: MapAnythingWrapper,
+def evaluate_nbv_policy(policy_network: "BaseNBVPolicy",
+                       vggt_wrapper: "MapAnythingWrapper",
                        renderer: DifferentiableRenderer,
                        test_data: List[Dict],
                        max_views: int = 10,
@@ -72,8 +72,8 @@ def evaluate_nbv_policy(policy_network: BaseNBVPolicy,
 
 
 def _evaluate_single_sample(test_sample: Dict,
-                           policy_network: BaseNBVPolicy,
-                           vggt_wrapper: MapAnythingWrapper,
+                           policy_network: "BaseNBVPolicy",
+                           vggt_wrapper: "MapAnythingWrapper",
                            renderer: DifferentiableRenderer,
                            chamfer_loss: ChamferDistance,
                            max_views: int,
@@ -81,22 +81,30 @@ def _evaluate_single_sample(test_sample: Dict,
     """评估单个测试样本"""
     
     initial_images = test_sample["initial_images"].to(device)  # [N, 3, H, W]
+    initial_camera_poses = test_sample["camera_poses"].to(device)  # [N, 7]
     gt_mesh_data = test_sample["gt_mesh_data"]
     
     # 记录开始时间
     start_time = time.time()
     
     # 初始重建质量
-    initial_recon = vggt_wrapper.reconstruct_and_evaluate(initial_images.unsqueeze(0))
+    initial_recon = vggt_wrapper.reconstruct_and_evaluate(
+        initial_images.unsqueeze(0),
+        initial_camera_poses.unsqueeze(0),
+    )
     initial_quality = _compute_reconstruction_quality(initial_recon, gt_mesh_data, chamfer_loss)
     
     # 迭代添加视图
     current_images = initial_images
+    current_camera_poses = initial_camera_poses
     quality_progression = [initial_quality]
     
     for view_idx in range(max_views):
         # 提取场景特征
-        scene_features = vggt_wrapper.extract_scene_features(current_images.unsqueeze(0))
+        scene_features = vggt_wrapper.extract_scene_features(
+            current_images.unsqueeze(0),
+            current_camera_poses.unsqueeze(0),
+        )
         
         # 预测下一个视角
         next_pose = policy_network(scene_features)
@@ -107,9 +115,13 @@ def _evaluate_single_sample(test_sample: Dict,
         
         # 添加新视图
         current_images = torch.cat([current_images, new_image.squeeze(0)], dim=0)
+        current_camera_poses = torch.cat([current_camera_poses, next_pose.squeeze(0)], dim=0)
         
         # 评估新的重建质量
-        updated_recon = vggt_wrapper.reconstruct_and_evaluate(current_images.unsqueeze(0))
+        updated_recon = vggt_wrapper.reconstruct_and_evaluate(
+            current_images.unsqueeze(0),
+            current_camera_poses.unsqueeze(0),
+        )
         new_quality = _compute_reconstruction_quality(updated_recon, gt_mesh_data, chamfer_loss)
         quality_progression.append(new_quality)
         
@@ -130,7 +142,10 @@ def _evaluate_single_sample(test_sample: Dict,
     inference_time = (end_time - start_time) / views_used if views_used > 0 else 0
     
     # 计算Chamfer距离
-    final_recon = vggt_wrapper.reconstruct_and_evaluate(current_images.unsqueeze(0))
+    final_recon = vggt_wrapper.reconstruct_and_evaluate(
+        current_images.unsqueeze(0),
+        current_camera_poses.unsqueeze(0),
+    )
     chamfer_dist = _compute_chamfer_distance(final_recon, gt_mesh_data, chamfer_loss)
     
     return {
@@ -198,8 +213,8 @@ def _create_mesh_from_data(mesh_data: Dict) -> 'Meshes':
     return None
 
 
-def compare_with_baselines(policy_network: BaseNBVPolicy,
-                          vggt_wrapper: MapAnythingWrapper,
+def compare_with_baselines(policy_network: "BaseNBVPolicy",
+                          vggt_wrapper: "MapAnythingWrapper",
                           renderer: DifferentiableRenderer,
                           test_data: List[Dict],
                           device: str = "cuda") -> Dict[str, Dict[str, float]]:
@@ -243,7 +258,7 @@ def compare_with_baselines(policy_network: BaseNBVPolicy,
 
 
 def _evaluate_baseline_method(method_name: str,
-                            vggt_wrapper: MapAnythingWrapper,
+                            vggt_wrapper: "MapAnythingWrapper",
                             renderer: DifferentiableRenderer,
                             test_data: List[Dict],
                             device: str) -> Dict[str, float]:
@@ -291,7 +306,7 @@ def _evaluate_baseline_method(method_name: str,
 
 
 def _evaluate_random_sampling(test_sample: Dict,
-                            vggt_wrapper: MapAnythingWrapper,
+                            vggt_wrapper: "MapAnythingWrapper",
                             renderer: DifferentiableRenderer,
                             chamfer_loss: ChamferDistance,
                             device: str) -> Dict[str, float]:
@@ -307,7 +322,7 @@ def _evaluate_random_sampling(test_sample: Dict,
 
 
 def _evaluate_frontier_based(test_sample: Dict,
-                           vggt_wrapper: MapAnythingWrapper,
+                           vggt_wrapper: "MapAnythingWrapper",
                            renderer: DifferentiableRenderer,
                            chamfer_loss: ChamferDistance,
                            device: str) -> Dict[str, float]:
@@ -322,7 +337,7 @@ def _evaluate_frontier_based(test_sample: Dict,
 
 
 def _evaluate_entropy_based(test_sample: Dict,
-                          vggt_wrapper: MapAnythingWrapper,
+                          vggt_wrapper: "MapAnythingWrapper",
                           renderer: DifferentiableRenderer,
                           chamfer_loss: ChamferDistance,
                           device: str) -> Dict[str, float]:

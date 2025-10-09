@@ -9,26 +9,29 @@ NBV策略训练器
 5. 策略更新：反向传播更新策略网络
 """
 
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 import numpy as np
 import os
 import logging
-import math
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 import torchvision
-from pytorch3d.transforms import quaternion_to_matrix
-from pytorch3d.renderer.cameras import PerspectiveCameras
-from pytorch3d.utils.camera_conversions import opencv_from_cameras_projection
 
-from ..models import MapAnythingWrapper, BaseNBVPolicy
+if TYPE_CHECKING:
+    from ..models import MapAnythingWrapper, BaseNBVPolicy
 from ..rendering import DifferentiableRenderer
 from .loss import ReconstructionLoss, ChamferDistance
 from ..utils.camera_utils import position_to_pose_tensor
+from ..utils.mapanything_views import (
+    compute_pinhole_intrinsics,
+    pose7d_to_opencv_cam2world_with_official_func,
+)
 
 
 class NBVTrainer:
@@ -129,17 +132,17 @@ class NBVTrainer:
             mean_val = grad_stats.get(mean_key, 0.0)
             has_grad = 1.0 if norm_key in grad_stats else 0.0
 
-            self.writer.add_scalar(f'train/gradients/vggt/{key}_grad_norm', norm_val, self.global_step)
-            self.writer.add_scalar(f'train/gradients/vggt/{key}_grad_mean_abs', mean_val, self.global_step)
-            self.writer.add_scalar(f'train/gradients/vggt/{key}_has_grad', has_grad, self.global_step)
+            self.writer.add_scalar(f'train/gradients/vggt/{key}_grad_norm', norm_val, self.global_step) if has_grad else None
+            self.writer.add_scalar(f'train/gradients/vggt/{key}_grad_mean_abs', mean_val, self.global_step) if has_grad else None
+            self.writer.add_scalar(f'train/gradients/vggt/{key}_has_grad', has_grad, self.global_step) if has_grad else None
 
-        # input_norm = grad_stats.get('input/grad_norm', 0.0)
-        # input_mean = grad_stats.get('input/grad_mean_abs', 0.0)
-        # input_has_grad = 1.0 if 'input/grad_norm' in grad_stats else 0.0
+        input_norm = grad_stats.get('input/grad_norm', 0.0)
+        input_mean = grad_stats.get('input/grad_mean_abs', 0.0)
+        input_has_grad = 1.0 if 'input/grad_norm' in grad_stats else 0.0
 
-        # self.writer.add_scalar('train/gradients/vggt/input_grad_norm', input_norm, self.global_step)
-        # self.writer.add_scalar('train/gradients/vggt/input_grad_mean_abs', input_mean, self.global_step)
-        # self.writer.add_scalar('train/gradients/vggt/input_has_grad', input_has_grad, self.global_step)
+        self.writer.add_scalar('train/gradients/vggt/input_grad_norm', input_norm, self.global_step) if input_has_grad else None
+        self.writer.add_scalar('train/gradients/vggt/input_grad_mean_abs', input_mean, self.global_step) if input_has_grad else None
+        self.writer.add_scalar('train/gradients/vggt/input_has_grad', input_has_grad, self.global_step) if input_has_grad else None
 
         has_new_grad = 1.0 if new_images.grad is not None else 0.0
         self.writer.add_scalar('train/gradients/new_view_has_grad', has_new_grad, self.global_step)
@@ -184,8 +187,14 @@ class NBVTrainer:
         if camera_poses_batch is None:
             raise KeyError("Batch is missing 'camera_poses', which are required for correspondence-guided losses.")
 
-        # 步骤1: 状态编码 - VGGT提取场景特征
-        scene_features = self.vggt_wrapper.extract_scene_features(initial_images)
+        camera_poses_batch = camera_poses_batch.to(device=initial_images.device, dtype=initial_images.dtype)
+
+        # 步骤1: 状态编码 - MapAnything 提取场景特征
+        scene_features = self.vggt_wrapper.extract_scene_features(
+            initial_images,
+            camera_poses_batch,
+            is_metric_scale=False,
+        )
         # 步骤2: 动作提议 - 策略网络输出下一个相机位姿
         next_camera_pose = self.policy_network(scene_features)
         
@@ -258,7 +267,9 @@ class NBVTrainer:
         
         # VGGT一次性对整个batch进行重建与评估
         recon_data = self.vggt_wrapper.reconstruct_and_evaluate(
-            combined_images_batch  # [B, N+1, 3, H, W]
+            combined_images_batch,
+            combined_camera_poses,
+            is_metric_scale=False,
         )
         # print("===================loss开始计算===================")
         # 计算重建质量损失
@@ -582,132 +593,6 @@ class NBVTrainer:
         self.best_loss = checkpoint["best_loss"]
         
         self.logger.info(f"Checkpoint loaded: {checkpoint_path}")
-    
-    def _compute_intrinsics(self, height: int, width: int, fov_degrees: float) -> torch.Tensor:
-        """构建简单的针孔相机内参矩阵。"""
-        fov_radians = math.radians(float(fov_degrees))
-        fy = 0.5 * height / math.tan(fov_radians / 2.0)
-        fx = 0.5 * width / math.tan(fov_radians / 2.0)
-        cx = (width - 1) / 2.0
-        cy = (height - 1) / 2.0
-        intrinsics = torch.tensor([
-            [fx, 0.0, cx],
-            [0.0, fy, cy],
-            [0.0, 0.0, 1.0],
-        ], dtype=torch.float32)
-        return intrinsics
-
-    # def pose_to_opencv_cam2world(self, pose: torch.Tensor) -> torch.Tensor:
-    #     """
-    #     将 PyTorch3D 格式的位姿 (+X Left, +Y Up, +Z Forward)
-    #     转换为 OpenCV 约定 (+X Right, +Y Down, +Z Forward) 的 4x4 cam2world 矩阵。
-    #     """
-    #     if pose.numel() != 7:
-    #         raise ValueError(f"Expected pose tensor with 7 elements, got shape {pose.shape}.")
-
-    #     pose = pose.to(dtype=torch.float32)
-    #     device = pose.device
-
-    #     # 1. 提取位置 C
-    #     position = pose[:3]
-
-    #     # 2. 计算 PyTorch3D 相机的 cam2world 旋转
-    #     quaternion_xyzw = pose[3:]
-    #     quaternion_wxyz = torch.tensor([
-    #         quaternion_xyzw[3], quaternion_xyzw[0],
-    #         quaternion_xyzw[1], quaternion_xyzw[2],
-    #     ], device=device).unsqueeze(0)
-
-    #     # quaternion_to_matrix 得到 R_w2c_pytorch3d
-    #     R_w2c_pyt = quaternion_to_matrix(quaternion_wxyz)[0]
-    #     # 转置得到 R_c2w_pytorch3d (+X Left, +Y Up, +Z Forward)
-    #     R_c2w_pyt = R_w2c_pyt.T
-        
-    #     # 3. 定义从 PyTorch3D 相机到 OpenCV 相机的变换
-    #     # PyT (+X_L, +Y_U, +Z_F) -> OpenCV (+X_R, +Y_D, +Z_F)
-    #     # X翻转(-1), Y翻转(-1), Z不变(1)
-    #     axis_flip = torch.tensor([
-    #         [-1.0,  0.0,  0.0],
-    #         [ 0.0, -1.0,  0.0],
-    #         [ 0.0,  0.0,  1.0],
-    #     ], dtype=pose.dtype, device=device)
-
-    #     # 4. 计算 OpenCV cam2world 的最终旋转矩阵
-    #     # R_c2w_opencv = R_c2w_pyt @ axis_flip
-    #     R_c2w_opencv = torch.matmul(R_c2w_pyt, axis_flip)
-
-    #     # 5. 组装最终的 4x4 cam2world 矩阵
-    #     cam2world = torch.eye(4, dtype=pose.dtype, device=device)
-    #     cam2world[:3, :3] = R_c2w_opencv
-    #     cam2world[:3, 3] = position
-
-    #     return cam2world
-
-    def pose_to_opencv_cam2world_with_official_func(
-        self,
-        pose: torch.Tensor,
-        image_size: Tuple[int, int] = (224, 224)
-    ) -> torch.Tensor:
-        """
-        使用官方的 _opencv_from_cameras_projection 函数，
-        将 PyTorch3D 格式的位姿转换为 OpenCV 约定 的 4x4 cam2world 矩阵。
-        """
-        if pose.numel() != 7:
-            raise ValueError(f"Expected pose tensor with 7 elements, got shape {pose.shape}.")
-
-        pose = pose.to(dtype=torch.float32)
-        device = pose.device
-
-        # === 第1步: 将您的 cam2world `pose` 转换为 Pytorch3D `world2cam` (R, T) ===
-        # 这是我们之前验证过的，从您的位姿到Pytorch3D相机参数的正确转换
-        position_c2w = pose[:3]  # 相机在世界中的位置 C
-        quaternion_xyzw = pose[3:]
-        quaternion_wxyz = torch.tensor([
-            quaternion_xyzw[3], quaternion_xyzw[0],
-            quaternion_xyzw[1], quaternion_xyzw[2],
-        ], device=device).unsqueeze(0)
-
-        # 从四元数得到 Pytorch3D 的 world-to-camera 旋转
-        R_w2c_pyt = quaternion_to_matrix(quaternion_wxyz) # Shape: [1, 3, 3]
-
-        # 从世界位置 C 和 R_w2c 计算 Pytorch3D 的 world-to-camera 平移 T
-        # T = -C @ R  (行向量约定)
-        T_w2c_pyt = -(position_c2w.unsqueeze(0).unsqueeze(0) @ R_w2c_pyt).squeeze(1) # Shape: [1, 3]
-
-        # 创建一个临时的 PyTorch3D 相机对象
-        # 注意：相机内参(focal_length, principal_point)对于位姿转换是无关的，
-        # 但创建对象时需要它们，所以我们使用默认值。
-        cameras = PerspectiveCameras(
-            R=R_w2c_pyt,
-            T=T_w2c_pyt,
-            device=device
-        )
-        
-        image_size_tensor = torch.tensor([image_size], device=device, dtype=torch.float32)
-
-        # === 第2步: 调用官方函数，得到 OpenCV 风格的 `world2cam` 参数 ===
-        # R_w2c_opencv: 从世界旋转到OpenCV相机的旋转矩阵
-        # t_w2c_opencv: 从世界平移到OpenCV相机的平移向量
-        R_w2c_opencv, t_w2c_opencv, _ = opencv_from_cameras_projection(
-            cameras,
-            image_size_tensor
-        )
-
-        # === 第3步: 将 OpenCV `world2cam` (R, t) 转换为 `cam2world` 4x4 矩阵 ===
-        # 这是标准的逆变换操作
-        
-        # cam2world 的旋转是 world2cam 旋转的逆(转置)
-        R_c2w_opencv = R_w2c_opencv.transpose(1, 2)  # Shape: [1, 3, 3]
-
-        # cam2world 的平移(即相机世界位置) C = -R_c2w @ t_w2c
-        position_c2w_opencv = -torch.bmm(R_c2w_opencv, t_w2c_opencv.unsqueeze(-1)).squeeze(-1) # Shape: [1, 3]
-
-        # 组装最终的 4x4 cam2world 矩阵
-        cam2world = torch.eye(4, dtype=pose.dtype, device=device)
-        cam2world[:3, :3] = R_c2w_opencv[0]
-        cam2world[:3, 3] = position_c2w_opencv[0]
-
-        return cam2world
 
     def _save_combined_images(
         self,
@@ -747,7 +632,7 @@ class NBVTrainer:
         batch_size, num_views, _, height, width = images_cpu.shape
         # print("combined_images_batch.shape",combined_images_batch.shape)
         # print("combined_camera_poses.shape",combined_camera_poses.shape)
-        intrinsics = self._compute_intrinsics(height, width, fov_degrees)
+        intrinsics = compute_pinhole_intrinsics(height, width, fov_degrees)
 
         for batch_idx in range(batch_size):
             batch_dir = os.path.join(step_dir, f"batch_{batch_idx:03d}")
@@ -765,7 +650,7 @@ class NBVTrainer:
                 # 视图数据按(H, W, 3)且像素范围[0,255]
                 img_uint8 = (png_img.permute(1, 2, 0) * 255.0).round().to(torch.uint8)
                 # print("保存",pose_tensor)
-                cam2world = self.pose_to_opencv_cam2world_with_official_func(pose_tensor)
+                cam2world = pose7d_to_opencv_cam2world_with_official_func(pose_tensor)
 
                 view_payload = {
                     "img": img_uint8,
