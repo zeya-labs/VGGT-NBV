@@ -389,9 +389,12 @@ class NBVTrainer:
     def train_epoch(self, train_loader: DataLoader) -> Dict[str, float]:
         """训练一个epoch"""
         epoch_losses = []
-        
+
+        if hasattr(train_loader, "dataset") and hasattr(train_loader.dataset, "set_epoch"):
+            train_loader.dataset.set_epoch(self.current_epoch)
+
         progress_bar = tqdm(train_loader, desc=f"Epoch {self.current_epoch}")
-        
+
         for batch in progress_bar:
             # 将数据移到设备
             batch = self._move_batch_to_device(batch)
@@ -425,9 +428,12 @@ class NBVTrainer:
     def validate_epoch(self, val_loader: DataLoader) -> Dict[str, float]:
         """验证一个epoch"""
         epoch_losses = []
-        
+
+        if hasattr(val_loader, "dataset") and hasattr(val_loader.dataset, "set_epoch"):
+            val_loader.dataset.set_epoch(0)
+
         progress_bar = tqdm(val_loader, desc="Validation")
-        
+
         for i, batch in enumerate(progress_bar):
             batch = self._move_batch_to_device(batch)
             loss_dict, new_images, initial_images = self.validation_step(batch)

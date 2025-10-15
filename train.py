@@ -58,7 +58,7 @@ def setup_config() -> Dict[str, Any]:
         
         # 数据配置
         "synthetic_data_root": "./models/synthetic_data",
-        "num_initial_views": 3,
+        "num_initial_views": 8,
         "image_size": 224,
         "up_axis": "Y",  # 数据集模型默认上方向 ('Y' 或 'Z')
         "max_meshes": 2,  # 限制加载的mesh数量，用于控制训练规模

@@ -26,6 +26,7 @@ class BaseDataset(Dataset, ABC):
         normalize_method: str = "quantile",
         num_samples: int = 10000,
         up_axis: str = "Y",
+        seed: Optional[int] = None,
         **kwargs
     ):
         """
@@ -39,6 +40,7 @@ class BaseDataset(Dataset, ABC):
             normalize_method: 网格归一化方法
             num_samples: 采样点数量
             up_axis: 上方向轴 ('Y' 或 'Z')
+            seed: 为样本选择引入的基础随机种子（可选）
             **kwargs: 其他参数，由子类处理
         """
         self.data_root = data_root
@@ -48,6 +50,8 @@ class BaseDataset(Dataset, ABC):
         self.normalize_method = normalize_method
         self.num_samples = num_samples
         self.up_axis = up_axis.upper()  # 确保大写格式
+        self._base_seed = seed
+        self._epoch: int = 0
         
         # 验证数据根目录
         if not os.path.exists(data_root):
@@ -278,8 +282,15 @@ class BaseDataset(Dataset, ABC):
                 f"Available: {len(available_images)}"
             )
         
-        # 使用局部随机数生成器，基于可用图像的哈希值作为种子确保可重现性
-        seed = abs(hash(tuple(sorted(available_images)))) % (2**32 - 1)
+        # 使用局部随机数生成器，结合epoch生成可复现但随epoch变化的随机种子
+        canonical = "\n".join(sorted(available_images))
+        import hashlib
+        epoch = getattr(self, "_epoch", 0)
+        base_seed = getattr(self, "_base_seed", None)
+        seed_material = f"{canonical}|{base_seed if base_seed is not None else 0}|{epoch}"
+        digest = hashlib.md5(seed_material.encode("utf-8")).hexdigest()
+        seed = int(digest, 16) % (2 ** 32 - 1)
+        print(f"Using seed {seed} for initial view selection")
         rng = random.Random(seed)
         selected_paths = rng.sample(available_images, self.num_initial_views)
         
@@ -303,6 +314,10 @@ class BaseDataset(Dataset, ABC):
         selected_paths = [p[1] for p in pairs]
         
         return selected_paths, selected_indices
+
+    def set_epoch(self, epoch: int) -> None:
+        """设置当前epoch，影响初始视图的确定性采样。"""
+        self._epoch = int(epoch)
     
     def _extract_image_index(self, image_path: str) -> Optional[int]:
         """
