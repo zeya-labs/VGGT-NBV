@@ -25,7 +25,6 @@ class ReconstructionLoss(nn.Module):
         viewpoint_weight: float = 0.0,
         pose_penalty_weight: float = 1.0,
         renderer: Optional["DifferentiableRenderer"] = None,
-        gt_lighting_type: str = "ambient",
         pose_up_axis: str = "Y",
     ) -> None:
         super().__init__()
@@ -35,7 +34,6 @@ class ReconstructionLoss(nn.Module):
         self.viewpoint_weight = viewpoint_weight
         self.pose_penalty_weight = pose_penalty_weight
         self.renderer = renderer
-        self.gt_lighting_type = gt_lighting_type
         self.train_flag = None
         self.pose_up_axis = pose_up_axis.upper()
         if self.pose_up_axis not in {"X", "Y", "Z"}:
@@ -94,7 +92,6 @@ class ReconstructionLoss(nn.Module):
                 render_out = self.renderer(
                     gt_mesh=mesh_i,
                     camera_poses=poses_i,
-                    lighting_type=self.gt_lighting_type,
                     return_point_maps=True,
                 )
 

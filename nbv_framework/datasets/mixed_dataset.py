@@ -24,8 +24,7 @@ class MixedDataset(Dataset):
         if not dataset_configs:
             raise ValueError("dataset_configs must contain at least one dataset configuration")
 
-        # ``seed`` is accepted for backward compatibility but not used because
-        # sampling is now completely deterministic.
+        # ``seed`` is propagated to child datasets to keep their sampling deterministic.
         self.dataset_configs = dataset_configs
         self.seed = seed
 
@@ -36,7 +35,10 @@ class MixedDataset(Dataset):
 
         total = 0
         for index, config in enumerate(dataset_configs):
-            dataset = DatasetFactory.create_from_config(config)
+            config_with_seed = config.copy()
+            if "seed" not in config_with_seed and self.seed is not None:
+                config_with_seed["seed"] = self.seed
+            dataset = DatasetFactory.create_from_config(config_with_seed)
             dataset_name = config.get("name", f"dataset_{index}")
             dataset_length = len(dataset)
 
@@ -51,6 +53,7 @@ class MixedDataset(Dataset):
             raise ValueError("All configured datasets are empty; MixedDataset has no samples to expose")
 
         self.total_length = total
+        self._epoch: int = 0
 
         print("混合数据集创建成功 (deterministic mode):")
         for name, length in zip(self.dataset_names, self.dataset_lengths):
@@ -109,3 +112,9 @@ class MixedDataset(Dataset):
                 return dataset
         raise ValueError(f"未找到名称为 '{name}' 的数据集")
 
+    def set_epoch(self, epoch: int) -> None:
+        """将当前epoch传递给所有子数据集以获得一致的采样。"""
+        self._epoch = int(epoch)
+        for dataset in self.datasets:
+            if hasattr(dataset, "set_epoch"):
+                dataset.set_epoch(epoch)
