@@ -50,7 +50,7 @@ def setup_config() -> Dict[str, Any]:
         "policy_output_mode": "position_only",
         
         # 训练配置
-        "learning_rate": 1e-3,
+        "learning_rate": 1e-4,
         "batch_size": 1,  # 根据GPU内存调整
         "num_epochs": 1000,
         "num_samples": 20000,
