@@ -170,22 +170,6 @@ class NBVTrainer:
         self.writer.add_scalar('train/gradients/new_view_grad_norm', new_view_norm, self.global_step)
         self.writer.add_scalar('train/gradients/new_view_grad_mean_abs', new_view_mean, self.global_step)
 
-    def _resolve_view_bounds(self, available_views: int) -> Tuple[int, int]:
-        """根据可用视图数量确定采样上下界。"""
-        if available_views <= 0:
-            raise ValueError("initial_images must contain at least one view")
-
-        max_views = self.max_initial_views if self.max_initial_views is not None else available_views
-        max_views = max(1, min(int(max_views), available_views))
-
-        min_views = self.min_initial_views if self.min_initial_views is not None else max_views
-        min_views = max(1, min(int(min_views), available_views))
-
-        if min_views > max_views:
-            min_views = max_views
-
-        return min_views, max_views
-
     def _select_initial_views(
         self,
         initial_images: torch.Tensor,
@@ -194,18 +178,12 @@ class NBVTrainer:
         randomize: bool,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
         """选取训练/验证需要的初始视图子集。"""
-        if initial_images.dim() != 5:
-            raise ValueError(
-                f"Expected initial_images with shape [B, N, 3, H, W], got {initial_images.shape}"
-            )
-        if camera_poses.dim() != 3:
-            raise ValueError(
-                f"Expected camera_poses with shape [B, N, 7] (or compatible), got {camera_poses.shape}"
-            )
+
+        min_views = max(self.min_initial_views, 1)
+        max_views = min(self.max_initial_views, initial_images.shape[1])
 
         total_views = initial_images.shape[1]
-        min_views, max_views = self._resolve_view_bounds(total_views)
-        should_randomize = randomize and self.randomize_initial_views and max_views > min_views
+        should_randomize = randomize and self.randomize_initial_views
 
         if should_randomize:
             sampled = torch.randint(
@@ -218,17 +196,14 @@ class NBVTrainer:
         else:
             num_views = max_views
 
-        if num_views < total_views:
-            if should_randomize:
-                perm = torch.randperm(total_views, device=initial_images.device, dtype=torch.long)
-            else:
-                perm = torch.arange(total_views, device=initial_images.device, dtype=torch.long)
-            selection = perm[:num_views]
-            selection, _ = torch.sort(selection)
-            initial_images = initial_images.index_select(1, selection)
-            camera_poses = camera_poses.index_select(1, selection)
+        if should_randomize:
+            perm = torch.randperm(total_views, device=initial_images.device, dtype=torch.long)
         else:
-            selection = torch.arange(total_views, device=initial_images.device, dtype=torch.long)
+            perm = torch.arange(total_views, device=initial_images.device, dtype=torch.long)
+        selection = perm[:num_views]
+        selection, _ = torch.sort(selection)
+        initial_images = initial_images.index_select(1, selection)
+        camera_poses = camera_poses.index_select(1, selection)
 
         self._last_initial_view_count = num_views
         self._last_initial_view_indices = selection.detach().cpu()
@@ -419,19 +394,20 @@ class NBVTrainer:
 
             self.optimizer.step()
         
-        # 记录
-        loss_dict = {
-            "total_loss": loss_components['total_loss'],
-            "chamfer_loss": loss_components['chamfer_loss'],
-            "weighted_chamfer_loss": loss_components['weighted_chamfer_loss'],
-            "confidence_loss": loss_components['confidence_loss'],
-            "weighted_confidence_loss": loss_components['weighted_confidence_loss'],
-            "viewpoint_loss": loss_components['viewpoint_loss'],
-            "weighted_viewpoint_loss": loss_components['weighted_viewpoint_loss'],
-            "pose_penalty_loss": loss_components['pose_penalty_loss'],
-            "weighted_pose_penalty_loss": loss_components['weighted_pose_penalty_loss'],
-            "learning_rate": self.optimizer.param_groups[0]['lr']
-        }
+        # 记录：只挑选需要的loss项并补充训练态量，避免把内部调试字段写入日志
+        logged_loss_keys = (
+            "total_loss",
+            "chamfer_loss",
+            "weighted_chamfer_loss",
+            "confidence_loss",
+            "weighted_confidence_loss",
+            "viewpoint_loss",
+            "weighted_viewpoint_loss",
+            "pose_penalty_loss",
+            "weighted_pose_penalty_loss",
+        )
+        loss_dict = {key: loss_components[key] for key in logged_loss_keys if key in loss_components}
+        loss_dict["learning_rate"] = self.optimizer.param_groups[0]["lr"]
         loss_dict["num_initial_views"] = float(active_view_count)
 
         # TensorBoard logging

@@ -499,7 +499,7 @@ class ReconstructionLoss(nn.Module):
 
         loss_components["total_loss"] = total_loss.item()
 
-        print(loss_components)
+        # print(loss_components)
 
         if return_components:
             return total_loss, loss_components
