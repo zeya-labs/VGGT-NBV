@@ -46,6 +46,9 @@ class NBVTrainer:
                  policy_network: BaseNBVPolicy,
                  renderer: DifferentiableRenderer,
                  loss_fn: ReconstructionLoss,
+                 min_initial_views: Optional[int] = None,
+                 max_initial_views: Optional[int] = None,
+                 randomize_initial_views: bool = False,
                  num_epochs: int = 1000,
                  learning_rate: float = 1e-4,
                  weight_decay: float = 1e-5,
@@ -60,6 +63,9 @@ class NBVTrainer:
             policy_network: 可训练的NBV策略网络
             renderer: 可微分渲染器
             loss_fn: 重建质量损失函数
+            min_initial_views: 训练时可用的最小初始视图数量（None 表示由 max_initial_views 或输入大小决定）
+            max_initial_views: 训练时可用的最大初始视图数量（None 表示使用批次实际视图数）
+            randomize_initial_views: 是否在训练步骤中随机采样初始视图数量
             learning_rate: 学习率
             weight_decay: 权重衰减
             log_dir: TensorBoard日志目录
@@ -74,6 +80,12 @@ class NBVTrainer:
         self.num_epochs = num_epochs
         self.log_dir = log_dir
         self.enable_validation = enable_validation
+
+        self.min_initial_views = min_initial_views
+        self.max_initial_views = max_initial_views
+        self.randomize_initial_views = bool(randomize_initial_views)
+        self._last_initial_view_count = 0
+        self._last_initial_view_indices: Optional[torch.Tensor] = None
 
         # 启用VGGT梯度捕获，便于调试NBV梯度链路
         self._vggt_grad_keys = ("world_points", "world_points_conf")
@@ -157,6 +169,46 @@ class NBVTrainer:
 
         self.writer.add_scalar('train/gradients/new_view_grad_norm', new_view_norm, self.global_step)
         self.writer.add_scalar('train/gradients/new_view_grad_mean_abs', new_view_mean, self.global_step)
+
+    def _select_initial_views(
+        self,
+        initial_images: torch.Tensor,
+        camera_poses: torch.Tensor,
+        *,
+        randomize: bool,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+        """选取训练/验证需要的初始视图子集。"""
+
+        min_views = max(self.min_initial_views, 1)
+        max_views = min(self.max_initial_views, initial_images.shape[1])
+
+        total_views = initial_images.shape[1]
+        should_randomize = randomize and self.randomize_initial_views
+
+        if should_randomize:
+            sampled = torch.randint(
+                low=min_views,
+                high=max_views + 1,
+                size=(1,),
+                device=initial_images.device,
+            )
+            num_views = int(sampled.item())
+        else:
+            num_views = max_views
+
+        if should_randomize:
+            perm = torch.randperm(total_views, device=initial_images.device, dtype=torch.long)
+        else:
+            perm = torch.arange(total_views, device=initial_images.device, dtype=torch.long)
+        selection = perm[:num_views]
+        selection, _ = torch.sort(selection)
+        initial_images = initial_images.index_select(1, selection)
+        camera_poses = camera_poses.index_select(1, selection)
+
+        self._last_initial_view_count = num_views
+        self._last_initial_view_indices = selection.detach().cpu()
+
+        return initial_images, camera_poses, selection, num_views
     
     def training_step(self, 
                      batch: Dict[str, torch.Tensor],
@@ -182,12 +234,13 @@ class NBVTrainer:
         
         initial_images = batch["initial_images"]  # [B, N, 3, H, W]
         gt_mesh_data = batch["gt_mesh_data"]
-        camera_poses_batch = batch.get("camera_poses")
+        camera_poses_batch = batch["camera_poses"]
 
-        if camera_poses_batch is None:
-            raise KeyError("Batch is missing 'camera_poses', which are required for correspondence-guided losses.")
-
-        camera_poses_batch = camera_poses_batch.to(device=initial_images.device, dtype=initial_images.dtype)
+        initial_images, camera_poses_batch, _, active_view_count = self._select_initial_views(
+            initial_images,
+            camera_poses_batch,
+            randomize=backprop,
+        )
 
         # 步骤1: 状态编码 - MapAnything 提取场景特征
         scene_features = self.vggt_wrapper.extract_scene_features(
@@ -341,25 +394,28 @@ class NBVTrainer:
 
             self.optimizer.step()
         
-        # 记录
-        loss_dict = {
-            "total_loss": loss_components['total_loss'],
-            "chamfer_loss": loss_components['chamfer_loss'],
-            "weighted_chamfer_loss": loss_components['weighted_chamfer_loss'],
-            "confidence_loss": loss_components['confidence_loss'],
-            "weighted_confidence_loss": loss_components['weighted_confidence_loss'],
-            "viewpoint_loss": loss_components['viewpoint_loss'],
-            "weighted_viewpoint_loss": loss_components['weighted_viewpoint_loss'],
-            "pose_penalty_loss": loss_components['pose_penalty_loss'],
-            "weighted_pose_penalty_loss": loss_components['weighted_pose_penalty_loss'],
-            "learning_rate": self.optimizer.param_groups[0]['lr']
-        }
-        
+        # 记录：只挑选需要的loss项并补充训练态量，避免把内部调试字段写入日志
+        logged_loss_keys = (
+            "total_loss",
+            "chamfer_loss",
+            "weighted_chamfer_loss",
+            "confidence_loss",
+            "weighted_confidence_loss",
+            "viewpoint_loss",
+            "weighted_viewpoint_loss",
+            "pose_penalty_loss",
+            "weighted_pose_penalty_loss",
+        )
+        loss_dict = {key: loss_components[key] for key in logged_loss_keys if key in loss_components}
+        loss_dict["learning_rate"] = self.optimizer.param_groups[0]["lr"]
+        loss_dict["num_initial_views"] = float(active_view_count)
+
         # TensorBoard logging
         if backprop:
             # 记录总损失和学习率
             self.writer.add_scalar('train/total_loss', loss_dict['total_loss'], self.global_step)
             self.writer.add_scalar('train/learning_rate', loss_dict['learning_rate'], self.global_step)
+            self.writer.add_scalar('train/num_initial_views', active_view_count, self.global_step)
             
             # 记录各个损失组件（原始值）
             self.writer.add_scalar('train/losses/chamfer_loss', loss_dict['chamfer_loss'], self.global_step)
@@ -417,7 +473,8 @@ class NBVTrainer:
             # 更新进度条
             progress_bar.set_postfix({
                 "loss": f"{loss_dict['total_loss']:.4f}",
-                "lr": f"{loss_dict['learning_rate']:.2e}"
+                "lr": f"{loss_dict['learning_rate']:.2e}",
+                "views": int(loss_dict.get("num_initial_views", 0)),
             })
         
         # 计算epoch平均损失
@@ -453,13 +510,16 @@ class NBVTrainer:
                 self.val_image_step += 1
 
             progress_bar.set_postfix({
-                "val_loss": f"{loss_dict['total_loss']:.4f}"
+                "val_loss": f"{loss_dict['total_loss']:.4f}",
+                "views": int(loss_dict.get("num_initial_views", 0)),
             })
-        
+
         avg_loss_dict = self._average_loss_dicts(epoch_losses)
-        
+
         # 记录验证损失（以 epoch 作为 step）
         self.writer.add_scalar('val/total_loss', avg_loss_dict['total_loss'], self.current_epoch)
+        if 'num_initial_views' in avg_loss_dict:
+            self.writer.add_scalar('val/num_initial_views', avg_loss_dict['num_initial_views'], self.current_epoch)
         
         # 记录各个验证损失组件（原始值）
         self.writer.add_scalar('val/losses/chamfer_loss', avg_loss_dict['chamfer_loss'], self.current_epoch)
@@ -534,10 +594,13 @@ class NBVTrainer:
         self.logger.info("Training completed!")
     
     def _move_batch_to_device(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """将batch数据递归移到设备（支持嵌套的dict/list/tuple结构）"""
+        """将batch数据递归移到训练设备，并将浮点张量统一为float32（支持嵌套的dict/list/tuple结构）"""
         def _to_device(x):
             if isinstance(x, torch.Tensor):
-                return x.to(self.device)
+                tensor = x.to(self.device)
+                if tensor.is_floating_point() and tensor.dtype != torch.float32:
+                    tensor = tensor.to(dtype=torch.float32)
+                return tensor
             if isinstance(x, dict):
                 return {k: _to_device(v) for k, v in x.items()}
             if isinstance(x, list):

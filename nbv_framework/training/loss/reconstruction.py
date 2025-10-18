@@ -23,7 +23,7 @@ class ReconstructionLoss(nn.Module):
         chamfer_weight: float = 1.0,
         confidence_weight: float = 0.0,
         viewpoint_weight: float = 0.0,
-        pose_penalty_weight: float = 1.0,
+        pose_penalty_weight: float = 0.02,
         renderer: Optional["DifferentiableRenderer"] = None,
         pose_up_axis: str = "Y",
     ) -> None:
@@ -43,6 +43,7 @@ class ReconstructionLoss(nn.Module):
         self.viewpoint_loss = ViewpointLoss()
         self.pose_outer_radius = 3.0
         self.pose_inner_radius = 1.2
+        self.pose_floor_margin = 1.0
 
     @staticmethod
     def _infer_device(tensor_dict: Dict[str, torch.Tensor]) -> Optional[torch.device]:
@@ -390,32 +391,31 @@ class ReconstructionLoss(nn.Module):
         up_axis_index = axis_to_index.get(getattr(self, "pose_up_axis", "Y"), 1)
 
         # Define the spherical shell boundaries
-        outer_radius = float(getattr(self, "pose_outer_radius", 4.0)) # 最大允许半径
-        inner_radius = float(getattr(self, "pose_inner_radius", 2.0)) # 最小允许半径
+        outer_radius = float(getattr(self, "pose_outer_radius", 4.0))  # 最大允许半径
+        inner_radius = float(getattr(self, "pose_inner_radius", 2.0))  # 最小允许半径
+        floor_margin = float(getattr(self, "pose_floor_margin", 2.0))  # 允许的最低高度偏移
+
+        inner_radius = max(inner_radius, 1e-3)
+        outer_radius = max(outer_radius, 1e-3)
+        floor_margin = max(floor_margin, 1e-3)
 
         # Calculate the Euclidean distance (L2 norm) from the origin for each pose
         # torch.linalg.norm is efficient for this
         distances = torch.linalg.norm(target_positions, ord=2, dim=-1)
 
-        # Calculate violations
-        # Violation for being too close (distance < inner_radius)
-        eps_tensor = distances.new_full((), 1e-6)
-        inner_violation = torch.clamp(
-            (inner_radius - distances) / (distances + eps_tensor),
-            min=0.0,
-        )
-        
-        # Violation for being too far (distance > outer_radius)
-        outer_violation = torch.clamp(distances - outer_radius, min=0.0)
+        # Calculate violations using smooth quadratic penalties without singularities.
+        # Inner shell: encourage cameras to stay outside the minimum radius.
+        inner_violation = torch.relu(inner_radius - distances)
+        inner_penalty = (inner_violation / inner_radius).pow(2).mean()
 
-        # Penalise camera poses that fall below the configured up-axis plane (default Y=0)
+        # Outer shell: discourage cameras from drifting beyond the maximum radius.
+        outer_violation = torch.relu(distances - outer_radius)
+        outer_penalty = (outer_violation / outer_radius).pow(2).mean()
+
+        # Floor constraint: gently push poses back above the configured floor plane.
         up_axis_values = target_positions[..., up_axis_index]
-        floor_violation = torch.clamp(-up_axis_values - 2, min=0.0) * 2
-
-        # Square each component separately to avoid cross-term amplification
-        inner_penalty = inner_violation.pow(2).mean()
-        outer_penalty = outer_violation.pow(2).mean()
-        floor_penalty = floor_violation.pow(2).mean()
+        floor_violation = torch.relu(-(up_axis_values + floor_margin))
+        floor_penalty = (floor_violation / floor_margin).pow(2).mean()
 
         penalty_terms = {
             "pose_penalty_inner": inner_penalty,
@@ -498,6 +498,8 @@ class ReconstructionLoss(nn.Module):
             loss_components[term_name] = term_value.item()
 
         loss_components["total_loss"] = total_loss.item()
+
+        # print(loss_components)
 
         if return_components:
             return total_loss, loss_components
