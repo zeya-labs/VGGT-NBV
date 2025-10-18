@@ -23,7 +23,7 @@ class ReconstructionLoss(nn.Module):
         chamfer_weight: float = 1.0,
         confidence_weight: float = 0.0,
         viewpoint_weight: float = 0.0,
-        pose_penalty_weight: float = 1.0,
+        pose_penalty_weight: float = 0.02,
         renderer: Optional["DifferentiableRenderer"] = None,
         pose_up_axis: str = "Y",
     ) -> None:
@@ -422,12 +422,12 @@ class ReconstructionLoss(nn.Module):
             "pose_penalty_outer": outer_penalty,
             "pose_penalty_floor": floor_penalty,
         }
-        print("target_positions:",target_positions)
-        print("distances:",distances)
+        # print("target_positions:",target_positions)
+        # print("distances:",distances)
 
-        print("pose_penalty_inner:", inner_violation)
-        print("pose_penalty_outer:", outer_violation)
-        print("pose_penalty_floor:", floor_violation)
+        # print("pose_penalty_inner:", inner_violation)
+        # print("pose_penalty_outer:", outer_violation)
+        # print("pose_penalty_floor:", floor_violation)
 
         penalty_value = torch.stack(list(penalty_terms.values())).sum()
         weighted_penalty = pose_penalty_weight * penalty_value
@@ -498,6 +498,8 @@ class ReconstructionLoss(nn.Module):
             loss_components[term_name] = term_value.item()
 
         loss_components["total_loss"] = total_loss.item()
+
+        print(loss_components)
 
         if return_components:
             return total_loss, loss_components
