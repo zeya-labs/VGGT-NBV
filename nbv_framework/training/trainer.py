@@ -81,17 +81,8 @@ class NBVTrainer:
         self.log_dir = log_dir
         self.enable_validation = enable_validation
 
-        self.min_initial_views = int(min_initial_views) if min_initial_views is not None else None
-        self.max_initial_views = int(max_initial_views) if max_initial_views is not None else None
-        if self.max_initial_views is None and self.min_initial_views is not None:
-            self.max_initial_views = self.min_initial_views
-        if self.min_initial_views is not None and self.min_initial_views <= 0:
-            raise ValueError("min_initial_views must be a positive integer")
-        if self.max_initial_views is not None and self.max_initial_views <= 0:
-            raise ValueError("max_initial_views must be a positive integer")
-        if (self.min_initial_views is not None and self.max_initial_views is not None
-                and self.min_initial_views > self.max_initial_views):
-            raise ValueError("min_initial_views cannot exceed max_initial_views")
+        self.min_initial_views = min_initial_views
+        self.max_initial_views = max_initial_views
         self.randomize_initial_views = bool(randomize_initial_views)
         self._last_initial_view_count = 0
         self._last_initial_view_indices: Optional[torch.Tensor] = None
@@ -127,12 +118,6 @@ class NBVTrainer:
         
         # 日志
         self.setup_logging()
-        self.logger.info(
-            "Initial view sampling -> min=%s, max=%s, randomize=%s",
-            self.min_initial_views if self.min_initial_views is not None else "auto",
-            self.max_initial_views if self.max_initial_views is not None else "auto",
-            self.randomize_initial_views,
-        )
 
     
     def setup_logging(self):
@@ -274,14 +259,7 @@ class NBVTrainer:
         
         initial_images = batch["initial_images"]  # [B, N, 3, H, W]
         gt_mesh_data = batch["gt_mesh_data"]
-        camera_poses_batch = batch.get("camera_poses")
-
-        if camera_poses_batch is None:
-            raise KeyError("Batch is missing 'camera_poses', which are required for correspondence-guided losses.")
-
-        if camera_poses_batch.dim() == 2:
-            camera_poses_batch = camera_poses_batch.unsqueeze(0)
-        camera_poses_batch = camera_poses_batch.to(device=initial_images.device, dtype=initial_images.dtype)
+        camera_poses_batch = batch["camera_poses"]
 
         initial_images, camera_poses_batch, _, active_view_count = self._select_initial_views(
             initial_images,
@@ -640,10 +618,13 @@ class NBVTrainer:
         self.logger.info("Training completed!")
     
     def _move_batch_to_device(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """将batch数据递归移到设备（支持嵌套的dict/list/tuple结构）"""
+        """将batch数据递归移到训练设备，并将浮点张量统一为float32（支持嵌套的dict/list/tuple结构）"""
         def _to_device(x):
             if isinstance(x, torch.Tensor):
-                return x.to(self.device)
+                tensor = x.to(self.device)
+                if tensor.is_floating_point() and tensor.dtype != torch.float32:
+                    tensor = tensor.to(dtype=torch.float32)
+                return tensor
             if isinstance(x, dict):
                 return {k: _to_device(v) for k, v in x.items()}
             if isinstance(x, list):
