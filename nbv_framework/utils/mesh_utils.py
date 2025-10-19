@@ -89,6 +89,9 @@ def normalize_mesh(mesh: Meshes, method: str = "quantile") -> Meshes:
     elif method == 'std':
         distances = torch.norm(verts, p=2, dim=1)
         scale = torch.sqrt(torch.mean(distances ** 2))
+    elif method in {'mean', 'mean_radius'}:
+        distances = torch.norm(verts, p=2, dim=1)
+        scale = torch.mean(distances)
     elif method == 'quantile':
         distances = torch.norm(verts, p=2, dim=1)
         scale = torch.quantile(distances, q=0.95)

@@ -9,6 +9,8 @@ import torch.nn as nn
 from pytorch3d.loss import chamfer_distance
 from pytorch3d.structures import Pointclouds
 
+from ...utils.tensorboard_mesh import log_point_clouds_to_tensorboard
+
 
 class ChamferDistance(nn.Module):
     """Compute an aligned Chamfer distance with optional TensorBoard logging."""
@@ -115,74 +117,37 @@ class ChamferDistance(nn.Module):
 
         if writer is not None and step is not None:
             if len(aligned_points_list) > 0 and len(gt_list) > 0:
-                correspondence_cloud = (
-                    Pointclouds(points=[corr_list[0]]) if len(corr_list) > 0 else None
-                )
-                self._visualize_point_clouds(
+                point_cloud_specs: List[Tuple[Pointclouds, np.ndarray]] = [
+                    (
+                        Pointclouds(points=pred_list),
+                        np.array([0, 0, 255], dtype=np.uint8),
+                    ),
+                    (
+                        Pointclouds(points=gt_list),
+                        np.array([0, 255, 0], dtype=np.uint8),
+                    ),
+                    (
+                        Pointclouds(points=aligned_points_list),
+                        np.array([255, 0, 0], dtype=np.uint8),
+                    ),
+                ]
+                if len(corr_list) > 0 and corr_list[0].numel() > 0:
+                    point_cloud_specs.append(
+                        (
+                            Pointclouds(points=[corr_list[0]]),
+                            np.array([255, 255, 0], dtype=np.uint8),
+                        )
+                    )
+                log_point_clouds_to_tensorboard(
                     writer,
-                    step,
-                    Pointclouds(points=[pred_list[0]]),
-                    Pointclouds(points=[gt_list[0]]),
-                    Pointclouds(points=[aligned_points_list[0]]),
-                    correspondence_cloud,
+                    tag="Chamfer/Comparison",
+                    point_cloud_specs=point_cloud_specs,
+                    step=step,
+                    batch_index=0,
+                    max_points_per_cloud=4096,
                 )
 
         loss, _ = chamfer_distance(p_pred_aligned, p_gt_float)
         return loss
-
-    def _visualize_point_clouds(
-        self,
-        writer,
-        step,
-        p_pred_norm,
-        p_gt_norm,
-        p_pred_aligned,
-        p_corr_subset: Optional[Pointclouds] = None,
-    ) -> None:
-        if writer is None or step is None:
-            return
-
-        p_pred_norm_np = p_pred_norm.points_list()[0].detach().cpu().numpy()
-        p_gt_norm_np = p_gt_norm.points_list()[0].detach().cpu().numpy()
-        p_pred_aligned_np = p_pred_aligned.points_list()[0].detach().cpu().numpy()
-
-        clouds_with_colors = [
-            (p_pred_norm_np, np.array([0, 0, 255], dtype=np.uint8)),
-            (p_gt_norm_np, np.array([0, 255, 0], dtype=np.uint8)),
-            (p_pred_aligned_np, np.array([255, 0, 0], dtype=np.uint8)),
-        ]
-
-        if p_corr_subset is not None and len(p_corr_subset.points_list()) > 0:
-            corr_np = p_corr_subset.points_list()[0].detach().cpu().numpy()
-            if corr_np.size > 0:
-                clouds_with_colors.append(
-                    (corr_np, np.array([255, 255, 0], dtype=np.uint8))
-                )
-
-        vertices_list = []
-        colors_list = []
-        for points_np, color in clouds_with_colors:
-            if points_np.ndim != 2 or points_np.shape[1] != 3:
-                continue
-            if points_np.shape[0] == 0:
-                continue
-            vertices_list.append(points_np)
-            colors_list.append(
-                np.repeat(color[np.newaxis, :], points_np.shape[0], axis=0)
-            )
-
-        if not vertices_list:
-            return
-
-        combined_vertices = np.vstack(vertices_list)
-        combined_colors = np.vstack(colors_list)
-
-        writer.add_mesh(
-            "Chamfer/Comparison",
-            vertices=combined_vertices[np.newaxis, ...],
-            colors=combined_colors[np.newaxis, ...],
-            global_step=step,
-        )
-
 
 __all__ = ["ChamferDistance"]

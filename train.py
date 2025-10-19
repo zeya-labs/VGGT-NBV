@@ -54,6 +54,7 @@ def setup_config() -> Dict[str, Any]:
         "learning_rate": 1e-4,
         "batch_size": 1,  # 根据GPU内存调整
         "num_epochs": 1000,
+        "normalize_method": "mean",
         "num_samples": 20000,
         "weight_decay": 1e-5,
         
@@ -175,7 +176,7 @@ def setup_data_loaders(config: Dict[str, Any]):
             "data_root": "/mnt/sdb/chenmohan/VGGT-NBV/models/House3K_obj",
             "num_initial_views": config["max_initial_views"],
             "image_size": config["image_size"],
-            "normalize_method": "quantile",
+            "normalize_method": config["normalize_method"],
             "num_samples": config["num_samples"],
             "split": "train",
             "max_meshes": config.get("max_meshes", 100),  # 限制总mesh数量
@@ -191,7 +192,7 @@ def setup_data_loaders(config: Dict[str, Any]):
             "data_root": "/mnt/sdb/chenmohan/VGGT-NBV/models/House3K_obj",
             "num_initial_views": config["max_initial_views"],
             "image_size": config["image_size"],
-            "normalize_method": "quantile",
+            "normalize_method": config["normalize_method"],
             "num_samples": config["num_samples"],
             "split": "val",
             "max_meshes": config.get("max_meshes", 100),  # 验证集使用更少的mesh
