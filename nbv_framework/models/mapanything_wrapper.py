@@ -164,7 +164,8 @@ class MapAnythingWrapper(nn.Module):
         else:
             final_feat, _ = self.base_model.info_sharing(info_sharing_input)
         # print("info_sharing features shape:", [i.shape for i in final_feat.features])
-        scene_features = self._gather_tokens(final_feat.features) # [B, S, P, D]
+        # [Slist][B,C,Hf,Wf]
+        scene_features = self._gather_tokens(final_feat.features) # [B, S, P=Hf*Wf, C]
         self._maybe_retain_grad(scene_features, normalized)
         # print("scene_features shape:", scene_features.shape)
         return scene_features

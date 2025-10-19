@@ -99,7 +99,7 @@ class NBVTrainer:
         self.writer = SummaryWriter(self.log_dir)
         
         # 优化器（只优化策略网络）
-        self.optimizer = optim.Adam(
+        self.optimizer = optim.AdamW(
             self.policy_network.parameters(),
             lr=learning_rate,
             weight_decay=weight_decay
@@ -248,6 +248,7 @@ class NBVTrainer:
             camera_poses_batch,
             is_metric_scale=False,
         )
+        # print("scene_features shape:", scene_features.shape)
         # 步骤2: 动作提议 - 策略网络输出下一个相机位姿
         next_camera_pose = self.policy_network(scene_features)
         

@@ -28,7 +28,7 @@ def set_random_seed(seed: int = 42):
 
 
 # 导入NBV框架组件
-from nbv_framework import MapAnythingWrapper, BaseNBVPolicy, BasicNBVPolicy, DifferentiableRenderer, NBVTrainer
+from nbv_framework import MapAnythingWrapper, BaseNBVPolicy, BasicNBVPolicy, AttentionNBVPolicy, DifferentiableRenderer, NBVTrainer
 from nbv_framework.training.loss import ReconstructionLoss
 from nbv_framework.datasets import SyntheticDataset, MixedDataset
 from nbv_framework.datasets.data_loaders import create_train_loader, create_val_loader
@@ -45,6 +45,7 @@ def setup_config() -> Dict[str, Any]:
         # 模型配置
         "scene_feature_dim": 768,
         "policy_hidden_dim": 256,
+        "policy_num_heads": 4,
         "policy_num_layers": 3,
         # "policy_output_mode": "cartesian",
         "policy_output_mode": "position_only",
@@ -58,8 +59,8 @@ def setup_config() -> Dict[str, Any]:
         
         # 数据配置
         "synthetic_data_root": "./models/synthetic_data",
-        "min_initial_views": 4,
-        "max_initial_views": 8,
+        "min_initial_views": 3,
+        "max_initial_views": 3,
         "randomize_initial_views": True,
         "image_size": 224,
         "up_axis": "Y",  # 数据集模型默认上方向 ('Y' 或 'Z')
@@ -114,13 +115,21 @@ def setup_models(config: Dict[str, Any]):
 
     # 2. NBV策略网络（可训练）
     print("Creating NBV policy network...")
-    policy_network = BasicNBVPolicy(
+    # policy_network = BasicNBVPolicy(
+    #     scene_feature_dim=config["scene_feature_dim"],
+    #     hidden_dim=config["policy_hidden_dim"],
+    #     num_layers=config["policy_num_layers"],
+    #     output_mode=config["policy_output_mode"]
+    # ).to(device)
+    
+    policy_network = AttentionNBVPolicy(
         scene_feature_dim=config["scene_feature_dim"],
         hidden_dim=config["policy_hidden_dim"],
+        num_heads=config["policy_num_heads"],
         num_layers=config["policy_num_layers"],
         output_mode=config["policy_output_mode"]
     ).to(device)
-    
+
     # 3. 可微分渲染器
     print("Setting up differentiable renderer...")
     renderer = DifferentiableRenderer(
