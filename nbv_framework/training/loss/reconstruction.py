@@ -26,6 +26,9 @@ class ReconstructionLoss(nn.Module):
         pose_penalty_weight: float = 0.02,
         renderer: Optional["DifferentiableRenderer"] = None,
         pose_up_axis: str = "Y",
+        save_point_clouds: bool = True,
+        point_cloud_dir_name: str = "point_clouds",
+        max_points_per_cloud: int = 4096,
     ) -> None:
         super().__init__()
 
@@ -39,10 +42,17 @@ class ReconstructionLoss(nn.Module):
         if self.pose_up_axis not in {"X", "Y", "Z"}:
             raise ValueError("pose_up_axis must be one of {'X', 'Y', 'Z'}.")
 
-        self.chamfer_loss = ChamferDistance()
+        self.save_point_clouds = bool(save_point_clouds)
+        self.point_cloud_dir_name = point_cloud_dir_name
+        self.chamfer_loss = ChamferDistance(max_points_per_cloud=max_points_per_cloud)
+        self.chamfer_loss.configure_point_cloud_logging(
+            enable_save=self.save_point_clouds,
+            subdir_name=self.point_cloud_dir_name,
+            max_points_per_cloud=max_points_per_cloud,
+        )
         self.viewpoint_loss = ViewpointLoss()
-        self.pose_outer_radius = 3.0
-        self.pose_inner_radius = 1.2
+        self.pose_outer_radius = 4.0
+        self.pose_inner_radius = 2.0
         self.pose_floor_margin = 1.0
 
     @staticmethod
@@ -241,6 +251,7 @@ class ReconstructionLoss(nn.Module):
         writer,
         step,
         device: torch.device,
+        point_cloud_dir: Optional[str] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         zero = torch.tensor(0.0, device=device)
         if self.chamfer_weight <= 0 or "gt_points" not in gt_data:
@@ -307,6 +318,7 @@ class ReconstructionLoss(nn.Module):
             correspondence_points=correspondence_points,
             writer=writer,
             step=step,
+            point_cloud_dir=point_cloud_dir,
         )
 
         weighted_loss = self.chamfer_weight * chamfer_loss_value
@@ -444,6 +456,7 @@ class ReconstructionLoss(nn.Module):
         writer=None,
         step=None,
         train_flag: bool = False,
+        point_cloud_dir: Optional[str] = None,
     ) -> torch.Tensor:
         self.train_flag = train_flag
 
@@ -457,6 +470,8 @@ class ReconstructionLoss(nn.Module):
         total_loss = torch.tensor(0.0, device=device)
         loss_components: Dict[str, float] = {}
 
+        chamfer_save_dir = point_cloud_dir if self.save_point_clouds else None
+
         weighted_chamfer, chamfer_raw, confidence_mask = self._compute_chamfer_component(
             recon_data,
             gt_data,
@@ -465,6 +480,7 @@ class ReconstructionLoss(nn.Module):
             writer,
             step,
             device,
+            point_cloud_dir=chamfer_save_dir,
         )
         total_loss = total_loss + weighted_chamfer
         loss_components["chamfer_loss"] = chamfer_raw.item()

@@ -1,5 +1,8 @@
 """Chamfer distance loss helpers."""
 
+from __future__ import annotations
+
+import os
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -15,8 +18,26 @@ from ...utils.tensorboard_mesh import log_point_clouds_to_tensorboard
 class ChamferDistance(nn.Module):
     """Compute an aligned Chamfer distance with optional TensorBoard logging."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, max_points_per_cloud: int = 4096) -> None:
         super().__init__()
+        self.max_points_per_cloud = max_points_per_cloud
+        self.save_point_clouds: bool = False
+        self.point_cloud_subdir: str = "point_clouds"
+
+    def configure_point_cloud_logging(
+        self,
+        *,
+        max_points_per_cloud: Optional[int] = None,
+        enable_save: Optional[bool] = None,
+        subdir_name: Optional[str] = None,
+    ) -> None:
+        """Adjust TensorBoard logging behaviour."""
+        if max_points_per_cloud is not None:
+            self.max_points_per_cloud = max_points_per_cloud
+        if enable_save is not None:
+            self.save_point_clouds = bool(enable_save)
+        if subdir_name is not None:
+            self.point_cloud_subdir = subdir_name
 
     def _umeyama_alignment(
         self, source: torch.Tensor, target: torch.Tensor
@@ -87,6 +108,7 @@ class ChamferDistance(nn.Module):
         correspondence_points: Optional[List[torch.Tensor]] = None,
         writer=None,
         step=None,
+        point_cloud_dir: Optional[str] = None,
     ) -> torch.Tensor:
         if correspondence_points is None:
             raise ValueError("correspondence_points must be provided for Umeyama alignment.")
@@ -117,16 +139,19 @@ class ChamferDistance(nn.Module):
 
         if writer is not None and step is not None:
             if len(aligned_points_list) > 0 and len(gt_list) > 0:
-                point_cloud_specs: List[Tuple[Pointclouds, np.ndarray]] = [
+                point_cloud_specs: List[Tuple[str, Pointclouds, np.ndarray]] = [
                     (
+                        "predicted",
                         Pointclouds(points=pred_list),
                         np.array([0, 0, 255], dtype=np.uint8),
                     ),
                     (
+                        "ground_truth",
                         Pointclouds(points=gt_list),
                         np.array([0, 255, 0], dtype=np.uint8),
                     ),
                     (
+                        "aligned_predicted",
                         Pointclouds(points=aligned_points_list),
                         np.array([255, 0, 0], dtype=np.uint8),
                     ),
@@ -134,20 +159,37 @@ class ChamferDistance(nn.Module):
                 if len(corr_list) > 0 and corr_list[0].numel() > 0:
                     point_cloud_specs.append(
                         (
+                            "correspondence",
                             Pointclouds(points=[corr_list[0]]),
-                            np.array([255, 255, 0], dtype=np.uint8),
+                            np.array([255, 0, 255], dtype=np.uint8),
                         )
                     )
+                save_directory = self._resolve_point_cloud_directory(point_cloud_dir)
+                target_batch = 0
+                if save_directory is not None:
+                    os.makedirs(save_directory, exist_ok=True)
+                glb_path = (
+                    os.path.join(save_directory, f"batch_{target_batch:03d}_comparison.glb")
+                    if save_directory is not None
+                    else None
+                )
                 log_point_clouds_to_tensorboard(
                     writer,
                     tag="Chamfer/Comparison",
                     point_cloud_specs=point_cloud_specs,
                     step=step,
-                    batch_index=0,
-                    max_points_per_cloud=4096,
+                    batch_index=target_batch,
+                    max_points_per_cloud=self.max_points_per_cloud,
+                    glb_output_path=glb_path,
                 )
 
         loss, _ = chamfer_distance(p_pred_aligned, p_gt_float)
         return loss
+
+    def _resolve_point_cloud_directory(self, base_dir: Optional[str]) -> Optional[str]:
+        if not self.save_point_clouds or base_dir is None:
+            return None
+        return os.path.join(base_dir, self.point_cloud_subdir)
+
 
 __all__ = ["ChamferDistance"]

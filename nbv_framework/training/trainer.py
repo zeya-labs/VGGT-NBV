@@ -314,7 +314,7 @@ class NBVTrainer:
         combined_images_batch = torch.cat([initial_images, new_images_expanded], dim=1)
         
         # 保存视图数据（图像 + 相机标定）到日志目录
-        self._save_combined_images(
+        step_output_dir = self._save_combined_images(
             combined_images_batch=combined_images_batch,
             combined_camera_poses=combined_camera_poses
         )
@@ -333,14 +333,14 @@ class NBVTrainer:
                 recon_data, gt_mesh_data, combined_images_batch,
                 combined_camera_poses,
                 return_components=True, writer=self.writer, step=self.global_step,
-                train_flag=True
+                train_flag=True, point_cloud_dir=step_output_dir
             )
         else:
             total_loss, loss_components = self.loss_fn(
                 recon_data, gt_mesh_data, combined_images_batch,
                 combined_camera_poses,
                 return_components=True, writer=self.writer, step=self.val_image_step,
-                train_flag=False
+                train_flag=False, point_cloud_dir=step_output_dir
             )
         # print("===================loss计算完成===================")
         # 步骤5: 策略更新 - 反向传播（仅训练时）
@@ -669,7 +669,7 @@ class NBVTrainer:
         combined_images_batch: torch.Tensor,
         combined_camera_poses: torch.Tensor,
         fov_degrees: float = 60.0,
-    ) -> None:
+    ) -> Optional[str]:
         """
         保存视图的图像与标定数据到log_dir下的images文件夹。
 
@@ -679,7 +679,7 @@ class NBVTrainer:
             fov_degrees: 渲染视场角（默认60°），用于构造内参矩阵
         """
         if combined_images_batch is None or combined_camera_poses is None:
-            return
+            return None
 
         # 确保形状匹配
         if combined_images_batch.shape[:2] != combined_camera_poses.shape[:2]:
@@ -688,7 +688,7 @@ class NBVTrainer:
                 combined_images_batch.shape,
                 combined_camera_poses.shape,
             )
-            return
+            return None
 
         images_dir = os.path.join(self.log_dir, "images")
         os.makedirs(images_dir, exist_ok=True)
@@ -738,3 +738,4 @@ class NBVTrainer:
             num_views,
             step_dir,
         )
+        return step_dir
