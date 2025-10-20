@@ -616,7 +616,7 @@ class House3KDataset(BaseDataset):
                 "gt_mesh_data": gt_mesh_data,
                 "camera_poses": camera_poses,
                 "mesh_path": mesh_path,
-                "dataset_type": self.__class__.__name__,
+                # "dataset_type": self.__class__.__name__,
                 "batch_name": data_item["batch_name"],
                 "set_name": data_item["set_name"],
                 "model_name": data_item["model_name"],

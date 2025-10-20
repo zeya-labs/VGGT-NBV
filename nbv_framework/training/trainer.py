@@ -232,13 +232,15 @@ class NBVTrainer:
             self.optimizer.zero_grad()
         else:
             self.policy_network.eval()
-        
+
         initial_images = batch["initial_images"]  # [B, N, 3, H, W]
         gt_mesh_data = batch["gt_mesh_data"]
         camera_poses_batch = batch["camera_poses"]
         gt_point_maps = gt_mesh_data.get("gt_point_maps")
         gt_valid_masks = gt_mesh_data.get("gt_valid_masks")
-
+        print("keys",batch["gt_mesh_data"].keys())
+        # keys dict_keys(['mesh_path', 'gt_points', 'normalize_method', 'num_samples', 'gt_point_maps', 'gt_valid_masks', 'original_mesh', 'normalized_mesh'])
+        # keys dict_keys(['initial_images', 'camera_poses', 'mesh_path', 'batch_name', 'set_name', 'model_name', 'source_dataset', 'source_dataset_idx', 'source_dataset_sample_idx', 'gt_mesh_data'])
         initial_images, camera_poses_batch, selection, active_view_count = self._select_initial_views(
             initial_images,
             camera_poses_batch,
@@ -260,7 +262,7 @@ class NBVTrainer:
                 f"policy_network 输出维度需至少包含位置 (3)，实际为 {policy_output.shape[-1]}"
             )
 
-        reference_position = camera_poses_batch[:, 0, :3]
+        reference_position = camera_poses_batch[:, -1, :3]
         predicted_relative_position = policy_output[:, :3]
         absolute_position = reference_position + predicted_relative_position
 

@@ -32,7 +32,7 @@ class CameraPoseGenerator:
         self,
         sphere_positions: np.ndarray,
         seed: int = 0,
-        base_radius: float = 2.22,
+        base_radius: float = 2.5,
         radius_variation: float = 0
     ) -> List[Dict[str, List[float]]]:
         """

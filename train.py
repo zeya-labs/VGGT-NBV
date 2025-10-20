@@ -171,7 +171,7 @@ def setup_data_loaders(config: Dict[str, Any]):
     # 选项2: House3K数据集
     dataset_train_configs = [
         {
-            "name": "house3k_data",
+            "name": "House3KDataset",
             "type": "house3k",
             "data_root": "/mnt/sdb/chenmohan/VGGT-NBV/models/House3K_obj",
             "num_initial_views": config["max_initial_views"],
@@ -187,7 +187,7 @@ def setup_data_loaders(config: Dict[str, Any]):
 
     dataset_val_configs = [
         {
-            "name": "house3k_data",
+            "name": "House3KDataset",
             "type": "house3k",
             "data_root": "/mnt/sdb/chenmohan/VGGT-NBV/models/House3K_obj",
             "num_initial_views": config["max_initial_views"],
