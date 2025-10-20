@@ -11,6 +11,7 @@ import numpy as np
 from typing import List, Dict, Optional, Tuple
 from .base_dataset import BaseDataset
 from ..utils.camera_utils import pose_dict_to_tensor
+from ..utils.render_utils import render_gt_point_maps
 
 
 class House3KDataset(BaseDataset):
@@ -620,7 +621,16 @@ class House3KDataset(BaseDataset):
                 "set_name": data_item["set_name"],
                 "model_name": data_item["model_name"],
             }
-            
+
+            metadata = {
+                "data_item": data_item,
+                "selected_indices": selected_indices,
+                "camera_poses_list": camera_poses_list,
+            }
+            gt_targets = self._build_gt_targets(gt_mesh_data, camera_poses, metadata)
+            if gt_targets:
+                gt_mesh_data.update(gt_targets)
+
             return result
             
         finally:
@@ -631,6 +641,41 @@ class House3KDataset(BaseDataset):
                 delattr(self, '_current_gt_mesh_data')
             if hasattr(self, '_current_camera_poses_list'):
                 delattr(self, '_current_camera_poses_list')
+
+    def _build_gt_targets(
+        self,
+        gt_mesh_data: Dict[str, torch.Tensor],
+        camera_poses: Optional[torch.Tensor],
+        metadata: Dict,
+    ) -> Dict[str, torch.Tensor]:
+        if camera_poses is None or camera_poses.numel() == 0:
+            return {}
+
+        renderer = self._get_renderer()
+        if renderer is None:
+            return {}
+
+        normalized_mesh = gt_mesh_data.get("normalized_mesh")
+        if normalized_mesh is None:
+            return {}
+
+        # Ensure poses include batch dimension expected by renderer helper.
+        poses_with_batch = camera_poses.unsqueeze(0) if camera_poses.dim() == 2 else camera_poses
+        point_maps, valid_masks = render_gt_point_maps(
+            renderer=renderer,
+            mesh_batch=normalized_mesh,
+            camera_poses=poses_with_batch,
+            output_device=torch.device("cpu"),
+        )
+
+        # Remove batch dimension for dataset sample.
+        point_maps = point_maps.squeeze(0).contiguous()
+        valid_masks = valid_masks.squeeze(0).contiguous()
+
+        return {
+            "gt_point_maps": point_maps.to(dtype=torch.float32),
+            "gt_valid_masks": valid_masks.to(dtype=torch.bool),
+        }
     
     @property
     def dataset_info(self) -> Dict:

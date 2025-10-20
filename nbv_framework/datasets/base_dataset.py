@@ -407,9 +407,18 @@ class BaseDataset(Dataset, ABC):
             "mesh_path": mesh_path,
             "dataset_type": self.__class__.__name__,
         }
-        
+
+        metadata = {
+            "data_item": data_item,
+            "selected_indices": selected_indices,
+            "selected_image_paths": selected_image_paths,
+        }
+        gt_targets = self._build_gt_targets(gt_mesh_data, camera_poses, metadata)
+        if gt_targets:
+            gt_mesh_data.update(gt_targets)
+
         return result
-    
+
     @property # @是装饰器，用于将一个方法转换为属性，可以像属性一样访问，而不是像方法一样调用，通常用于返回一些元数据或配置信息。
     def dataset_info(self) -> Dict:
         """返回数据集信息"""
@@ -423,3 +432,22 @@ class BaseDataset(Dataset, ABC):
             "normalize_method": self.normalize_method,
             "num_mesh_samples": self.num_samples,
         }
+
+    def _build_gt_targets(
+        self,
+        gt_mesh_data: Dict[str, torch.Tensor],
+        camera_poses: Optional[torch.Tensor],
+        metadata: Dict,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Hook for subclasses to attach GT point maps or masks into dataset outputs.
+
+        Args:
+            gt_mesh_data: Dictionary containing mesh information.
+            camera_poses: Pose tensor aligned with selected images.
+            metadata: Additional context such as selected indices or data item.
+
+        Returns:
+            Dictionary merged into dataset sample. Default implementation returns {}.
+        """
+        return {}

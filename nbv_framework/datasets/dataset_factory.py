@@ -72,24 +72,24 @@ class DatasetFactory:
     def get_available_types(cls) -> list:
         """获取所有可用的数据集类型"""
         return list(cls._dataset_registry.keys())
-    
+
     @classmethod
     def create_from_config(cls, config: Dict[str, Any]) -> BaseDataset:
         """
         从配置字典创建数据集
-        
+
         Args:
             config: 包含数据集配置的字典，必须包含 'type' 和 'data_root' 字段
-            
+
         Returns:
             数据集实例
         """
         config = config.copy()  # 避免修改原配置
-        
+
         if 'type' not in config:
             raise ValueError("Config must contain 'type' field")
         if 'data_root' not in config:
             raise ValueError("Config must contain 'data_root' field")
-        
+
         dataset_type = config.pop('type')
         return cls.create_dataset(dataset_type, **config)

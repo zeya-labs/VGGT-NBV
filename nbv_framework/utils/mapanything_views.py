@@ -6,8 +6,7 @@ import math
 from typing import Any, Dict, List, Tuple
 
 import torch
-import torch.nn.functional as F
-from mapanything.utils.image import IMAGE_NORMALIZATION_DICT, find_closest_aspect_ratio
+from mapanything.utils.image import IMAGE_NORMALIZATION_DICT
 from mapanything.utils.inference import (
     preprocess_input_views_for_inference,
     validate_input_views_for_inference,
@@ -36,33 +35,6 @@ def compute_pinhole_intrinsics(height: int, width: int, fov_degrees: float) -> t
         dtype=torch.float32,
     )
     return intrinsics
-
-
-def _scale_and_crop_intrinsics(
-    intrinsics: torch.Tensor,
-    scale: float,
-    crop_left: float,
-    crop_top: float,
-) -> torch.Tensor:
-    """Match camera_matrix_of_crop from MapAnything utils using torch ops."""
-    device = intrinsics.device
-    dtype = intrinsics.dtype
-
-    scale_tensor = torch.as_tensor(scale, dtype=dtype, device=device)
-    offset = torch.as_tensor([crop_left, crop_top], dtype=dtype, device=device)
-
-    intrinsics_adj = intrinsics.clone()
-    intrinsics_adj[0, 2] += 0.5
-    intrinsics_adj[1, 2] += 0.5
-
-    intrinsics_adj[:2, :] *= scale_tensor
-    intrinsics_adj[0, 2] -= offset[0]
-    intrinsics_adj[1, 2] -= offset[1]
-
-    intrinsics_adj[0, 2] -= 0.5
-    intrinsics_adj[1, 2] -= 0.5
-
-    return intrinsics_adj
 
 
 def pose7d_to_opencv_cam2world_with_official_func(
@@ -117,72 +89,36 @@ def pose7d_to_opencv_cam2world_with_official_func(
 
     return cam2world
 
-def _build_base_view(
-    normalized_img: torch.Tensor,
-    intrinsics: torch.Tensor,
-    camera_pose_matrix: torch.Tensor,
-    data_norm_type: str,
-    is_metric: torch.Tensor,
-) -> Dict[str, Any]:
-    """Assemble a single-view dictionary before inference preprocessing."""
-    return {
-        "img": normalized_img,
-        "data_norm_type": [data_norm_type],
-        "intrinsics": intrinsics,
-        "camera_poses": camera_pose_matrix,
-        "is_metric_scale": is_metric,
-    }
-
-
 def prepare_mapanything_views(
     images: torch.Tensor,
     camera_poses: torch.Tensor,
     *,
     data_norm_type: str,
-    resolution_set: int,
     device: torch.device,
-    patch_size: int,
     fov_degrees: float = 60.0,
     is_metric_scale: bool = False,
 ) -> Tuple[List[Dict[str, Any]], torch.Tensor]:
-    """Prepare batched MapAnything views with intrinsics and camera poses."""
-    if images.dim() == 4:
-        images = images.unsqueeze(0)
-    if images.dim() != 5:
+    """验证输入并基于原始分辨率构建 MapAnything 视图描述。"""
+    if images.dim() != 5 or images.shape[2] != 3:
         raise ValueError(
-            f"Expected images with shape [B, S, 3, H, W] or [S, 3, H, W], got {images.shape}"
+            f"images 期望形状 [B, S, 3, H, W] 或 [S, 3, H, W]，实际 {tuple(images.shape)}"
+        )
+
+    if camera_poses.dim() != 3 or camera_poses.shape[-1] != 7:
+        raise ValueError(
+            f"camera_poses 期望形状 [B, S, 7] 或 [B, 7]，实际 {tuple(camera_poses.shape)}"
         )
 
     images = images.clamp(0.0, 1.0).to(device)
-    batch_size, num_views, _, _, _ = images.shape
-
-    if camera_poses.dim() == 2:
-        camera_poses = camera_poses.unsqueeze(1)
     camera_poses = camera_poses.to(device=device, dtype=torch.float32)
+
+    batch_size, num_views, num_channels, _, _ = images.shape
+    if num_channels != 3:
+        raise ValueError("images 需要 3 个通道 (RGB)")
     if camera_poses.shape[:2] != (batch_size, num_views):
         raise ValueError(
-            f"Camera poses shape {camera_poses.shape} incompatible with images {images.shape}"
+            f"camera_poses 与 images 的 batch/view 数不匹配：{camera_poses.shape[:2]} vs {(batch_size, num_views)}"
         )
-
-    aspect_ratios: List[float] = []
-    for view_idx in range(num_views):
-        view_tensor = images[:, view_idx]
-        _, _, height, width = view_tensor.shape
-        if height <= 0 or width <= 0:
-            raise ValueError("Image spatial dimensions must be positive")
-        aspect_ratios.extend([width / height] * batch_size)
-
-    if not aspect_ratios:
-        raise ValueError("Unable to compute aspect ratios from input images")
-
-    average_aspect_ratio = sum(aspect_ratios) / len(aspect_ratios)
-    target_width, target_height = find_closest_aspect_ratio(
-        average_aspect_ratio, resolution_set
-    )
-    if patch_size <= 0:
-        patch_size = 14
-    target_width = max(patch_size, (target_width // patch_size) * patch_size)
-    target_height = max(patch_size, (target_height // patch_size) * patch_size)
 
     norm_cfg = IMAGE_NORMALIZATION_DICT.get(data_norm_type)
     if norm_cfg is None:
@@ -197,60 +133,34 @@ def prepare_mapanything_views(
 
     base_views: List[Dict[str, Any]] = []
     normalized_views: List[torch.Tensor] = []
-
     is_metric_tensor = torch.full((batch_size,), bool(is_metric_scale), dtype=torch.bool, device=device)
 
     for view_idx in range(num_views):
         view_tensor = images[:, view_idx]
-        _, _, source_h, source_w = view_tensor.shape
+        _, _, height, width = view_tensor.shape
+        if height <= 0 or width <= 0:
+            raise ValueError("图像空间尺寸必须为正数")
 
-        scale = max(target_height / source_h, target_width / source_w)
-        scaled_h = max(target_height, int(math.floor(source_h * scale)))
-        scaled_w = max(target_width, int(math.floor(source_w * scale)))
-
-        if scaled_h != source_h or scaled_w != source_w:
-            resized = F.interpolate(
-                view_tensor,
-                size=(scaled_h, scaled_w),
-                mode="bilinear",
-                align_corners=False,
-            )
-        else:
-            resized = view_tensor
-
-        top = max((scaled_h - target_height) // 2, 0)
-        left = max((scaled_w - target_width) // 2, 0)
-        bottom = top + target_height
-        right = left + target_width
-        cropped = resized[:, :, top:bottom, left:right]
-        normalized = (cropped - mean_tensor) / std_tensor
-
+        normalized = (view_tensor - mean_tensor) / std_tensor
         normalized_views.append(normalized)
 
-        base_intrinsics = compute_pinhole_intrinsics(source_h, source_w, fov_degrees)
-        base_intrinsics = base_intrinsics.to(device=device)
-        intrinsics_scaled = _scale_and_crop_intrinsics(
-            base_intrinsics,
-            scale=scale,
-            crop_left=float(left),
-            crop_top=float(top),
-        )
-        intrinsics_batched = intrinsics_scaled.unsqueeze(0).repeat(batch_size, 1, 1).to(device=device)
+        base_intrinsics = compute_pinhole_intrinsics(height, width, fov_degrees).to(device=device)
+        intrinsics_batched = base_intrinsics.unsqueeze(0).repeat(batch_size, 1, 1)
 
         pose_vectors = camera_poses[:, view_idx]
         camera_pose_tensor = pose7d_to_opencv_cam2world_with_official_func(
             pose_vectors,
-            image_size=(target_height, target_width),
+            image_size=(height, width),
         ).to(device=device)
 
         base_views.append(
-            _build_base_view(
-                normalized,
-                intrinsics_batched,
-                camera_pose_tensor,
-                data_norm_type=data_norm_type,
-                is_metric=is_metric_tensor.clone(),
-            )
+            {
+                "img": normalized,
+                "data_norm_type": [data_norm_type],
+                "intrinsics": intrinsics_batched,
+                "camera_poses": camera_pose_tensor,
+                "is_metric_scale": is_metric_tensor.clone(),
+            }
         )
 
     validated_views = validate_input_views_for_inference(base_views)

@@ -32,6 +32,7 @@ from ..utils.mapanything_views import (
     compute_pinhole_intrinsics,
     pose7d_to_opencv_cam2world_with_official_func,
 )
+from ..utils.render_utils import render_gt_point_maps
 
 
 class NBVTrainer:
@@ -235,8 +236,10 @@ class NBVTrainer:
         initial_images = batch["initial_images"]  # [B, N, 3, H, W]
         gt_mesh_data = batch["gt_mesh_data"]
         camera_poses_batch = batch["camera_poses"]
+        gt_point_maps = gt_mesh_data.get("gt_point_maps")
+        gt_valid_masks = gt_mesh_data.get("gt_valid_masks")
 
-        initial_images, camera_poses_batch, _, active_view_count = self._select_initial_views(
+        initial_images, camera_poses_batch, selection, active_view_count = self._select_initial_views(
             initial_images,
             camera_poses_batch,
             randomize=backprop,
@@ -305,6 +308,38 @@ class NBVTrainer:
 
         if backprop and new_images.requires_grad:
             new_images.retain_grad()
+
+        # 构建GT点云与掩码（初始视图 + 新视图）
+        if gt_point_maps is None or gt_valid_masks is None:
+            raise KeyError(
+                "Batch gt_mesh_data must include 'gt_point_maps' and 'gt_valid_masks'. "
+                "Ensure dataset preprocessing renders correspondences."
+            )
+
+        selection_device = selection.to(gt_point_maps.device)
+        gt_point_maps = gt_point_maps.index_select(1, selection_device).contiguous()
+        gt_valid_masks = gt_valid_masks.index_select(1, selection_device).contiguous()
+
+        gt_point_maps = gt_point_maps.to(device=initial_images.device, dtype=torch.float32)
+        gt_valid_masks = gt_valid_masks.to(device=initial_images.device, dtype=torch.bool)
+
+        tb_writer = self.writer if hasattr(self, "writer") else None
+        render_step = self.global_step if backprop else getattr(self, "val_image_step", None)
+
+        new_point_maps, new_valid_masks = render_gt_point_maps(
+            renderer=self.renderer,
+            mesh_batch=batched_mesh,
+            camera_poses=next_camera_pose,
+            output_device=initial_images.device,
+            writer=tb_writer,
+            step=render_step,
+            train_flag=backprop,
+        )
+
+        gt_point_maps = torch.cat([gt_point_maps, new_point_maps], dim=1).contiguous()
+        gt_valid_masks = torch.cat([gt_valid_masks, new_valid_masks], dim=1).contiguous().to(dtype=torch.bool)
+        gt_mesh_data["gt_point_maps"] = gt_point_maps
+        gt_mesh_data["gt_valid_masks"] = gt_valid_masks
         
         # 步骤4: 质量评估 - VGGT重建并计算质量
         # 将 new_images 从 [B, 3, H, W] 扩展为 [B, 1, 3, H, W]
