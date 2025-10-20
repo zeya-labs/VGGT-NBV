@@ -118,6 +118,7 @@ class MapAnythingWrapper(nn.Module):
         images: torch.Tensor,
         camera_poses: torch.Tensor,
         *,
+        depth_z: Optional[torch.Tensor] = None,
         is_metric_scale: bool = False,
         fov_degrees: Optional[float] = None,
     ) -> torch.Tensor:
@@ -130,11 +131,13 @@ class MapAnythingWrapper(nn.Module):
             device=self.device,
             fov_degrees=effective_fov,
             is_metric_scale=is_metric_scale,
+            depth_z=depth_z,
         )
         batch_size = normalized.shape[0]
         self._configure_geometric_inputs(
             use_calibration=True,
             use_pose=True,
+            use_depth=depth_z is not None,
         )
         try:
             encoder_features = self.base_model._encode_n_views(views)
@@ -171,6 +174,7 @@ class MapAnythingWrapper(nn.Module):
         images: torch.Tensor,
         camera_poses: torch.Tensor,
         *,
+        depth_z: Optional[torch.Tensor] = None,
         is_metric_scale: bool = False,
         fov_degrees: Optional[float] = None,
     ) -> TensorDict:
@@ -183,10 +187,12 @@ class MapAnythingWrapper(nn.Module):
             device=self.device,
             fov_degrees=effective_fov,
             is_metric_scale=is_metric_scale,
+            depth_z=depth_z,
         )
         self._configure_geometric_inputs(
             use_calibration=True,
             use_pose=True,
+            use_depth=depth_z is not None,
         )
         try:
             predictions = self.base_model.forward(
@@ -207,6 +213,7 @@ class MapAnythingWrapper(nn.Module):
         camera_poses: torch.Tensor,
         *,
         mode: str = "encode",
+        depth_z: Optional[torch.Tensor] = None,
         is_metric_scale: bool = False,
         fov_degrees: Optional[float] = None,
     ) -> Union[torch.Tensor, TensorDict]:
@@ -214,6 +221,7 @@ class MapAnythingWrapper(nn.Module):
             return self.extract_scene_features(
                 images,
                 camera_poses,
+                depth_z=depth_z,
                 is_metric_scale=is_metric_scale,
                 fov_degrees=fov_degrees,
             )
@@ -221,6 +229,7 @@ class MapAnythingWrapper(nn.Module):
             return self.reconstruct_and_evaluate(
                 images,
                 camera_poses,
+                depth_z=depth_z,
                 is_metric_scale=is_metric_scale,
                 fov_degrees=fov_degrees,
             )

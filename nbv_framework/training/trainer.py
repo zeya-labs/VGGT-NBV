@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from ..models import MapAnythingWrapper, BaseNBVPolicy
 from ..rendering import DifferentiableRenderer
 from .loss import ReconstructionLoss, ChamferDistance
-from ..utils.camera_utils import position_to_pose_tensor
+from ..utils.camera_utils import position_to_pose_tensor, world_points_to_camera_depth
 from ..utils.mapanything_views import (
     compute_pinhole_intrinsics,
     pose7d_to_opencv_cam2world_with_official_func,
@@ -176,8 +176,9 @@ class NBVTrainer:
         initial_images: torch.Tensor,
         camera_poses: torch.Tensor,
         *,
+        depth_z: Optional[torch.Tensor] = None,
         randomize: bool,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], torch.Tensor, int]:
         """选取训练/验证需要的初始视图子集。"""
 
         min_views = max(self.min_initial_views, 1)
@@ -205,11 +206,13 @@ class NBVTrainer:
         selection, _ = torch.sort(selection)
         initial_images = initial_images.index_select(1, selection)
         camera_poses = camera_poses.index_select(1, selection)
+        if depth_z is not None:
+            depth_z = depth_z.index_select(1, selection)
 
         self._last_initial_view_count = num_views
         self._last_initial_view_indices = selection.detach().cpu()
 
-        return initial_images, camera_poses, selection, num_views
+        return initial_images, camera_poses, depth_z, selection, num_views
     
     def training_step(self, 
                      batch: Dict[str, torch.Tensor],
@@ -238,12 +241,14 @@ class NBVTrainer:
         camera_poses_batch = batch["camera_poses"]
         gt_point_maps = gt_mesh_data.get("gt_point_maps")
         gt_valid_masks = gt_mesh_data.get("gt_valid_masks")
+        depth_z_batch = gt_mesh_data.get("depth_z")
         print("keys",batch["gt_mesh_data"].keys())
         # keys dict_keys(['mesh_path', 'gt_points', 'normalize_method', 'num_samples', 'gt_point_maps', 'gt_valid_masks', 'original_mesh', 'normalized_mesh'])
         # keys dict_keys(['initial_images', 'camera_poses', 'mesh_path', 'batch_name', 'set_name', 'model_name', 'source_dataset', 'source_dataset_idx', 'source_dataset_sample_idx', 'gt_mesh_data'])
-        initial_images, camera_poses_batch, selection, active_view_count = self._select_initial_views(
+        initial_images, camera_poses_batch, depth_z_batch, selection, active_view_count = self._select_initial_views(
             initial_images,
             camera_poses_batch,
+            depth_z=depth_z_batch,
             randomize=backprop,
         )
 
@@ -252,6 +257,7 @@ class NBVTrainer:
             initial_images,
             camera_poses_batch,
             is_metric_scale=False,
+            depth_z=depth_z_batch,
         )
         # print("scene_features shape:", scene_features.shape)
         # 步骤2: 动作提议 - 策略网络输出下一个相机位姿
@@ -353,6 +359,15 @@ class NBVTrainer:
         gt_valid_masks = torch.cat([gt_valid_masks, new_valid_masks], dim=1).contiguous().to(dtype=torch.bool)
         gt_mesh_data["gt_point_maps"] = gt_point_maps
         gt_mesh_data["gt_valid_masks"] = gt_valid_masks
+        if depth_z_batch is not None:
+            new_depth_z = world_points_to_camera_depth(
+                new_point_maps,
+                next_camera_pose.unsqueeze(1),
+                valid_masks=new_valid_masks,
+            )
+            depth_device = depth_z_batch.device
+            depth_z_batch = torch.cat([depth_z_batch, new_depth_z], dim=1).contiguous()
+            gt_mesh_data["depth_z"] = depth_z_batch
         
         # 步骤4: 质量评估 - VGGT重建并计算质量
         # 将 new_images 从 [B, 3, H, W] 扩展为 [B, 1, 3, H, W]
@@ -371,6 +386,7 @@ class NBVTrainer:
         recon_data = self.vggt_wrapper.reconstruct_and_evaluate(
             combined_images_batch,
             combined_camera_poses,
+            depth_z=depth_z_batch,
             is_metric_scale=False,
         )
         # print("===================loss开始计算===================")

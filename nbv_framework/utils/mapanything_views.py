@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from mapanything.utils.image import IMAGE_NORMALIZATION_DICT
@@ -97,6 +97,7 @@ def prepare_mapanything_views(
     device: torch.device,
     fov_degrees: float = 60.0,
     is_metric_scale: bool = False,
+    depth_z: Optional[torch.Tensor] = None,
 ) -> Tuple[List[Dict[str, Any]], torch.Tensor]:
     """验证输入并基于原始分辨率构建 MapAnything 视图描述。"""
     if images.dim() != 5 or images.shape[2] != 3:
@@ -111,6 +112,14 @@ def prepare_mapanything_views(
 
     images = images.clamp(0.0, 1.0).to(device)
     camera_poses = camera_poses.to(device=device, dtype=torch.float32)
+    if depth_z is not None:
+        if depth_z.dim() == 5 and depth_z.shape[-1] == 1:
+            depth_z = depth_z.squeeze(-1)
+        if depth_z.dim() != 4:
+            raise ValueError(
+                f"depth_z expected shape [B, S, H, W] or [B, S, H, W, 1], got {tuple(depth_z.shape)}"
+            )
+        depth_z = depth_z.to(device=device, dtype=torch.float32)
 
     batch_size, num_views, num_channels, _, _ = images.shape
     if num_channels != 3:
@@ -118,6 +127,10 @@ def prepare_mapanything_views(
     if camera_poses.shape[:2] != (batch_size, num_views):
         raise ValueError(
             f"camera_poses 与 images 的 batch/view 数不匹配：{camera_poses.shape[:2]} vs {(batch_size, num_views)}"
+        )
+    if depth_z is not None and depth_z.shape[:2] != (batch_size, num_views):
+        raise ValueError(
+            f"depth_z 与 images 的 batch/view 数不匹配：{depth_z.shape[:2]} vs {(batch_size, num_views)}"
         )
 
     norm_cfg = IMAGE_NORMALIZATION_DICT.get(data_norm_type)
@@ -153,15 +166,17 @@ def prepare_mapanything_views(
             image_size=(height, width),
         ).to(device=device)
 
-        base_views.append(
-            {
-                "img": normalized,
-                "data_norm_type": [data_norm_type],
-                "intrinsics": intrinsics_batched,
-                "camera_poses": camera_pose_tensor,
-                "is_metric_scale": is_metric_tensor.clone(),
-            }
-        )
+        view_dict: Dict[str, Any] = {
+            "img": normalized,
+            "data_norm_type": [data_norm_type],
+            "intrinsics": intrinsics_batched,
+            "camera_poses": camera_pose_tensor,
+            "is_metric_scale": is_metric_tensor.clone(),
+        }
+        if depth_z is not None:
+            view_dict["depth_z"] = depth_z[:, view_idx].contiguous()
+
+        base_views.append(view_dict)
 
     validated_views = validate_input_views_for_inference(base_views)
     processed_views = preprocess_input_views_for_inference(validated_views)

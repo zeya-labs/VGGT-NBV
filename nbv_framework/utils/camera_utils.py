@@ -7,9 +7,9 @@ import json
 import math
 import numpy as np
 import torch
-from typing import Dict, List
+from typing import Dict, List, Optional
 from pytorch3d.renderer import look_at_view_transform
-from pytorch3d.transforms import matrix_to_quaternion
+from pytorch3d.transforms import matrix_to_quaternion, quaternion_to_matrix
 
 from .coordinate_utils import get_up_vector, generate_fibonacci_sphere_points, generate_fibonacci_upper_hemisphere_points
 
@@ -218,3 +218,82 @@ def position_to_pose_tensor(positions: torch.Tensor, up_axis: str = "Y") -> torc
     pose_tensor = torch.cat([positions, quaternions_xyzw], dim=1)
     
     return pose_tensor
+
+
+def world_points_to_camera_depth(
+    point_maps: torch.Tensor,
+    camera_poses: torch.Tensor,
+    *,
+    valid_masks: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """
+    将世界坐标系点云转换为相机坐标系 Z 深度。
+    此版本完全遵循 PyTorch3D 的行向量约定，避免了不必要的转置。
+
+    Args:
+        point_maps: [..., 3] 世界坐标点，支持 [S, H, W, 3] 或 [B, S, H, W, 3]
+        camera_poses: [..., 7] 相机位姿 (position xyz + quaternion qx,qy,qz,qw，一致为 W2C 旋转)
+        valid_masks: 与 point_maps 前几维一致的有效像素掩码，缺省表示全部有效
+
+    Returns:
+        depth_z: 与 point_maps 同维度的深度张量，最后一维为 1
+    """
+    if point_maps.shape[-1] != 3:
+        raise ValueError(f"point_maps last dim must be 3, got {point_maps.shape}")
+    if camera_poses.shape[-1] != 7:
+        raise ValueError(f"camera_poses last dim must be 7, got {camera_poses.shape}")
+
+    is_batched = point_maps.ndim == 5 and camera_poses.ndim == 3
+    if point_maps.ndim == 4 and camera_poses.ndim == 2:
+        batch_views = 1
+        views = point_maps.shape[0]
+        height, width = point_maps.shape[1:3]
+        points_flat = point_maps
+        poses_flat = camera_poses
+        masks_flat = valid_masks if valid_masks is not None else None
+    elif is_batched:
+        batch_views = point_maps.shape[0]
+        views = point_maps.shape[1]
+        height, width = point_maps.shape[2:4]
+        points_flat = point_maps.reshape(batch_views * views, height, width, 3)
+        poses_flat = camera_poses.reshape(batch_views * views, 7)
+        if valid_masks is not None:
+            masks_flat = valid_masks.reshape(batch_views * views, height, width)
+        else:
+            masks_flat = None
+    else:
+        raise ValueError(
+            f"Unsupported shapes for point_maps {point_maps.shape} and camera_poses {camera_poses.shape}."
+        )
+
+    device = points_flat.device
+    dtype = points_flat.dtype
+
+    positions = poses_flat[:, :3].to(device=device, dtype=dtype)
+    quaternions = poses_flat[:, 3:].to(device=device, dtype=dtype)
+    quaternion_wxyz = torch.stack(
+        (quaternions[:, 3], quaternions[:, 0], quaternions[:, 1], quaternions[:, 2]),
+        dim=-1,
+    )
+    # quaternion_to_matrix 返回的是为行向量设计的矩阵，我们直接使用它
+    rotation_w2c_row = quaternion_to_matrix(quaternion_wxyz)  # [N, 3, 3]
+
+    points_vec = points_flat.view(points_flat.shape[0], -1, 3) # [N, H*W, 3]
+    relative = points_vec - positions.unsqueeze(1) # [N, H*W, 3], 这就是一批行向量
+
+    camera_points = torch.bmm(relative, rotation_w2c_row)
+
+    depth = camera_points[..., 2:3].view(points_flat.shape[0], height, width, 1)
+
+    # --- 掩码和恢复形状部分，完全正确，无需修改 ---
+    if masks_flat is not None:
+        mask = masks_flat.to(device=device).unsqueeze(-1)
+        depth = depth.masked_fill(~mask, 0.0)
+
+    depth = depth.to(dtype=torch.float32)
+
+    if point_maps.ndim == 4:
+        return depth
+
+    depth = depth.view(batch_views, views, height, width, 1)
+    return depth
