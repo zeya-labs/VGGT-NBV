@@ -253,11 +253,18 @@ class NBVTrainer:
         )
         # print("scene_features shape:", scene_features.shape)
         # 步骤2: 动作提议 - 策略网络输出下一个相机位姿
-        next_camera_pose = self.policy_network(scene_features)
-        
-        # 检查输出维度，如果是[B,3]则转换为[B,7]
-        if next_camera_pose.shape[-1] == 3:
-            next_camera_pose = position_to_pose_tensor(next_camera_pose)
+        policy_output = self.policy_network(scene_features)
+
+        if policy_output.shape[-1] < 3:
+            raise ValueError(
+                f"policy_network 输出维度需至少包含位置 (3)，实际为 {policy_output.shape[-1]}"
+            )
+
+        reference_position = camera_poses_batch[:, 0, :3]
+        predicted_relative_position = policy_output[:, :3]
+        absolute_position = reference_position + predicted_relative_position
+
+        next_camera_pose = position_to_pose_tensor(absolute_position)
 
         if backprop and next_camera_pose.requires_grad:
             next_camera_pose.retain_grad()
@@ -282,9 +289,13 @@ class NBVTrainer:
             if quaternion_norms.numel() > 1:  # 只有当样本数大于1时才计算标准差
                 self.writer.add_scalar('camera_pose/quaternion_norm_std', quaternion_norms.std(), self.global_step)
 
-        # 构建包含初始视图和新视图的相机位姿列表
-        camera_poses_batch = camera_poses_batch.to(next_camera_pose.dtype)
+            # 记录相对位移的统计信息，便于监控策略输出尺度
+            relative_position_norms = torch.norm(predicted_relative_position, dim=1)
+            self.writer.add_scalar('camera_pose/relative_position_norm_mean', relative_position_norms.mean(), self.global_step)
+            if relative_position_norms.numel() > 1:
+                self.writer.add_scalar('camera_pose/relative_position_norm_std', relative_position_norms.std(), self.global_step)
 
+        # 构建包含初始视图和新视图的相机位姿列表
         if camera_poses_batch.dim() == 2:
             camera_poses_batch = camera_poses_batch.unsqueeze(1)
         combined_camera_poses = torch.cat([
