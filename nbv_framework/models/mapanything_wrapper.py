@@ -66,8 +66,6 @@ class MapAnythingWrapper(nn.Module):
 
         encoder_dim = getattr(self.base_model.encoder, "enc_embed_dim", None)
 
-        self.resolution_set: int = 224
-        self.patch_size: int = getattr(self.base_model.encoder, "patch_size", 14)
         self.default_fov_degrees: float = 60.0
 
         self._capture_gradients: bool = False
@@ -129,9 +127,7 @@ class MapAnythingWrapper(nn.Module):
             images,
             camera_poses,
             data_norm_type=self.data_norm_type,
-            resolution_set=self.resolution_set,
             device=self.device,
-            patch_size=self.patch_size,
             fov_degrees=effective_fov,
             is_metric_scale=is_metric_scale,
         )
@@ -184,9 +180,7 @@ class MapAnythingWrapper(nn.Module):
             images,
             camera_poses,
             data_norm_type=self.data_norm_type,
-            resolution_set=self.resolution_set,
             device=self.device,
-            patch_size=self.patch_size,
             fov_degrees=effective_fov,
             is_metric_scale=is_metric_scale,
         )
