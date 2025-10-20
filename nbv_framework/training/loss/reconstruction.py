@@ -7,7 +7,7 @@ import logging
 import torch
 import torch.nn as nn
 
-from pytorch3d.structures import Meshes, Pointclouds
+from pytorch3d.structures import Pointclouds
 
 from .chamfer import ChamferDistance
 from .viewpoint import ViewpointLoss
@@ -71,107 +71,6 @@ class ReconstructionLoss(nn.Module):
             if isinstance(value, torch.Tensor):
                 return value
         return None
-
-    def _render_gt_point_maps(
-        self,
-        mesh_batch: Meshes,
-        camera_poses: torch.Tensor,
-        writer=None,
-        step: Optional[int] = None,
-        log_prefix: str = "GTPointMaps",
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if self.renderer is None:
-            raise RuntimeError("Renderer is required to derive ground-truth point correspondences.")
-
-        if camera_poses is None:
-            raise ValueError("camera_poses must be provided when computing Chamfer loss.")
-
-        batch_size = len(mesh_batch)
-        if camera_poses.dim() == 2:
-            camera_poses = camera_poses.unsqueeze(1)
-
-        point_maps_list: List[torch.Tensor] = []
-        valid_masks_list: List[torch.Tensor] = []
-
-        mesh_device = self.renderer.device
-        with torch.no_grad():
-            for i in range(batch_size):
-                poses_i = camera_poses[i]
-                if poses_i.numel() == 0:
-                    raise ValueError("camera_poses contains empty view set, cannot compute correspondences.")
-
-                poses_i = poses_i.to(mesh_device).float()
-                mesh_i = mesh_batch[i].to(mesh_device)
-                mesh_i = mesh_i.extend(poses_i.shape[0])
-                render_out = self.renderer(
-                    gt_mesh=mesh_i,
-                    camera_poses=poses_i,
-                    return_point_maps=True,
-                )
-
-                if not isinstance(render_out, tuple) or len(render_out) != 3:
-                    raise RuntimeError("Renderer did not return point maps as expected.")
-
-                _, point_maps, valid_masks = render_out
-
-                if writer is not None and step is not None and self.train_flag:
-                    self._log_gt_point_map_tensors(
-                        writer=writer,
-                        step=step,
-                        batch_index=i,
-                        point_maps=point_maps,
-                        valid_masks=valid_masks,
-                        prefix=log_prefix,
-                    )
-
-                point_maps = point_maps.permute(0, 2, 3, 1).contiguous()  # [S, H, W, 3]
-                valid_masks = valid_masks.squeeze(1).contiguous()  # [S, H, W]
-
-                point_maps_list.append(point_maps)
-                valid_masks_list.append(valid_masks)
-
-        point_maps_batch = torch.stack(point_maps_list, dim=0)
-        valid_masks_batch = torch.stack(valid_masks_list, dim=0)
-        return point_maps_batch, valid_masks_batch
-
-    @staticmethod
-    def _log_gt_point_map_tensors(
-        writer,
-        step: int,
-        batch_index: int,
-        point_maps: torch.Tensor,
-        valid_masks: torch.Tensor,
-        prefix: str,
-    ) -> None:
-        if point_maps.ndim != 4 or valid_masks.ndim != 4:
-            return
-
-        point_maps_cpu = point_maps.detach().float().cpu()
-        valid_masks_cpu = valid_masks.detach().float().cpu()
-
-        num_views = point_maps_cpu.shape[0]
-
-        for view_idx in range(num_views):
-            pm = point_maps_cpu[view_idx]
-            mask = valid_masks_cpu[view_idx]
-
-            pm_flat = pm.view(3, -1)
-            coord_min = pm_flat.min(dim=1).values.view(3, 1, 1)
-            coord_max = pm_flat.max(dim=1).values.view(3, 1, 1)
-            denom = (coord_max - coord_min).clamp_min(1e-6)
-            pm_norm = (pm - coord_min) / denom
-
-            writer.add_image(
-                f"{prefix}/point_map_batch{batch_index}_view{view_idx}",
-                pm_norm,
-                global_step=step,
-            )
-
-            writer.add_image(
-                f"{prefix}/valid_mask_batch{batch_index}_view{view_idx}",
-                mask,
-                global_step=step,
-            )
 
     def extract_point_cloud_from_reconstruction(
         self,
@@ -265,18 +164,12 @@ class ReconstructionLoss(nn.Module):
                 "combined_camera_poses must be provided when Chamfer loss is enabled."
             )
 
-        normalized_mesh = gt_data.get("normalized_mesh")
-        if normalized_mesh is None:
+        gt_point_maps = gt_data.get("gt_point_maps")
+        gt_valid_masks = gt_data.get("gt_valid_masks")
+        if gt_point_maps is None or gt_valid_masks is None:
             raise KeyError(
-                "gt_mesh_data must contain 'normalized_mesh' for Chamfer loss computation."
+                "gt_mesh_data must contain 'gt_point_maps' and 'gt_valid_masks' for Chamfer loss."
             )
-
-        gt_point_maps, gt_valid_masks = self._render_gt_point_maps(
-            normalized_mesh,
-            combined_camera_poses,
-            writer=writer,
-            step=step,
-        )
 
         sample_tensor = self._first_tensor(recon_data)
         if sample_tensor is None:

@@ -39,6 +39,7 @@ class MixedDataset(Dataset):
             if "seed" not in config_with_seed and self.seed is not None:
                 config_with_seed["seed"] = self.seed
             dataset = DatasetFactory.create_from_config(config_with_seed)
+
             dataset_name = config.get("name", f"dataset_{index}")
             dataset_length = len(dataset)
 
