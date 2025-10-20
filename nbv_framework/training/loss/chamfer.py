@@ -23,6 +23,7 @@ class ChamferDistance(nn.Module):
         self.max_points_per_cloud = max_points_per_cloud
         self.save_point_clouds: bool = False
         self.point_cloud_subdir: str = "point_clouds"
+        self.log_tensorboard: bool = True
 
     def configure_point_cloud_logging(
         self,
@@ -30,6 +31,7 @@ class ChamferDistance(nn.Module):
         max_points_per_cloud: Optional[int] = None,
         enable_save: Optional[bool] = None,
         subdir_name: Optional[str] = None,
+        log_to_tensorboard: Optional[bool] = None,
     ) -> None:
         """Adjust TensorBoard logging behaviour."""
         if max_points_per_cloud is not None:
@@ -38,6 +40,8 @@ class ChamferDistance(nn.Module):
             self.save_point_clouds = bool(enable_save)
         if subdir_name is not None:
             self.point_cloud_subdir = subdir_name
+        if log_to_tensorboard is not None:
+            self.log_tensorboard = bool(log_to_tensorboard)
 
     def _umeyama_alignment(
         self, source: torch.Tensor, target: torch.Tensor
@@ -137,7 +141,10 @@ class ChamferDistance(nn.Module):
         p_pred_aligned = Pointclouds(points=aligned_points_list)
         p_gt_float = Pointclouds(points=gt_list)
 
-        if writer is not None and step is not None:
+        should_log_tb = self.log_tensorboard and writer is not None and step is not None
+        save_directory = self._resolve_point_cloud_directory(point_cloud_dir)
+        should_export_glb = save_directory is not None
+        if should_log_tb or should_export_glb:
             if len(aligned_points_list) > 0 and len(gt_list) > 0:
                 point_cloud_specs: List[Tuple[str, Pointclouds, np.ndarray]] = [
                     (
@@ -164,24 +171,23 @@ class ChamferDistance(nn.Module):
                             np.array([255, 0, 255], dtype=np.uint8),
                         )
                     )
-                save_directory = self._resolve_point_cloud_directory(point_cloud_dir)
                 target_batch = 0
-                if save_directory is not None:
+                glb_path = None
+                if should_export_glb:
                     os.makedirs(save_directory, exist_ok=True)
-                glb_path = (
-                    os.path.join(save_directory, f"batch_{target_batch:03d}_comparison.glb")
-                    if save_directory is not None
-                    else None
-                )
-                log_point_clouds_to_tensorboard(
-                    writer,
-                    tag="Chamfer/Comparison",
-                    point_cloud_specs=point_cloud_specs,
-                    step=step,
-                    batch_index=target_batch,
-                    max_points_per_cloud=self.max_points_per_cloud,
-                    glb_output_path=glb_path,
-                )
+                    glb_path = os.path.join(
+                        save_directory, f"batch_{target_batch:03d}_comparison.glb"
+                    )
+                if should_log_tb or glb_path is not None:
+                    log_point_clouds_to_tensorboard(
+                        writer if should_log_tb else None,
+                        tag="Chamfer/Comparison",
+                        point_cloud_specs=point_cloud_specs,
+                        step=step if step is not None else 0,
+                        batch_index=target_batch,
+                        max_points_per_cloud=self.max_points_per_cloud,
+                        glb_output_path=glb_path,
+                    )
 
         loss, _ = chamfer_distance(p_pred_aligned, p_gt_float)
         return loss

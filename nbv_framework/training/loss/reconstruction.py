@@ -1,5 +1,6 @@
 """Composite reconstruction loss that bundles geometric terms."""
 
+import os
 from typing import Dict, List, Literal, Optional, Tuple, TYPE_CHECKING
 
 import logging
@@ -29,6 +30,7 @@ class ReconstructionLoss(nn.Module):
         save_point_clouds: bool = True,
         point_cloud_dir_name: str = "point_clouds",
         max_points_per_cloud: int = 4096,
+        log_tensorboard: bool = False,
     ) -> None:
         super().__init__()
 
@@ -49,6 +51,7 @@ class ReconstructionLoss(nn.Module):
             enable_save=self.save_point_clouds,
             subdir_name=self.point_cloud_dir_name,
             max_points_per_cloud=max_points_per_cloud,
+            log_to_tensorboard=log_tensorboard,
         )
         self.viewpoint_loss = ViewpointLoss()
         self.pose_outer_radius = 4.0
@@ -470,7 +473,13 @@ class ReconstructionLoss(nn.Module):
         total_loss = torch.tensor(0.0, device=device)
         loss_components: Dict[str, float] = {}
 
-        chamfer_save_dir = point_cloud_dir if self.save_point_clouds else None
+        chamfer_save_dir: Optional[str]
+        print(point_cloud_dir)
+        if self.save_point_clouds:
+            if point_cloud_dir is not None:
+                chamfer_save_dir = point_cloud_dir
+        else:
+            chamfer_save_dir = None
 
         weighted_chamfer, chamfer_raw, confidence_mask = self._compute_chamfer_component(
             recon_data,

@@ -218,12 +218,12 @@ def log_point_clouds_to_tensorboard(
     )
     if payload is None:
         return
-
     vertices, colors, sampled_clouds = payload
     if glb_output_path is not None:
         os.makedirs(os.path.dirname(glb_output_path), exist_ok=True)
         _write_point_clouds_glb(glb_output_path, sampled_clouds)
-    writer.add_mesh(tag, vertices=vertices, colors=colors, global_step=step)
+    if writer is not None:
+        writer.add_mesh(tag, vertices=vertices, colors=colors, global_step=step)
 
 
 __all__ = [

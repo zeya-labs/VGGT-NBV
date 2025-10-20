@@ -84,7 +84,7 @@ class CameraPoseGenerator:
         self, 
         num_views: int, 
         seed: int = 0,
-        base_radius: float = 2.22, # 0.9, 0.8是2.5，0.7是2.86
+        base_radius: float = 2.5, # 0.9, 0.8是2.5，0.7是2.86
         radius_variation: float = 0,
         hemisphere: str = 'full'
     ) -> List[Dict[str, List[float]]]:
