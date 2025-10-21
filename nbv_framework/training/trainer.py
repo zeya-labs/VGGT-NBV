@@ -27,7 +27,10 @@ if TYPE_CHECKING:
     from ..models import MapAnythingWrapper, BaseNBVPolicy
 from ..rendering import DifferentiableRenderer
 from .loss import ReconstructionLoss, ChamferDistance
-from ..utils.camera_utils import position_to_pose_tensor, world_points_to_camera_depth
+from ..utils.camera_utils import (
+    position_to_pose_tensor,
+    world_points_to_camera_depth,
+)
 from ..utils.mapanything_views import (
     compute_pinhole_intrinsics,
     pose7d_to_opencv_cam2world_with_official_func,
@@ -364,11 +367,18 @@ class NBVTrainer:
                 new_point_maps,
                 next_camera_pose.unsqueeze(1),
                 valid_masks=new_valid_masks,
+                writer=tb_writer,
+                step=render_step,
+                log_prefix="DepthZ/NewView",
+                train_flag=backprop,
             )
-            depth_device = depth_z_batch.device
+            if depth_z_batch.device != new_depth_z.device:
+                depth_z_batch = depth_z_batch.to(new_depth_z.device)
+            if depth_z_batch.dtype != new_depth_z.dtype:
+                depth_z_batch = depth_z_batch.to(new_depth_z.dtype)
             depth_z_batch = torch.cat([depth_z_batch, new_depth_z], dim=1).contiguous()
             gt_mesh_data["depth_z"] = depth_z_batch
-        
+            batch["depth_z"] = depth_z_batch
         # 步骤4: 质量评估 - VGGT重建并计算质量
         # 将 new_images 从 [B, 3, H, W] 扩展为 [B, 1, 3, H, W]
         new_images_expanded = new_images.unsqueeze(1)  # [B, 1, 3, H, W]

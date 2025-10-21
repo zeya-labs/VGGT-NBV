@@ -9,6 +9,12 @@ import numpy as np
 import torch
 from typing import Dict, List, Optional
 from pytorch3d.renderer import look_at_view_transform
+
+try:
+    import matplotlib.cm as mpl_cm
+except ImportError:  # pragma: no cover
+    mpl_cm = None
+
 from pytorch3d.transforms import matrix_to_quaternion, quaternion_to_matrix
 
 from .coordinate_utils import get_up_vector, generate_fibonacci_sphere_points, generate_fibonacci_upper_hemisphere_points
@@ -225,6 +231,11 @@ def world_points_to_camera_depth(
     camera_poses: torch.Tensor,
     *,
     valid_masks: Optional[torch.Tensor] = None,
+    writer=None,
+    step: Optional[int] = None,
+    log_prefix: str = "DepthZ",
+    train_flag: bool = False,
+    depth_cmap: str = "viridis",
 ) -> torch.Tensor:
     """
     将世界坐标系点云转换为相机坐标系 Z 深度。
@@ -293,7 +304,139 @@ def world_points_to_camera_depth(
     depth = depth.to(dtype=torch.float32)
 
     if point_maps.ndim == 4:
-        return depth
+        depth_out = depth
+        masks_out = masks_flat
+        depth_for_log = depth_out
+        masks_for_log = masks_out
+    else:
+        depth_out = depth.view(batch_views, views, height, width, 1)
+        masks_out = valid_masks
+        depth_for_log = depth_out.view(-1, height, width, 1)
+        masks_for_log = None if masks_out is None else masks_out.view(-1, height, width)
 
-    depth = depth.view(batch_views, views, height, width, 1)
-    return depth
+    if writer is not None and step is not None and train_flag:
+        _log_depth_maps(
+            writer=writer,
+            step=step,
+            log_prefix=log_prefix,
+            depth=depth_for_log,
+            valid_masks=masks_for_log,
+            cmap_name=depth_cmap,
+        )
+
+    return depth_out
+
+def normalize_depth_for_visualization(
+    depth_z: torch.Tensor,
+    valid_masks: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """
+    将深度值归一化到 [0, 1]，便于保存或可视化。
+
+    Args:
+        depth_z: [..., 1] 深度张量，支持 [S, H, W, 1] 或 [B, S, H, W, 1]
+        valid_masks: 与 depth_z 前几维匹配的布尔掩码，缺省表示全部有效
+
+    Returns:
+        depth_viz: 去掉最后一维的归一化深度张量
+    """
+    if depth_z.numel() == 0:
+        return depth_z.new_zeros(depth_z.shape[:-1])
+
+    depth_shape = depth_z.shape
+    is_batched = depth_z.ndim == 5
+
+    if is_batched:
+        batch_size, num_views, height, width, _ = depth_shape
+        depth_flat = depth_z.view(batch_size * num_views, height, width)
+        if valid_masks is not None:
+            mask_flat = valid_masks.view(batch_size * num_views, height, width).to(device=depth_flat.device)
+        else:
+            mask_flat = None
+    else:
+        num_views, height, width, _ = depth_shape
+        depth_flat = depth_z.view(num_views, height, width)
+        mask_flat = valid_masks.to(device=depth_flat.device) if valid_masks is not None else None
+
+    depth_viz_flat = torch.zeros_like(depth_flat)
+
+    for view_idx in range(depth_flat.shape[0]):
+        depth_view = depth_flat[view_idx]
+        if mask_flat is not None:
+            mask_view = mask_flat[view_idx]
+            valid_values = depth_view[mask_view]
+        else:
+            mask_view = None
+            valid_values = depth_view.view(-1)
+
+        if valid_values.numel() == 0:
+            continue
+
+        depth_min = valid_values.min()
+        depth_max = valid_values.max()
+        denom = depth_max - depth_min
+        if denom < 1e-6:
+            normalized = torch.zeros_like(depth_view)
+        else:
+            normalized = (depth_view - depth_min) / (denom + 1e-6)
+
+        if mask_view is not None:
+            normalized = normalized.masked_fill(~mask_view, 0.0)
+
+        depth_viz_flat[view_idx] = normalized
+
+    if is_batched:
+        return depth_viz_flat.view(batch_size, num_views, height, width)
+    return depth_viz_flat
+
+
+def _log_depth_maps(
+    *,
+    writer,
+    step: int,
+    log_prefix: str,
+    depth: torch.Tensor,
+    valid_masks: Optional[torch.Tensor],
+    cmap_name: str = "viridis",
+) -> None:
+    if depth.numel() == 0:
+        return
+
+    if depth.dim() == 3:
+        depth = depth.unsqueeze(-1)
+
+    depth_viz = normalize_depth_for_visualization(depth, valid_masks)
+    depth_viz_cpu = depth_viz.detach().float().cpu().contiguous()
+    color_images = _depth_to_colormap(depth_viz_cpu, cmap_name=cmap_name)
+    max_log = min(color_images.shape[0], 4)
+
+    masks_cpu = None
+    if valid_masks is not None:
+        masks_cpu = valid_masks.detach().float().cpu().contiguous()
+        if masks_cpu.dim() == 4:
+            masks_cpu = masks_cpu.view(-1, masks_cpu.shape[-2], masks_cpu.shape[-1])
+    for idx in range(max_log):
+        writer.add_image(
+            f"{log_prefix}/depth_view{idx}",
+            color_images[idx],
+            global_step=step,
+        )
+        if masks_cpu is not None and idx < masks_cpu.shape[0]:
+            writer.add_image(
+                f"{log_prefix}/mask_view{idx}",
+                masks_cpu[idx].unsqueeze(0),
+                global_step=step,
+            )
+
+
+def _depth_to_colormap(depth_viz: torch.Tensor, cmap_name: str = "viridis") -> torch.Tensor:
+    """将归一化深度转换为伪彩色图像 (N, 3, H, W)。"""
+    if mpl_cm is None:
+        # 如果未安装 matplotlib，退化为重复灰度图
+        return depth_viz.unsqueeze(1).repeat(1, 3, 1, 1).clamp(0.0, 1.0)
+
+    cmap = mpl_cm.get_cmap(cmap_name)
+    depth_np = depth_viz.numpy()  # depth_viz 应已在 CPU 上
+    colored_np = cmap(depth_np)[..., :3]
+    colored = torch.from_numpy(colored_np).permute(0, 3, 1, 2).contiguous()
+    return colored.clamp(0.0, 1.0).to(dtype=torch.float32)

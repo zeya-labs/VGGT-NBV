@@ -10,7 +10,11 @@ import numpy as np
 import torch
 from typing import List, Dict, Optional, Tuple
 from .base_dataset import BaseDataset
-from ..utils.camera_utils import pose_dict_to_tensor, world_points_to_camera_depth
+from ..utils.camera_utils import (
+    pose_dict_to_tensor,
+    world_points_to_camera_depth,
+    normalize_depth_for_visualization,
+)
 from ..utils.render_utils import render_gt_point_maps
 
 
@@ -630,6 +634,12 @@ class House3KDataset(BaseDataset):
             gt_targets = self._build_gt_targets(gt_mesh_data, camera_poses, metadata)
             if gt_targets:
                 gt_mesh_data.update(gt_targets)
+                depth_z_value = gt_targets.get("depth_z")
+                if depth_z_value is not None:
+                    result["depth_z"] = depth_z_value
+                depth_viz_value = gt_targets.get("depth_z_viz")
+                if depth_viz_value is not None:
+                    result["depth_z_viz"] = depth_viz_value
 
             return result
             
@@ -676,7 +686,7 @@ class House3KDataset(BaseDataset):
             camera_poses,
             valid_masks=valid_masks,
         )
-        depth_z_viz = self._normalize_depth_for_visualization(depth_z, valid_masks)
+        depth_z_viz = normalize_depth_for_visualization(depth_z, valid_masks)
 
         return {
             "gt_point_maps": point_maps.to(dtype=torch.float32),
@@ -685,46 +695,6 @@ class House3KDataset(BaseDataset):
             "depth_z_viz": depth_z_viz,
         }
 
-    @staticmethod
-    def _normalize_depth_for_visualization(
-        depth_z: torch.Tensor,
-        valid_masks: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """
-        将深度图归一化到 [0, 1] 便于可视化。
-        """
-        if depth_z.numel() == 0:
-            return depth_z.new_zeros(depth_z.shape[:-1])
-
-        num_views = depth_z.shape[0]
-        depth_viz = torch.zeros(depth_z.shape[:-1], dtype=depth_z.dtype)
-
-        for view_idx in range(num_views):
-            depth_view = depth_z[view_idx, ..., 0]
-            if valid_masks is not None:
-                mask_view = valid_masks[view_idx]
-                valid_values = depth_view[mask_view]
-            else:
-                mask_view = None
-                valid_values = depth_view.view(-1)
-
-            if valid_values.numel() == 0:
-                continue
-
-            depth_min = valid_values.min()
-            depth_max = valid_values.max()
-            denom = depth_max - depth_min
-            if denom < 1e-6:
-                normalized = torch.zeros_like(depth_view)
-            else:
-                normalized = (depth_view - depth_min) / (denom + 1e-6)
-
-            if mask_view is not None:
-                normalized = normalized.masked_fill(~mask_view, 0.0)
-
-            depth_viz[view_idx] = normalized
-
-        return depth_viz
     @property
     def dataset_info(self) -> Dict:
         """返回数据集信息"""
