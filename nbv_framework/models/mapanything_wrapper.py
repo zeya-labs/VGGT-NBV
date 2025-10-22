@@ -121,6 +121,7 @@ class MapAnythingWrapper(nn.Module):
         depth_z: Optional[torch.Tensor] = None,
         is_metric_scale: bool = False,
         fov_degrees: Optional[float] = None,
+        view_save_dir: Optional[str] = None,
     ) -> torch.Tensor:
         """提取多视角场景特征, 返回形状 [B, S, P, D]."""
         effective_fov = self.default_fov_degrees if fov_degrees is None else fov_degrees
@@ -132,6 +133,7 @@ class MapAnythingWrapper(nn.Module):
             fov_degrees=effective_fov,
             is_metric_scale=is_metric_scale,
             depth_z=depth_z,
+            save_dir=view_save_dir,
         )
         batch_size = normalized.shape[0]
         self._configure_geometric_inputs(
@@ -177,6 +179,7 @@ class MapAnythingWrapper(nn.Module):
         depth_z: Optional[torch.Tensor] = None,
         is_metric_scale: bool = False,
         fov_degrees: Optional[float] = None,
+        view_save_dir: Optional[str] = None,
     ) -> TensorDict:
         """运行 MapAnything 前向, 返回与 VGGTWrapper 对齐的关键输出."""
         effective_fov = self.default_fov_degrees if fov_degrees is None else fov_degrees
@@ -188,6 +191,7 @@ class MapAnythingWrapper(nn.Module):
             fov_degrees=effective_fov,
             is_metric_scale=is_metric_scale,
             depth_z=depth_z,
+            save_dir=view_save_dir,
         )
         self._configure_geometric_inputs(
             use_calibration=True,
@@ -216,6 +220,7 @@ class MapAnythingWrapper(nn.Module):
         depth_z: Optional[torch.Tensor] = None,
         is_metric_scale: bool = False,
         fov_degrees: Optional[float] = None,
+        view_save_dir: Optional[str] = None,
     ) -> Union[torch.Tensor, TensorDict]:
         if mode == "encode":
             return self.extract_scene_features(
@@ -224,6 +229,7 @@ class MapAnythingWrapper(nn.Module):
                 depth_z=depth_z,
                 is_metric_scale=is_metric_scale,
                 fov_degrees=fov_degrees,
+                view_save_dir=view_save_dir,
             )
         if mode == "reconstruct":
             return self.reconstruct_and_evaluate(
@@ -232,6 +238,7 @@ class MapAnythingWrapper(nn.Module):
                 depth_z=depth_z,
                 is_metric_scale=is_metric_scale,
                 fov_degrees=fov_degrees,
+                view_save_dir=view_save_dir,
             )
         raise ValueError(f"Unknown mode: {mode}. Supported modes: encode, reconstruct")
 

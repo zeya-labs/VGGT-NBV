@@ -31,10 +31,6 @@ from ..utils.camera_utils import (
     position_to_pose_tensor,
     world_points_to_camera_depth,
 )
-from ..utils.mapanything_views import (
-    compute_pinhole_intrinsics,
-    pose7d_to_opencv_cam2world_with_official_func,
-)
 from ..utils.render_utils import render_gt_point_maps
 
 
@@ -271,7 +267,7 @@ class NBVTrainer:
                 f"policy_network 输出维度需至少包含位置 (3)，实际为 {policy_output.shape[-1]}"
             )
 
-        reference_position = camera_poses_batch[:, -1, :3]
+        reference_position = camera_poses_batch[:, 0, :3]
         predicted_relative_position = policy_output[:, :3]
         absolute_position = reference_position + predicted_relative_position
 
@@ -387,10 +383,7 @@ class NBVTrainer:
         combined_images_batch = torch.cat([initial_images, new_images_expanded], dim=1)
         
         # 保存视图数据（图像 + 相机标定）到日志目录
-        step_output_dir = self._save_combined_images(
-            combined_images_batch=combined_images_batch,
-            combined_camera_poses=combined_camera_poses
-        )
+        step_output_dir = os.path.join(self.log_dir, "images", f"step_{self.global_step:06d}")
         
         # VGGT一次性对整个batch进行重建与评估
         recon_data = self.vggt_wrapper.reconstruct_and_evaluate(
@@ -398,6 +391,7 @@ class NBVTrainer:
             combined_camera_poses,
             depth_z=depth_z_batch,
             is_metric_scale=False,
+            view_save_dir=step_output_dir,
         )
         # print("===================loss开始计算===================")
         # 计算重建质量损失
@@ -737,79 +731,3 @@ class NBVTrainer:
         self.best_loss = checkpoint["best_loss"]
         
         self.logger.info(f"Checkpoint loaded: {checkpoint_path}")
-
-    def _save_combined_images(
-        self,
-        combined_images_batch: torch.Tensor,
-        combined_camera_poses: torch.Tensor,
-        fov_degrees: float = 60.0,
-    ) -> Optional[str]:
-        """
-        保存视图的图像与标定数据到log_dir下的images文件夹。
-
-        Args:
-            combined_images_batch: [B, N+1, 3, H, W] 的图片张量
-            combined_camera_poses: [B, N+1, 7] 的相机位姿张量
-            fov_degrees: 渲染视场角（默认60°），用于构造内参矩阵
-        """
-        if combined_images_batch is None or combined_camera_poses is None:
-            return None
-
-        # 确保形状匹配
-        if combined_images_batch.shape[:2] != combined_camera_poses.shape[:2]:
-            self.logger.warning(
-                "Skip saving combined views: image batch shape %s incompatible with pose batch shape %s.",
-                combined_images_batch.shape,
-                combined_camera_poses.shape,
-            )
-            return None
-
-        images_dir = os.path.join(self.log_dir, "images")
-        os.makedirs(images_dir, exist_ok=True)
-
-        step_dir = os.path.join(images_dir, f"step_{self.global_step:06d}")
-        os.makedirs(step_dir, exist_ok=True)
-
-        images_cpu = combined_images_batch.detach().cpu()
-        poses_cpu = combined_camera_poses.detach().cpu()
-
-        batch_size, num_views, _, height, width = images_cpu.shape
-        # print("combined_images_batch.shape",combined_images_batch.shape)
-        # print("combined_camera_poses.shape",combined_camera_poses.shape)
-        intrinsics = compute_pinhole_intrinsics(height, width, fov_degrees)
-
-        for batch_idx in range(batch_size):
-            batch_dir = os.path.join(step_dir, f"batch_{batch_idx:03d}")
-            os.makedirs(batch_dir, exist_ok=True)
-
-            for view_idx in range(num_views):
-                raw_img = images_cpu[batch_idx, view_idx]
-                pose_tensor = poses_cpu[batch_idx, view_idx]
-
-                # PNG保存仍使用[3,H,W]且范围[0,1]
-                png_img = torch.clamp(raw_img, 0.0, 1.0)
-                png_path = os.path.join(batch_dir, f"image_{view_idx:02d}.png")
-                torchvision.utils.save_image(png_img, png_path)
-
-                # 视图数据按(H, W, 3)且像素范围[0,255]
-                img_uint8 = (png_img.permute(1, 2, 0) * 255.0).round().to(torch.uint8)
-                # print("保存",pose_tensor)
-                cam2world = pose7d_to_opencv_cam2world_with_official_func(pose_tensor)
-
-                view_payload = {
-                    "img": img_uint8,
-                    "intrinsics": intrinsics.clone(),
-                    "camera_poses": cam2world,
-                    "is_metric_scale": torch.tensor([False], dtype=torch.bool),
-                }
-
-                payload_path = os.path.join(batch_dir, f"view_{view_idx:02d}.pt")
-                torch.save(view_payload, payload_path)
-
-        self.logger.info(
-            "Saved view data for %d batches (%d views each) to %s",
-            batch_size,
-            num_views,
-            step_dir,
-        )
-        return step_dir

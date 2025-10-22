@@ -11,6 +11,7 @@ from typing import Tuple, Optional, List, Union
 import numpy as np
 import os
 import math
+import warnings
 import torch.nn.functional as F
 
 try:
@@ -125,16 +126,57 @@ class DifferentiableRenderer(nn.Module):
         从相机位姿（位置+四元数）计算PyTorch3D所需的旋转矩阵R和平移向量T。
         """
         # print(camera_poses)
-        # 1. 分离位置和四元数
+        # 1. 分离位置和四元数，并修正可能的数值异常
         positions = camera_poses[:, :3]      # [B, 3] (x, y, z)
         quaternions = camera_poses[:, 3:7]  # [B, 4] (qx, qy, qz, qw)
+
+        positions = torch.nan_to_num(positions, nan=0.0, posinf=0.0, neginf=0.0)
+        quaternions = torch.nan_to_num(quaternions, nan=0.0, posinf=0.0, neginf=0.0)
+
+        quat_norm = quaternions.norm(dim=1, keepdim=True)
+        invalid_quat = quat_norm.squeeze(1) < 1e-6
+        if invalid_quat.any():
+            warnings.warn(
+                "Received near-zero quaternion; substituting identity rotation to keep renderer stable.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            fallback = quaternions.new_zeros(quaternions.shape)
+            fallback[:, 3] = 1.0
+            quaternions = torch.where(invalid_quat.unsqueeze(1), fallback, quaternions)
+            quat_norm = quaternions.norm(dim=1, keepdim=True)
+
+        quaternions = quaternions / quat_norm.clamp_min(1e-6)
 
         # 2. 转换四元数格式
         # PyTorch3D 的 quaternion_to_matrix 需要 (w, x, y, z) 格式
         # 我们的输入是 (x, y, z, w)，所以需要调整顺序
         q_wxyz = quaternions[:, [3, 0, 1, 2]]  # 从 [qx,qy,qz,qw] -> [qw,qx,qy,qz]
         R = quaternion_to_matrix(q_wxyz)  # 不需要 transpose
-        T = -(positions.unsqueeze(1) @ R).squeeze(1)  # 关键：T = -C @ R（行向量公式）
+
+        with torch.no_grad():
+            det_R = torch.linalg.det(R)
+            near_singular = det_R.abs() < 1e-3
+            if near_singular.any():
+                warnings.warn(
+                    "Detected near-singular rotation matrix; re-orthonormalizing via SVD.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                idx = near_singular.nonzero(as_tuple=False).squeeze(1)
+                if idx.numel() > 0:
+                    u, _, vh = torch.linalg.svd(R[idx])
+                    # Enforce right-handed rotation; adjust if det is negative
+                    det_uv = torch.det(torch.matmul(u, vh))
+                    neg_det = det_uv < 0
+                    if neg_det.any():
+                        vh_adjusted = vh.clone()
+                        vh_adjusted[neg_det, -1, :] *= -1.0
+                        vh = vh_adjusted
+                    R[idx] = torch.matmul(u, vh)
+
+        # 关键：T = -C @ R（行向量约定，与PyTorch3D FoV相机接口一致）
+        T = -(positions.unsqueeze(1) @ R).squeeze(1)
 
         return R, T
 
