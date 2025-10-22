@@ -52,8 +52,8 @@ def setup_config() -> Dict[str, Any]:
         
         # 训练配置
         "learning_rate": 1e-4,
-        "batch_size": 1,  # 根据GPU内存调整
-        "num_epochs": 1000,
+        "batch_size": 8,  # 根据GPU内存调整
+        "num_epochs": 2000,
         "normalize_method": "mean",
         "num_samples": 20000,
         "weight_decay": 1e-5,
@@ -65,7 +65,7 @@ def setup_config() -> Dict[str, Any]:
         "randomize_initial_views": True,
         "image_size": 224,
         "up_axis": "Y",  # 数据集模型默认上方向 ('Y' 或 'Z')
-        "max_meshes": 1,  # 限制加载的mesh数量，用于控制训练规模
+        "max_meshes": 20,  # 限制加载的mesh数量，用于控制训练规模
         
         # 设备配置
         "device": "cuda" if torch.cuda.is_available() else "cpu",
