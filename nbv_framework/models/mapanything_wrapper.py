@@ -198,6 +198,9 @@ class MapAnythingWrapper(nn.Module):
             use_pose=True,
             use_depth=depth_z is not None,
         )
+        # 输出views(list)的键
+        # print("views keys:", views[0].keys())
+
         try:
             predictions = self.base_model.forward(
                 views, memory_efficient_inference=self.memory_efficient_inference

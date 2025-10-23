@@ -52,7 +52,7 @@ def setup_config() -> Dict[str, Any]:
         
         # 训练配置
         "learning_rate": 1e-4,
-        "batch_size": 8,  # 根据GPU内存调整
+        "batch_size": 1,  # 根据GPU内存调整
         "num_epochs": 2000,
         "normalize_method": "mean",
         "num_samples": 20000,
@@ -63,7 +63,7 @@ def setup_config() -> Dict[str, Any]:
         "min_initial_views": 3,
         "max_initial_views": 3,
         "randomize_initial_views": True,
-        "image_size": 224,
+        "image_size": 518,
         "up_axis": "Y",  # 数据集模型默认上方向 ('Y' 或 'Z')
         "max_meshes": 20,  # 限制加载的mesh数量，用于控制训练规模
         
