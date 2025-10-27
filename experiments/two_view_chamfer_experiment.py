@@ -11,11 +11,18 @@ computed and visualised with seaborn (or a compatible fallback).
 from __future__ import annotations
 
 import argparse
+import contextlib
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 import json
 import math
 import random
+import threading
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import multiprocessing as mp
+import torch.multiprocessing as tmp
 
 import numpy as np
 import torch
@@ -29,6 +36,11 @@ except ImportError:  # pragma: no cover - fallback to seaborn
         sns = None  # type: ignore
 
 import matplotlib.pyplot as plt
+
+try:
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover - progress bar optional
+    tqdm = None  # type: ignore
 
 try:
     from torchvision.utils import save_image
@@ -49,6 +61,10 @@ from nbv_framework.utils.mapanything_views import (
     prepare_mapanything_views,
 )
 from mapanything.utils.hf_utils.viz import predictions_to_glb
+from pytorch3d.renderer.mesh import TexturesVertex, TexturesUV
+from pytorch3d.structures import Meshes
+
+POSTPROCESS_LOCK = threading.Lock()
 
 
 def parse_args() -> argparse.Namespace:
@@ -111,6 +127,18 @@ def parse_args() -> argparse.Namespace:
         help="Inference device (cuda, cpu, or auto).",
     )
     parser.add_argument(
+        "--device_ids",
+        type=str,
+        default=None,
+        help="Comma-separated CUDA device ids to use (e.g. '0,1,2,3') or 'auto' to select automatically.",
+    )
+    parser.add_argument(
+        "--max_devices",
+        type=int,
+        default=4,
+        help="Maximum number of devices to use when auto-selecting GPUs.",
+    )
+    parser.add_argument(
         "--max_points_per_cloud",
         type=int,
         default=4096,
@@ -152,10 +180,129 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _serialize_mesh(mesh: Meshes) -> Dict[str, Any]:
+    """Serialize a PyTorch3D mesh for multiprocessing transport."""
+    verts_list = [verts.cpu() for verts in mesh.verts_list()]
+    faces_list = [faces.cpu() for faces in mesh.faces_list()]
+
+    textures = mesh.textures
+    if textures is None:
+        texture_type = None
+        texture_data = None
+    elif isinstance(textures, TexturesVertex):
+        texture_type = "vertex"
+        texture_data = [feat.cpu() for feat in textures.verts_features_list()]
+    elif isinstance(textures, TexturesUV):
+        texture_type = "uv"
+        texture_data = {
+            "maps": [m.cpu() for m in textures.maps_list()],
+            "faces_uvs": [f.cpu() for f in textures.faces_uvs_list()],
+            "verts_uvs": [v.cpu() for v in textures.verts_uvs_list()],
+        }
+    else:
+        raise NotImplementedError(
+            f"Unsupported mesh texture type for multiprocessing rendering: {type(textures).__name__}"
+        )
+
+    return {
+        "verts": verts_list,
+        "faces": faces_list,
+        "texture_type": texture_type,
+        "texture_data": texture_data,
+    }
+
+
+def _deserialize_mesh(serialized: Dict[str, Any], device: torch.device) -> Meshes:
+    """Reconstruct a PyTorch3D mesh from serialized components."""
+    verts = [v.to(device) for v in serialized["verts"]]
+    faces = [f.to(device) for f in serialized["faces"]]
+
+    texture_type = serialized["texture_type"]
+    if texture_type is None:
+        textures = None
+    elif texture_type == "vertex":
+        texture_data = [t.to(device) for t in serialized["texture_data"]]
+        textures = TexturesVertex(verts_features=texture_data)
+    elif texture_type == "uv":
+        data = serialized["texture_data"]
+        textures = TexturesUV(
+            maps=[m.to(device) for m in data["maps"]],
+            faces_uvs=[f.to(device) for f in data["faces_uvs"]],
+            verts_uvs=[v.to(device) for v in data["verts_uvs"]],
+        )
+    else:
+        raise NotImplementedError(f"Unsupported texture type '{texture_type}' during deserialization.")
+
+    return Meshes(verts=verts, faces=faces, textures=textures)
+
+
+def resolve_device_strings(
+    device_arg: str,
+    device_ids_arg: Optional[str],
+    max_devices: int,
+) -> List[str]:
+    """Resolve CLI device arguments into an ordered list of torch device strings."""
+
+    def auto_devices() -> List[str]:
+        if torch.cuda.is_available():
+            count = torch.cuda.device_count()
+            if max_devices > 0:
+                count = min(count, max_devices)
+            devices = [f"cuda:{idx}" for idx in range(count)]
+            if devices:
+                return devices
+        return ["cpu"]
+
+    if device_ids_arg is not None:
+        token = device_ids_arg.strip()
+        if not token:
+            raise ValueError("device_ids cannot be an empty string.")
+        if token.lower() == "auto":
+            return auto_devices()
+        raw_devices = [item.strip() for item in token.split(",") if item.strip()]
+        if not raw_devices:
+            raise ValueError(f"Could not parse any devices from device_ids='{device_ids_arg}'.")
+        resolved: List[str] = []
+        for dev in raw_devices:
+            lower_dev = dev.lower()
+            candidate: Optional[str]
+            if lower_dev in {"cpu"}:
+                candidate = "cpu"
+            elif lower_dev.startswith("cuda"):
+                candidate = lower_dev
+            elif lower_dev.isdigit():
+                candidate = f"cuda:{lower_dev}"
+            else:
+                candidate = dev
+            if candidate not in resolved:
+                resolved.append(candidate)
+        return resolved
+
+    if device_arg == "auto":
+        return auto_devices()
+
+    return [device_arg]
+
+
 def set_random_seed(seed: int) -> None:
     random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+@dataclass
+class DeviceContext:
+    device: torch.device
+    device_str: str
+    mapanything: MapAnythingWrapper
+    loss_fn: ReconstructionLoss
+    mesh: Any
+    gt_points: torch.Tensor
+    initial_image: torch.Tensor
+    initial_pose: torch.Tensor
+    initial_depth: torch.Tensor
+    initial_point_map: torch.Tensor
+    initial_mask: Optional[torch.Tensor]
 
 def pose_dict_to_tensor(pose: Dict[str, Sequence[float]]) -> torch.Tensor:
     position = list(pose["position"])
@@ -165,12 +312,13 @@ def pose_dict_to_tensor(pose: Dict[str, Sequence[float]]) -> torch.Tensor:
     return torch.tensor(position + quaternion, dtype=torch.float32)
 
 
-def render_candidate_views(
+def _render_candidate_views_single_device(
     mesh,
     poses: torch.Tensor,
     renderer: DifferentiableRenderer,
     fov_degrees: float,
     batch_size: Optional[int] = None,
+    progress_callback: Optional[Any] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """Render colour images and point maps for every sampled pose."""
     total_views = poses.shape[0]
@@ -204,6 +352,8 @@ def render_candidate_views(
         if valid_masks_chunk is not None:
             have_valid_masks = True
             valid_mask_chunks.append(valid_masks_chunk.detach())
+        if progress_callback is not None:
+            progress_callback(images_chunk.shape[0])
 
     images = torch.cat(image_chunks, dim=0)
     point_maps = torch.cat(point_map_chunks, dim=0)
@@ -213,6 +363,201 @@ def render_candidate_views(
             # Some batches may not return masks; pad with None behaviour.
             raise RuntimeError("Renderer returned valid masks inconsistently across batches.")
         valid_masks = torch.cat(valid_mask_chunks, dim=0)
+    else:
+        valid_masks = None
+
+    images_cpu = images.cpu()
+    point_maps_cpu = point_maps.cpu()
+    valid_masks_cpu = valid_masks.cpu() if valid_masks is not None else None
+
+    return images_cpu, point_maps_cpu, valid_masks_cpu
+
+
+def _render_device_worker(
+    device_str: str,
+    image_size: int,
+    fov_degrees: float,
+    batch_size: Optional[int],
+    mesh_serialized: Dict[str, Any],
+    pose_subset: torch.Tensor,
+    start_index: int,
+    result_queue,
+) -> None:
+    """Worker process that renders a contiguous subset of poses on a dedicated device."""
+    try:
+        device = torch.device(device_str)
+        if device.type == "cuda":
+            torch.cuda.set_device(device)
+
+        mesh = _deserialize_mesh(mesh_serialized, device)
+        renderer = DifferentiableRenderer(image_size=image_size, device=device_str)
+
+        poses_device = pose_subset.to(device)
+        images_chunk, point_maps_chunk, valid_masks_chunk = _render_candidate_views_single_device(
+            mesh,
+            poses_device,
+            renderer,
+            fov_degrees,
+            batch_size,
+        )
+
+        result_queue.put(
+            (
+                "__result__",
+                start_index,
+                images_chunk,
+                point_maps_chunk,
+                valid_masks_chunk,
+            )
+        )
+    except Exception as exc:  # pragma: no cover - worker errors bubble up
+        result_queue.put(("__error__", device_str, exc))
+    finally:
+        result_queue.put(("__done__", device_str))
+        if "poses_device" in locals():
+            del poses_device
+        if locals().get("device", torch.device("cpu")).type == "cuda":
+            torch.cuda.empty_cache()
+
+
+def render_candidate_views(
+    mesh_cpu,
+    poses_cpu: torch.Tensor,
+    *,
+    image_size: int,
+    fov_degrees: float,
+    batch_size: Optional[int],
+    device_strings: Sequence[str],
+    show_progress: bool = True,
+) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    """Render candidate views, distributing work across available devices with progress feedback."""
+    total_views = poses_cpu.shape[0]
+    if total_views == 0:
+        raise ValueError("No poses provided for rendering.")
+
+    if batch_size is None or batch_size <= 0:
+        batch_size = total_views
+
+    if not device_strings:
+        raise ValueError("render_candidate_views requires at least one device string.")
+
+    render_devices: List[str] = []
+    for dev_str in device_strings:
+        device = torch.device(dev_str)
+        if device.type == "cuda" and torch.cuda.is_available():
+            render_devices.append(dev_str)
+    if not render_devices:
+        render_devices = [device_strings[0]]
+    render_devices = list(dict.fromkeys(render_devices))
+
+    progress_bar = None
+    if show_progress and tqdm is not None:
+        progress_bar = tqdm(total=total_views, desc="Rendering candidate views", unit="view", leave=False)
+
+    if len(render_devices) == 1:
+        device_str = render_devices[0]
+        device = torch.device(device_str)
+        if device.type == "cuda":
+            torch.cuda.set_device(device)
+        mesh_device = mesh_cpu.to(device)
+        poses_device = poses_cpu.to(device)
+        renderer = DifferentiableRenderer(image_size=image_size, device=device_str)
+        try:
+            images, point_maps, valid_masks = _render_candidate_views_single_device(
+                mesh_device,
+                poses_device,
+                renderer,
+                fov_degrees,
+                batch_size,
+                progress_callback=progress_bar.update if progress_bar is not None else None,
+            )
+        finally:
+            del mesh_device, poses_device, renderer
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+        if progress_bar is not None:
+            progress_bar.close()
+        return images, point_maps, valid_masks
+
+    # Multi-device rendering via multiprocessing workers (one worker per device).
+    mesh_serialized = _serialize_mesh(mesh_cpu)
+    ctx = tmp.get_context("spawn")
+    result_queue = ctx.SimpleQueue()
+
+    total_devices = len(render_devices)
+    base_count = total_views // total_devices
+    remainder = total_views % total_devices
+
+    assignments: List[Tuple[str, int, int]] = []
+    start_idx = 0
+    for idx, device_str in enumerate(render_devices):
+        count = base_count + (1 if idx < remainder else 0)
+        if count <= 0:
+            continue
+        end_idx = start_idx + count
+        assignments.append((device_str, start_idx, end_idx))
+        start_idx = end_idx
+
+    workers = []
+    for device_str, start_idx, end_idx in assignments:
+        pose_subset = poses_cpu[start_idx:end_idx].clone()
+        worker = ctx.Process(
+            target=_render_device_worker,
+            args=(
+                device_str,
+                image_size,
+                fov_degrees,
+                batch_size,
+                mesh_serialized,
+                pose_subset,
+                start_idx,
+                result_queue,
+            ),
+        )
+        worker.daemon = False
+        worker.start()
+        workers.append(worker)
+
+    chunk_outputs: Dict[int, Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]] = {}
+    completed_workers = 0
+
+    try:
+        while completed_workers < len(workers):
+            message = result_queue.get()
+            if not message:
+                continue
+            kind = message[0]
+            if kind == "__result__":
+                _, start_idx, images_chunk, point_maps_chunk, valid_masks_chunk = message
+                chunk_outputs[start_idx] = (images_chunk, point_maps_chunk, valid_masks_chunk)
+                if progress_bar is not None:
+                    progress_bar.update(images_chunk.shape[0])
+            elif kind == "__error__":
+                _, device_str, exc = message
+                raise RuntimeError(f"Rendering worker on device {device_str} failed") from exc
+            elif kind == "__done__":
+                completed_workers += 1
+    finally:
+        if progress_bar is not None:
+            progress_bar.close()
+        for worker in workers:
+            worker.join()
+
+    if len(chunk_outputs) != len(assignments):
+        raise RuntimeError("Rendering produced incomplete results.")
+
+    ordered_starts = sorted(chunk_outputs.keys())
+    images_list = [chunk_outputs[start][0] for start in ordered_starts]
+    point_maps_list = [chunk_outputs[start][1] for start in ordered_starts]
+
+    images = torch.cat(images_list, dim=0)
+    point_maps = torch.cat(point_maps_list, dim=0)
+
+    has_masks = any(chunk_outputs[start][2] is not None for start in ordered_starts)
+    if has_masks:
+        if any(chunk_outputs[start][2] is None for start in ordered_starts):
+            raise RuntimeError("Renderer returned valid masks inconsistently across devices.")
+        valid_masks = torch.cat([chunk_outputs[start][2] for start in ordered_starts], dim=0)
     else:
         valid_masks = None
 
@@ -638,14 +983,13 @@ def export_camera_heatmap_visualisation(
 
 
 
+
+
 def main() -> None:
     args = parse_args()
-    if args.device == "auto":
-        resolved_device = "cuda" if torch.cuda.is_available() else "cpu"
-    else:
-        resolved_device = args.device
-    device = torch.device(resolved_device)
-    device_str = device.type if device.index is None else f"{device.type}:{device.index}"
+    device_strings = resolve_device_strings(args.device, args.device_ids, args.max_devices)
+    if not device_strings:
+        raise ValueError("No devices resolved from CLI arguments.")
     set_random_seed(args.seed)
 
     output_dir: Path = args.output_dir
@@ -656,8 +1000,8 @@ def main() -> None:
         normalize_method=args.normalize_method,
         num_samples=args.num_gt_samples,
     )
-    mesh = mesh_data["normalized_mesh"].to(device)
-    gt_points_tensor = mesh_data["gt_points"].to(device=device, dtype=torch.float32)
+    mesh_cpu = mesh_data["normalized_mesh"]
+    gt_points_tensor = mesh_data["gt_points"].to(dtype=torch.float32)
 
     pose_generator = CameraPoseGenerator()
     pose_dicts = pose_generator.generate_camera_poses(
@@ -665,151 +1009,223 @@ def main() -> None:
         seed=args.seed,
         hemisphere=args.hemisphere,
     )
-    pose_tensor = torch.stack([pose_dict_to_tensor(p) for p in pose_dicts]).to(device)
+    pose_tensor = torch.stack([pose_dict_to_tensor(p) for p in pose_dicts])
 
-    renderer = DifferentiableRenderer(image_size=args.image_size, device=device_str)
     images, point_maps, valid_masks = render_candidate_views(
-        mesh,
+        mesh_cpu,
         pose_tensor,
-        renderer,
-        args.fov_degrees,
+        image_size=args.image_size,
+        fov_degrees=args.fov_degrees,
         batch_size=args.render_batch_size,
+        device_strings=device_strings,
+        show_progress=True,
     )
-    images = images.to(device)
-    point_maps = point_maps.to(device)
-    valid_masks = valid_masks.to(device) if valid_masks is not None else None
     depth_maps = compute_depth_maps(point_maps, pose_tensor, valid_masks)
-    depth_maps = depth_maps.to(device)
 
     save_candidate_artifacts(output_dir / "views", images, depth_maps, pose_dicts)
 
-    mapanything = MapAnythingWrapper(device=device_str)
-    mapanything.eval()
-    loss_fn = ReconstructionLoss(renderer=renderer, log_tensorboard=False)
-    loss_fn.eval()
+    point_maps_hw = point_maps.permute(0, 2, 3, 1).contiguous()
+    valid_masks_hw = valid_masks.squeeze(1).bool() if valid_masks is not None else None
 
     first_view = random.randrange(args.num_views)
+    print(f"Fixed first view index: {first_view}")
+    print(f"Using devices: {', '.join(device_strings)}")
+
+    initial_image_cpu = images[first_view]
+    initial_pose_cpu = pose_tensor[first_view]
+    initial_depth_cpu = depth_maps[first_view]
+    initial_point_map_cpu = point_maps_hw[first_view]
+    initial_mask_cpu = valid_masks_hw[first_view] if valid_masks_hw is not None else None
+
+    point_cloud_dir = output_dir / "loss_pointclouds"
+    point_cloud_dir.mkdir(parents=True, exist_ok=True)
+
+    device_contexts: List[DeviceContext] = []
+    for device_str in device_strings:
+        device_obj = torch.device(device_str)
+        mapanything = MapAnythingWrapper(device=device_str)
+        mapanything.eval()
+        mapanything.to(device_obj)
+        renderer_ctx = DifferentiableRenderer(image_size=args.image_size, device=device_str)
+        loss_fn = ReconstructionLoss(renderer=renderer_ctx, log_tensorboard=False)
+        loss_fn.eval()
+
+        mesh_device = mesh_cpu.to(device_obj)
+        gt_points_device = gt_points_tensor.unsqueeze(0).to(device_obj)
+        initial_image_device = initial_image_cpu.unsqueeze(0).unsqueeze(0).to(device_obj)
+        initial_pose_device = initial_pose_cpu.unsqueeze(0).unsqueeze(0).to(device_obj)
+        initial_depth_device = initial_depth_cpu.unsqueeze(0).unsqueeze(0).to(device_obj)
+        initial_point_map_device = initial_point_map_cpu.unsqueeze(0).unsqueeze(0).to(device_obj)
+        if initial_mask_cpu is not None:
+            initial_mask_device = initial_mask_cpu.unsqueeze(0).unsqueeze(0).to(device_obj)
+        else:
+            initial_mask_device = None
+
+        device_contexts.append(
+            DeviceContext(
+                device=device_obj,
+                device_str=device_str,
+                mapanything=mapanything,
+                loss_fn=loss_fn,
+                mesh=mesh_device,
+                gt_points=gt_points_device,
+                initial_image=initial_image_device,
+                initial_pose=initial_pose_device,
+                initial_depth=initial_depth_device,
+                initial_point_map=initial_point_map_device,
+                initial_mask=initial_mask_device,
+            )
+        )
+
+    if not device_contexts:
+        raise RuntimeError("No valid devices resolved for inference.")
+
+    indices_to_eval = list(range(args.num_views))
+    if args.skip_same_view and first_view in indices_to_eval:
+        indices_to_eval.remove(first_view)
+
     results: List[Dict[str, Optional[float]]] = []
 
-    # Prepare fixed initial view tensors following training_step convention
-    initial_image = images[first_view].unsqueeze(0).unsqueeze(0)  # [1,1,3,H,W]
-    initial_pose = pose_tensor[first_view].unsqueeze(0).unsqueeze(0)  # [1,1,7]
-    initial_depth = depth_maps[first_view].unsqueeze(0).unsqueeze(0)  # [1,1,H,W,1]
-    mesh_batch = mesh
-    gt_points_batch = gt_points_tensor.unsqueeze(0)
+    point_maps_hw_cpu = point_maps_hw
+    valid_masks_hw_cpu = valid_masks_hw
+    images_cpu = images
+    depth_maps_cpu = depth_maps
+    pose_tensor_cpu = pose_tensor
 
-    point_maps_hw = point_maps.permute(0, 2, 3, 1).contiguous()
-    if valid_masks is not None:
-        valid_masks_hw = valid_masks.squeeze(1).bool()
-    else:
-        valid_masks_hw = None
+    def process_indices(index_subset: Sequence[int], ctx: DeviceContext) -> List[Dict[str, Optional[float]]]:
+        local_results: List[Dict[str, Optional[float]]] = []
+        if not index_subset:
+            return local_results
+        device = ctx.device
+        if device.type == "cuda":
+            torch.cuda.set_device(device)
+        device_ctx = torch.cuda.device(device) if device.type == "cuda" else contextlib.nullcontext()
+        with device_ctx, torch.no_grad():
+            for idx in index_subset:
+                new_image = images_cpu[idx].unsqueeze(0).unsqueeze(0).to(ctx.device)
+                new_pose = pose_tensor_cpu[idx].unsqueeze(0).unsqueeze(0).to(ctx.device)
+                new_depth = depth_maps_cpu[idx].unsqueeze(0).unsqueeze(0).to(ctx.device)
 
-    with torch.no_grad():
-        for idx in range(args.num_views):
-            if idx == first_view and args.skip_same_view:
-                continue
+                combined_images_batch = torch.cat([ctx.initial_image, new_image], dim=1).contiguous()
+                combined_camera_poses = torch.cat([ctx.initial_pose, new_pose], dim=1).contiguous()
+                combined_depth = torch.cat([ctx.initial_depth, new_depth], dim=1).contiguous()
 
-            new_image = images[idx].unsqueeze(0).unsqueeze(0)  # [1,1,3,H,W]
-            new_pose = pose_tensor[idx].unsqueeze(0).unsqueeze(0)  # [1,1,7]
-            new_depth = depth_maps[idx].unsqueeze(0).unsqueeze(0)  # [1,1,H,W,1]
-
-            combined_images_batch = torch.cat([initial_image, new_image], dim=1).contiguous()
-            combined_camera_poses = torch.cat([initial_pose, new_pose], dim=1).contiguous()
-            combined_depth = torch.cat([initial_depth, new_depth], dim=1).contiguous()
-
-            processed_views, normalized_views = prepare_mapanything_views(
-                combined_images_batch,
-                combined_camera_poses,
-                data_norm_type=mapanything.data_norm_type,
-                device=mapanything.device,
-                fov_degrees=args.fov_degrees,
-                is_metric_scale=False,
-                depth_z=combined_depth,
-            )
-
-            mapanything._configure_geometric_inputs(
-                use_calibration=True,
-                use_pose=True,
-                use_depth=combined_depth is not None,
-            )
-            try:
-                raw_predictions = mapanything.base_model.forward(
-                    processed_views,
-                    memory_efficient_inference=mapanything.memory_efficient_inference,
+                processed_views, normalized_views = prepare_mapanything_views(
+                    combined_images_batch,
+                    combined_camera_poses,
+                    data_norm_type=ctx.mapanything.data_norm_type,
+                    device=ctx.mapanything.device,
+                    fov_degrees=args.fov_degrees,
+                    is_metric_scale=False,
+                    depth_z=combined_depth,
                 )
-            finally:
-                mapanything._restore_geometric_inputs()
 
-            recon = mapanything._stack_predictions(raw_predictions)
-            mapanything._maybe_retain_grad_from_result(recon, normalized_views)
+                ctx.mapanything._configure_geometric_inputs(
+                    use_calibration=True,
+                    use_pose=True,
+                    use_depth=True,
+                )
+                try:
+                    raw_predictions = ctx.mapanything.base_model.forward(
+                        processed_views,
+                        memory_efficient_inference=ctx.mapanything.memory_efficient_inference,
+                    )
+                finally:
+                    ctx.mapanything._restore_geometric_inputs()
 
-            postprocessed_predictions = postprocess_model_outputs_for_inference(
-                raw_outputs=raw_predictions,
-                input_views=processed_views,
-                apply_mask=True,
-                mask_edges=True,
-                edge_normal_threshold=5.0,
-                edge_depth_threshold=0.03,
-                apply_confidence_mask=False,
-                confidence_percentile=10,
-            )
+                recon = ctx.mapanything._stack_predictions(raw_predictions)
+                ctx.mapanything._maybe_retain_grad_from_result(recon, normalized_views)
 
-            pair_name = f"pair_{first_view:03d}_{idx:03d}"
-            save_depth_visualizations(output_dir, combined_depth, pair_name)
+                with POSTPROCESS_LOCK:
+                    postprocessed_predictions = postprocess_model_outputs_for_inference(
+                        raw_outputs=raw_predictions,
+                        input_views=processed_views,
+                        apply_mask=True,
+                        mask_edges=True,
+                        edge_normal_threshold=5.0,
+                        edge_depth_threshold=0.03,
+                        apply_confidence_mask=False,
+                        confidence_percentile=10,
+                    )
 
-            initial_point_map = point_maps_hw[first_view].unsqueeze(0).unsqueeze(0).to(device)
-            new_point_map = point_maps_hw[idx].unsqueeze(0).unsqueeze(0).to(device)
-            gt_point_maps = torch.cat([initial_point_map, new_point_map], dim=1).contiguous()
+                pair_name = f"pair_{first_view:03d}_{idx:03d}"
+                save_depth_visualizations(output_dir, combined_depth, pair_name)
 
-            if valid_masks_hw is not None:
-                initial_mask = valid_masks_hw[first_view].unsqueeze(0).unsqueeze(0).to(device)
-                new_mask = valid_masks_hw[idx].unsqueeze(0).unsqueeze(0).to(device)
-                gt_valid_masks = torch.cat([initial_mask, new_mask], dim=1).contiguous()
-            else:
-                gt_valid_masks = torch.ones_like(gt_point_maps[..., 0], dtype=torch.bool).contiguous()
+                new_point_map = point_maps_hw_cpu[idx].unsqueeze(0).unsqueeze(0).to(ctx.device)
+                gt_point_maps = torch.cat([ctx.initial_point_map, new_point_map], dim=1).contiguous()
 
-            gt_mesh_data_pair: Dict[str, torch.Tensor] = {
-                "normalized_mesh": mesh_batch,
-                "gt_points": gt_points_batch,
-                "gt_point_maps": gt_point_maps,
-                "gt_valid_masks": gt_valid_masks,
-                "depth_z": combined_depth,
-            }
+                if valid_masks_hw_cpu is not None:
+                    if ctx.initial_mask is None:
+                        raise RuntimeError("Missing initial valid mask for device context.")
+                    new_mask = valid_masks_hw_cpu[idx].unsqueeze(0).unsqueeze(0).to(ctx.device)
+                    gt_valid_masks = torch.cat([ctx.initial_mask, new_mask], dim=1).contiguous()
+                else:
+                    gt_valid_masks = torch.ones(
+                        gt_point_maps.shape[:-1],
+                        dtype=torch.bool,
+                        device=ctx.device,
+                    ).contiguous()
 
-            total_loss, loss_components = loss_fn(
-                recon,
-                gt_mesh_data_pair,
-                combined_images_batch,
-                combined_camera_poses,
-                return_components=True,
-                writer=None,
-                step=None,
-                train_flag=False,
-                point_cloud_dir=str((output_dir / "loss_pointclouds")),
-            )
-
-            chamfer_value = loss_components.get("chamfer_loss")
-            chamfer_value = float(chamfer_value) if chamfer_value is not None else None
-
-            results.append(
-                {
-                    "second_view_index": idx,
-                    "chamfer": chamfer_value,
-                    "total_loss": float(total_loss.item()),
+                gt_mesh_data_pair: Dict[str, torch.Tensor] = {
+                    "normalized_mesh": ctx.mesh,
+                    "gt_points": ctx.gt_points,
+                    "gt_point_maps": gt_point_maps,
+                    "gt_valid_masks": gt_valid_masks,
+                    "depth_z": combined_depth,
                 }
-            )
 
-            if not args.skip_glb:
-                glb_name = f"{pair_name}.glb"
-                glb_path = (output_dir / "glb") / glb_name
-                export_glb_for_pair(
-                    glb_path,
-                    postprocessed_predictions,
-                    as_mesh=args.glb_as_mesh,
-                    confidence_threshold=args.confidence_threshold,
-                    filter_black_bg=True,
-                    black_bg_threshold=0.2,
+                total_loss, loss_components = ctx.loss_fn(
+                    recon,
+                    gt_mesh_data_pair,
+                    combined_images_batch,
+                    combined_camera_poses,
+                    return_components=True,
+                    writer=None,
+                    step=None,
+                    train_flag=False,
+                    point_cloud_dir=str(point_cloud_dir),
                 )
+
+                chamfer_value = loss_components.get("chamfer_loss")
+                chamfer_value = float(chamfer_value) if chamfer_value is not None else None
+
+                local_results.append(
+                    {
+                        "second_view_index": idx,
+                        "chamfer": chamfer_value,
+                        "total_loss": float(total_loss.item()),
+                    }
+                )
+
+                if not args.skip_glb:
+                    glb_name = f"pair_{first_view:03d}_{idx:03d}.glb"
+                    glb_path = (output_dir / "glb") / glb_name
+                    export_glb_for_pair(
+                        glb_path,
+                        postprocessed_predictions,
+                        as_mesh=args.glb_as_mesh,
+                        confidence_threshold=args.confidence_threshold,
+                        filter_black_bg=True,
+                        black_bg_threshold=0.2,
+                    )
+        return local_results
+
+    num_contexts = len(device_contexts)
+    chunks: List[List[int]] = [[] for _ in range(num_contexts)]
+    for order, idx in enumerate(indices_to_eval):
+        chunks[order % num_contexts].append(idx)
+
+    if indices_to_eval:
+        with ThreadPoolExecutor(max_workers=num_contexts) as executor:
+            futures = []
+            for ctx, subset in zip(device_contexts, chunks):
+                if not subset:
+                    continue
+                futures.append(executor.submit(process_indices, subset, ctx))
+            for future in futures:
+                results.extend(future.result())
+
+    results.sort(key=lambda item: item["second_view_index"])
 
     summary_path = output_dir / "chamfer_results.json"
     with open(summary_path, "w", encoding="utf-8") as handle:
@@ -830,7 +1246,7 @@ def main() -> None:
     if not args.skip_visualization:
         interactive_path = output_dir / "camera_heatmap.html"
         export_camera_heatmap_visualisation(
-            mesh=mesh,
+            mesh=mesh_cpu,
             pose_tensor=pose_tensor,
             chamfer_results=results,
             first_view=first_view,
