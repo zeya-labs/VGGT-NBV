@@ -52,7 +52,7 @@ def setup_config() -> Dict[str, Any]:
         
         # 训练配置
         "learning_rate": 1e-4,
-        "batch_size": 1,  # 根据GPU内存调整
+        "batch_size": 2,  # 根据GPU内存调整
         "num_epochs": 2000,
         "normalize_method": "mean",
         "num_samples": 20000,
@@ -60,8 +60,8 @@ def setup_config() -> Dict[str, Any]:
         
         # 数据配置
         "synthetic_data_root": "./models/synthetic_data",
-        "min_initial_views": 3,
-        "max_initial_views": 3,
+        "min_initial_views": 1,
+        "max_initial_views": 1,
         "randomize_initial_views": True,
         "image_size": 518,
         "up_axis": "Y",  # 数据集模型默认上方向 ('Y' 或 'Z')

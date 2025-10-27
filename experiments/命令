@@ -1,0 +1,1 @@
+python -m experiments.two_view_chamfer_experiment --mesh_path models/House3K_obj/BATCH_1/Set_A/BAT1_SETA_HOUSE1.obj --num_views 16 --output_dir outputs/my_mesh_run --glb_as_mesh
