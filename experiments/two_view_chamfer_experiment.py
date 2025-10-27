@@ -139,6 +139,12 @@ def parse_args() -> argparse.Namespace:
         help="Export GLB as triangular mesh instead of point cloud.",
     )
     parser.add_argument(
+        "--render_batch_size",
+        type=int,
+        default=50,
+        help="Number of candidate views to render per batch to limit VRAM usage.",
+    )
+    parser.add_argument(
         "--skip_visualization",
         action="store_true",
         help="Do not export the interactive camera visualisation HTML.",
@@ -164,20 +170,53 @@ def render_candidate_views(
     poses: torch.Tensor,
     renderer: DifferentiableRenderer,
     fov_degrees: float,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    batch_size: Optional[int] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """Render colour images and point maps for every sampled pose."""
-    mesh_batch = mesh.extend(len(poses)).to(renderer.device)
-    render_out = renderer.forward(
-        mesh_batch,
-        poses,
-        pose_format="cartesian",
-        fov=float(fov_degrees),
-        return_point_maps=True,
-    )
-    if not isinstance(render_out, tuple):
-        raise RuntimeError("Renderer did not return point maps; enable return_point_maps=True.")
-    images, point_maps, valid_masks = render_out
-    return images.detach(), point_maps.detach(), valid_masks.detach()
+    total_views = poses.shape[0]
+    if total_views == 0:
+        raise ValueError("No poses provided for rendering.")
+
+    if batch_size is None or batch_size <= 0 or batch_size >= total_views:
+        batch_size = total_views
+
+    image_chunks: List[torch.Tensor] = []
+    point_map_chunks: List[torch.Tensor] = []
+    valid_mask_chunks: List[torch.Tensor] = []
+    have_valid_masks = False
+
+    for start in range(0, total_views, batch_size):
+        end = min(start + batch_size, total_views)
+        pose_chunk = poses[start:end]
+        mesh_chunk = mesh.extend(len(pose_chunk)).to(renderer.device)
+        render_out = renderer.forward(
+            mesh_chunk,
+            pose_chunk,
+            pose_format="cartesian",
+            fov=float(fov_degrees),
+            return_point_maps=True,
+        )
+        if not isinstance(render_out, tuple):
+            raise RuntimeError("Renderer did not return point maps; enable return_point_maps=True.")
+        images_chunk, point_maps_chunk, valid_masks_chunk = render_out
+        image_chunks.append(images_chunk.detach())
+        point_map_chunks.append(point_maps_chunk.detach())
+        if valid_masks_chunk is not None:
+            have_valid_masks = True
+            valid_mask_chunks.append(valid_masks_chunk.detach())
+
+    images = torch.cat(image_chunks, dim=0)
+    point_maps = torch.cat(point_map_chunks, dim=0)
+    valid_masks: Optional[torch.Tensor]
+    if have_valid_masks:
+        if len(valid_mask_chunks) != len(image_chunks):
+            # Some batches may not return masks; pad with None behaviour.
+            raise RuntimeError("Renderer returned valid masks inconsistently across batches.")
+        valid_masks = torch.cat(valid_mask_chunks, dim=0)
+    else:
+        valid_masks = None
+
+    return images, point_maps, valid_masks
 
 
 def compute_depth_maps(
@@ -634,6 +673,7 @@ def main() -> None:
         pose_tensor,
         renderer,
         args.fov_degrees,
+        batch_size=args.render_batch_size,
     )
     images = images.to(device)
     point_maps = point_maps.to(device)
