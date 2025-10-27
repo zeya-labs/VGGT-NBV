@@ -1,1 +1,10 @@
-python -m experiments.two_view_chamfer_experiment --mesh_path models/House3K_obj/BATCH_1/Set_A/BAT1_SETA_HOUSE1.obj --num_views 16 --output_dir outputs/my_mesh_run --glb_as_mesh
+python -m experiments.two_view_chamfer_experiment \
+ --mesh_path models/House3K_obj/BATCH_7/SET_B/BAT7_SETB_HOUSE33_WTR.obj \
+ --num_views 1000 \
+ --output_dir outputs/my_mesh_1000 \
+ --device_ids 0,1,2,3 \
+ --skip_view_artifacts --skip_glb --skip_depth_png
+
+python -m experiments.two_view_chamfer_experiment \
+--output_dir outputs/BAT1_SETA_HOUSE1.obj \
+--regenerate_html_only

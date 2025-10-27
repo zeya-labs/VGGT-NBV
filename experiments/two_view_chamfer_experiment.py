@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import json
 import math
+import queue
 import random
 import threading
 from pathlib import Path
@@ -67,11 +68,17 @@ from pytorch3d.structures import Meshes
 POSTPROCESS_LOCK = threading.Lock()
 
 
+@dataclass
+class ArtifactTask:
+    kind: str
+    payload: Dict[str, Any]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Evaluate two-view reconstructions across candidate viewpoints."
     )
-    parser.add_argument("--mesh_path", type=Path, required=True, help="Path to the mesh to evaluate.")
+    parser.add_argument("--mesh_path", type=Path, required=False, help="Path to the mesh to evaluate.")
     parser.add_argument(
         "--num_views",
         type=int,
@@ -162,6 +169,16 @@ def parse_args() -> argparse.Namespace:
         help="Do not export GLB files for each view pair.",
     )
     parser.add_argument(
+        "--skip_depth_png",
+        action="store_true",
+        help="Skip saving per-pair depth PNG previews.",
+    )
+    parser.add_argument(
+        "--skip_view_artifacts",
+        action="store_true",
+        help="Skip saving rendered candidate view RGB/depth/pose files under outputs/views.",
+    )
+    parser.add_argument(
         "--glb_as_mesh",
         action="store_true",
         help="Export GLB as triangular mesh instead of point cloud.",
@@ -176,6 +193,17 @@ def parse_args() -> argparse.Namespace:
         "--skip_visualization",
         action="store_true",
         help="Do not export the interactive camera visualisation HTML.",
+    )
+    parser.add_argument(
+        "--max_glb",
+        type=int,
+        default=None,
+        help="Maximum number of GLB files to export (default: export all).",
+    )
+    parser.add_argument(
+        "--regenerate_html_only",
+        action="store_true",
+        help="Rebuild visualisations from existing outputs and exit.",
     )
     return parser.parse_args()
 
@@ -312,6 +340,18 @@ def pose_dict_to_tensor(pose: Dict[str, Sequence[float]]) -> torch.Tensor:
     return torch.tensor(position + quaternion, dtype=torch.float32)
 
 
+def _to_cpu_recursive(data: Any) -> Any:
+    if isinstance(data, torch.Tensor):
+        return data.detach().cpu()
+    if isinstance(data, dict):
+        return {key: _to_cpu_recursive(value) for key, value in data.items()}
+    if isinstance(data, list):
+        return [_to_cpu_recursive(item) for item in data]
+    if isinstance(data, tuple):
+        return tuple(_to_cpu_recursive(item) for item in data)
+    return data
+
+
 def _render_candidate_views_single_device(
     mesh,
     poses: torch.Tensor,
@@ -418,6 +458,34 @@ def _render_device_worker(
             del poses_device
         if locals().get("device", torch.device("cpu")).type == "cuda":
             torch.cuda.empty_cache()
+
+
+def _artifact_worker(task_queue: "queue.Queue[Optional[ArtifactTask]]") -> None:
+    while True:
+        task = task_queue.get()
+        if task is None:
+            task_queue.task_done()
+            break
+        try:
+            if task.kind == "depth_png":
+                save_depth_visualizations(
+                    task.payload["output_dir"],
+                    task.payload["depth_batch"],
+                    task.payload["pair_name"],
+                )
+            elif task.kind == "glb":
+                export_glb_for_pair(
+                    task.payload["output_path"],
+                    task.payload["predictions"],
+                    as_mesh=task.payload["as_mesh"],
+                    confidence_threshold=task.payload["confidence_threshold"],
+                    filter_black_bg=task.payload.get("filter_black_bg", True),
+                    black_bg_threshold=task.payload.get("black_bg_threshold", 0.2),
+                )
+        except Exception as exc:  # pragma: no cover - background errors surface via stdout
+            print(f"[artifact] Error while processing {task.kind}: {exc}")
+        finally:
+            task_queue.task_done()
 
 
 def render_candidate_views(
@@ -627,20 +695,22 @@ def save_depth_visualizations(
 
     depth_cpu = depth_batch.detach().cpu()
     batch, views = depth_cpu.shape[:2]
-    for view_idx in range(views):
-        depth_map = depth_cpu[0, view_idx, ..., 0]
-        finite_mask = torch.isfinite(depth_map)
-        if finite_mask.any():
-            valid_values = depth_map[finite_mask]
-            min_val = valid_values.min()
-            max_val = valid_values.max()
-        else:
-            min_val = depth_map.min()
-        max_val = depth_map.max()
-    denom = (max_val - min_val).clamp_min(1e-6)
-    normalized = (depth_map - min_val) / denom
-    save_path = depth_dir / f"{pair_name}_view_{view_idx}.png"
-    save_image(normalized.unsqueeze(0), str(save_path))
+    for batch_idx in range(batch):
+        for view_idx in range(views):
+            depth_map = depth_cpu[batch_idx, view_idx, ..., 0]
+            finite_mask = torch.isfinite(depth_map)
+            if finite_mask.any():
+                valid_values = depth_map[finite_mask]
+                min_val = valid_values.min()
+                max_val = valid_values.max()
+            else:
+                min_val = depth_map.min()
+                max_val = depth_map.max()
+            denom = (max_val - min_val).clamp_min(1e-6)
+            normalized = (depth_map - min_val) / denom
+            suffix = f"b{batch_idx}_view_{view_idx}" if batch > 1 else f"view_{view_idx}"
+            save_path = depth_dir / f"{pair_name}_{suffix}.png"
+            save_image(normalized.unsqueeze(0), str(save_path))
 
 
 def collate_predictions_for_glb(
@@ -923,9 +993,9 @@ def export_camera_heatmap_visualisation(
                 x=scatter_positions[:, 0],
                 y=scatter_positions[:, 1],
                 z=scatter_positions[:, 2],
-                mode="markers+text",
+                mode="markers",
                 marker=dict(
-                    size=marker_sizes,
+                    size=5,
                     sizemode="diameter",
                     color=scatter_values,
                     colorscale="Turbo",
@@ -936,10 +1006,9 @@ def export_camera_heatmap_visualisation(
                     ),
                     opacity=0.9,
                 ),
-                text=view_labels,
-                textposition="bottom center",
+                hovertext=view_labels,
                 name="Second-view candidates",
-                hovertemplate="view %{text}<extra></extra>",
+                hovertemplate="view %{hovertext}<extra></extra>",
             )
         )
 
@@ -953,10 +1022,10 @@ def export_camera_heatmap_visualisation(
                 x=missing_positions[:, 0],
                 y=missing_positions[:, 1],
                 z=missing_positions[:, 2],
-                mode="markers+text",
-                marker=dict(size=6, color="gray", symbol="x"),
-                text=[f"view {idx} (no chamfer)" for idx in missing_indices],
-                textposition="top center",
+                mode="markers",
+                marker=dict(size=8, color="gray", symbol="x"),
+                hovertext=[f"view {idx} (no chamfer)" for idx in missing_indices],
+                hovertemplate="%{hovertext}<extra></extra>",
                 name="Missing chamfer",
             )
         )
@@ -981,12 +1050,112 @@ def export_camera_heatmap_visualisation(
     print(f"Saved interactive camera heatmap to {output_path}")
 
 
+def _infer_image_hw_from_summary(output_dir: Path, summary: Dict[str, Any]) -> Tuple[int, int]:
+    image_hw = summary.get("image_hw")
+    if image_hw and len(image_hw) == 2:
+        return int(image_hw[0]), int(image_hw[1])
+
+    depth_dir = output_dir / "views" / "depth"
+    if depth_dir.exists():
+        for depth_file in sorted(depth_dir.glob("view_*.pt")):
+            try:
+                depth_tensor = torch.load(depth_file, map_location="cpu")
+            except Exception:
+                continue
+            if depth_tensor.ndim >= 2:
+                return int(depth_tensor.shape[0]), int(depth_tensor.shape[1])
+
+    image_dir = output_dir / "views" / "images"
+    if image_dir.exists():
+        try:
+            from PIL import Image  # type: ignore
+        except ImportError:
+            Image = None
+        else:
+            for image_file in sorted(image_dir.glob("view_*.png")):
+                try:
+                    with Image.open(image_file) as img:
+                        return int(img.height), int(img.width)
+                except Exception:
+                    continue
+
+    raise FileNotFoundError(
+        "Could not infer image resolution. Ensure 'image_hw' is recorded or keep depth/images under outputs/views."
+    )
 
 
+def regenerate_visualisations(args: argparse.Namespace) -> None:
+    output_dir: Path = args.output_dir
+    summary_path = output_dir / "chamfer_results.json"
+    if not summary_path.exists():
+        raise FileNotFoundError(f"Cannot regenerate visualisations: {summary_path} not found.")
 
+    with open(summary_path, "r", encoding="utf-8") as handle:
+        summary_data = json.load(handle)
+
+    mesh_path = summary_data.get("mesh_path")
+    if mesh_path is None:
+        raise ValueError("Summary JSON is missing 'mesh_path'; cannot regenerate visualisations.")
+
+    normalize_method = summary_data.get("normalize_method", args.normalize_method)
+    num_samples = int(summary_data.get("num_gt_samples", args.num_gt_samples))
+    mesh_data = load_and_normalize_mesh(
+        mesh_path=str(mesh_path),
+        normalize_method=normalize_method,
+        num_samples=num_samples,
+    )
+    mesh = mesh_data["normalized_mesh"]
+
+    num_views = int(summary_data.get("num_views", 0))
+    if num_views <= 0:
+        raise ValueError("Summary JSON reports zero candidate views; nothing to regenerate.")
+
+    if not summary_data.get("view_artifacts_saved", True):
+        raise ValueError(
+            "View artifacts were skipped in the original run (--skip_view_artifacts). "
+            "Regeneration requires stored poses/images; rerun without skipping or provide poses manually."
+        )
+
+    pose_dir = output_dir / "views" / "poses"
+    pose_tensors: List[torch.Tensor] = []
+    for view_idx in range(num_views):
+        pose_path = pose_dir / f"view_{view_idx:03d}.json"
+        if not pose_path.exists():
+            raise FileNotFoundError(f"Missing pose file for view {view_idx:03d}: {pose_path}")
+        with open(pose_path, "r", encoding="utf-8") as handle:
+            pose_dict = json.load(handle)
+        pose_tensors.append(pose_dict_to_tensor(pose_dict))
+    pose_tensor = torch.stack(pose_tensors, dim=0)
+
+    results = summary_data.get("results", [])
+    first_view = int(summary_data.get("fixed_first_view", 0))
+    image_hw = _infer_image_hw_from_summary(output_dir, summary_data)
+
+    plot_path = output_dir / "chamfer_per_second_view.png"
+    plot_results(results, first_view, plot_path)
+
+    if not args.skip_visualization:
+        interactive_path = output_dir / "camera_heatmap.html"
+        export_camera_heatmap_visualisation(
+            mesh=mesh,
+            pose_tensor=pose_tensor,
+            chamfer_results=results,
+            first_view=first_view,
+            output_path=interactive_path,
+            image_hw=image_hw,
+        )
+
+    print(f"Regenerated visualisations in {output_dir}.")
 
 def main() -> None:
     args = parse_args()
+    if args.regenerate_html_only:
+        regenerate_visualisations(args)
+        return
+
+    if args.mesh_path is None:
+        raise ValueError("--mesh_path is required unless --regenerate_html_only is specified.")
+
     device_strings = resolve_device_strings(args.device, args.device_ids, args.max_devices)
     if not device_strings:
         raise ValueError("No devices resolved from CLI arguments.")
@@ -1022,7 +1191,10 @@ def main() -> None:
     )
     depth_maps = compute_depth_maps(point_maps, pose_tensor, valid_masks)
 
-    save_candidate_artifacts(output_dir / "views", images, depth_maps, pose_dicts)
+    if not args.skip_view_artifacts:
+        save_candidate_artifacts(output_dir / "views", images, depth_maps, pose_dicts)
+    else:
+        print("Skipping view artifact export as requested; outputs/views/* will not be created.")
 
     point_maps_hw = point_maps.permute(0, 2, 3, 1).contiguous()
     valid_masks_hw = valid_masks.squeeze(1).bool() if valid_masks is not None else None
@@ -1030,6 +1202,19 @@ def main() -> None:
     first_view = random.randrange(args.num_views)
     print(f"Fixed first view index: {first_view}")
     print(f"Using devices: {', '.join(device_strings)}")
+
+    artifact_queue: Optional[queue.Queue[Optional[ArtifactTask]]] = None
+    artifact_workers: List[threading.Thread] = []
+    if not (args.skip_glb and args.skip_depth_png):
+        artifact_queue = queue.Queue()
+        num_artifact_workers = max(1, min(4, len(device_strings)))
+        for _ in range(num_artifact_workers):
+            worker = threading.Thread(target=_artifact_worker, args=(artifact_queue,), daemon=True)
+            worker.start()
+            artifact_workers.append(worker)
+
+    glb_export_counter = {"count": 0}
+    glb_counter_lock = threading.Lock()
 
     initial_image_cpu = images[first_view]
     initial_pose_cpu = pose_tensor[first_view]
@@ -1047,7 +1232,7 @@ def main() -> None:
         mapanything.eval()
         mapanything.to(device_obj)
         renderer_ctx = DifferentiableRenderer(image_size=args.image_size, device=device_str)
-        loss_fn = ReconstructionLoss(renderer=renderer_ctx, log_tensorboard=False)
+        loss_fn = ReconstructionLoss(renderer=renderer_ctx, save_point_clouds=False, log_tensorboard=False)
         loss_fn.eval()
 
         mesh_device = mesh_cpu.to(device_obj)
@@ -1149,7 +1334,6 @@ def main() -> None:
                     )
 
                 pair_name = f"pair_{first_view:03d}_{idx:03d}"
-                save_depth_visualizations(output_dir, combined_depth, pair_name)
 
                 new_point_map = point_maps_hw_cpu[idx].unsqueeze(0).unsqueeze(0).to(ctx.device)
                 gt_point_maps = torch.cat([ctx.initial_point_map, new_point_map], dim=1).contiguous()
@@ -1197,17 +1381,39 @@ def main() -> None:
                     }
                 )
 
-                if not args.skip_glb:
-                    glb_name = f"pair_{first_view:03d}_{idx:03d}.glb"
-                    glb_path = (output_dir / "glb") / glb_name
-                    export_glb_for_pair(
-                        glb_path,
-                        postprocessed_predictions,
-                        as_mesh=args.glb_as_mesh,
-                        confidence_threshold=args.confidence_threshold,
-                        filter_black_bg=True,
-                        black_bg_threshold=0.2,
-                    )
+                depth_task_payload = None
+                if artifact_queue is not None and not args.skip_depth_png:
+                    depth_task_payload = {
+                        "output_dir": output_dir,
+                        "depth_batch": combined_depth.detach().cpu(),
+                        "pair_name": pair_name,
+                    }
+
+                glb_task_payload = None
+                if artifact_queue is not None and not args.skip_glb:
+                    should_export_glb = True
+                    with glb_counter_lock:
+                        if args.max_glb is not None and glb_export_counter["count"] >= args.max_glb:
+                            should_export_glb = False
+                        else:
+                            glb_export_counter["count"] += 1
+                    if should_export_glb:
+                        predictions_cpu = _to_cpu_recursive(postprocessed_predictions)
+                        glb_task_payload = {
+                            "output_path": (output_dir / "glb") / f"{pair_name}.glb",
+                            "predictions": predictions_cpu,
+                            "as_mesh": args.glb_as_mesh,
+                            "confidence_threshold": args.confidence_threshold,
+                            "filter_black_bg": True,
+                            "black_bg_threshold": 0.2,
+                        }
+
+                if depth_task_payload is not None:
+                    artifact_queue.put(ArtifactTask(kind="depth_png", payload=depth_task_payload))
+                if glb_task_payload is not None:
+                    artifact_queue.put(ArtifactTask(kind="glb", payload=glb_task_payload))
+                del postprocessed_predictions
+                del raw_predictions
         return local_results
 
     num_contexts = len(device_contexts)
@@ -1228,18 +1434,20 @@ def main() -> None:
     results.sort(key=lambda item: item["second_view_index"])
 
     summary_path = output_dir / "chamfer_results.json"
+    summary_payload = {
+        "mesh_path": str(args.mesh_path),
+        "num_views": args.num_views,
+        "fixed_first_view": first_view,
+        "confidence_threshold": args.confidence_threshold,
+        "results": results,
+        "image_hw": [int(images.shape[-2]), int(images.shape[-1])],
+        "normalize_method": args.normalize_method,
+        "num_gt_samples": args.num_gt_samples,
+        "max_glb_exported": glb_export_counter["count"],
+        "view_artifacts_saved": not args.skip_view_artifacts,
+    }
     with open(summary_path, "w", encoding="utf-8") as handle:
-        json.dump(
-            {
-                "mesh_path": str(args.mesh_path),
-                "num_views": args.num_views,
-                "fixed_first_view": first_view,
-                "confidence_threshold": args.confidence_threshold,
-                "results": results,
-            },
-            handle,
-            indent=2,
-        )
+        json.dump(summary_payload, handle, indent=2)
 
     plot_path = output_dir / "chamfer_per_second_view.png"
     plot_results(results, first_view, plot_path)
@@ -1253,6 +1461,14 @@ def main() -> None:
             output_path=interactive_path,
             image_hw=tuple(int(dim) for dim in images.shape[-2:]),
         )
+
+    if artifact_queue is not None:
+        for _ in artifact_workers:
+            artifact_queue.put(None)
+        artifact_queue.join()
+        for worker in artifact_workers:
+            worker.join()
+
     print(f"Experiment complete. Results saved to {summary_path} and {plot_path}.")
 
 

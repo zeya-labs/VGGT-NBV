@@ -367,7 +367,7 @@ class ReconstructionLoss(nn.Module):
         loss_components: Dict[str, float] = {}
 
         chamfer_save_dir: Optional[str]
-        print(point_cloud_dir)
+        # print(point_cloud_dir)
         if self.save_point_clouds:
             if point_cloud_dir is not None:
                 chamfer_save_dir = point_cloud_dir
