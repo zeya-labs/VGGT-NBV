@@ -152,6 +152,31 @@ def parse_args() -> argparse.Namespace:
         help="Maximum number of points retained per cloud when logging.",
     )
     parser.add_argument(
+        "--camera_base_radius",
+        type=float,
+        default=2.2,
+        help="Base camera radius used for spherical sampling (see camera generator).",
+    )
+    parser.add_argument(
+        "--camera_radius_variation",
+        type=float,
+        default=0.0,
+        help="Uniform variation around base radius for sampling cameras.",
+    )
+    parser.add_argument(
+        "--camera_radius_mode",
+        type=str,
+        default="random",
+        choices=("constant", "random", "layered"),
+        help="How to sample camera radius: constant, random (default), or layered shells.",
+    )
+    parser.add_argument(
+        "--camera_radius_layers",
+        type=int,
+        default=1,
+        help="Number of radial layers when radius mode is 'layered'.",
+    )
+    parser.add_argument(
         "--hemisphere",
         type=str,
         default="upper",
@@ -1177,6 +1202,10 @@ def main() -> None:
         args.num_views,
         seed=args.seed,
         hemisphere=args.hemisphere,
+        base_radius=args.camera_base_radius,
+        radius_variation=args.camera_radius_variation,
+        radius_mode=args.camera_radius_mode,
+        radius_layers=args.camera_radius_layers,
     )
     pose_tensor = torch.stack([pose_dict_to_tensor(p) for p in pose_dicts])
 
@@ -1443,6 +1472,10 @@ def main() -> None:
         "image_hw": [int(images.shape[-2]), int(images.shape[-1])],
         "normalize_method": args.normalize_method,
         "num_gt_samples": args.num_gt_samples,
+        "camera_base_radius": args.camera_base_radius,
+        "camera_radius_variation": args.camera_radius_variation,
+        "camera_radius_mode": args.camera_radius_mode,
+        "camera_radius_layers": args.camera_radius_layers,
         "max_glb_exported": glb_export_counter["count"],
         "view_artifacts_saved": not args.skip_view_artifacts,
     }

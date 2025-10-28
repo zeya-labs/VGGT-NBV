@@ -39,7 +39,8 @@ class CameraPoseGenerator:
         sphere_positions: np.ndarray,
         seed: int = 0,
         base_radius: float = 2.5,
-        radius_variation: float = 0
+        radius_variation: float = 0,
+        radii: Optional[np.ndarray] = None
     ) -> List[Dict[str, List[float]]]:
         """
         从球面位置生成相机位姿的通用方法
@@ -49,18 +50,25 @@ class CameraPoseGenerator:
             seed: 随机种子
             base_radius: 基础相机距离
             radius_variation: 距离变化范围
-            
+            radii: 可选的半径数组
+        
         Returns:
             camera_poses: 相机位姿列表，每个元素包含position和quaternion
         """
         # 使用局部随机数生成器，避免影响全局随机状态
         rng = np.random.RandomState(seed)
+        if radii is not None:
+            if len(radii) != len(sphere_positions):
+                raise ValueError("radii must have the same length as sphere_positions.")
+            radii = np.asarray(radii, dtype=np.float32)
         
         poses = []
         
         for i, direction in enumerate(sphere_positions):
-            # 添加随机距离变化
-            radius = base_radius + rng.uniform(-radius_variation, radius_variation)
+            if radii is not None:
+                radius = float(radii[i])
+            else:
+                radius = base_radius + rng.uniform(-radius_variation, radius_variation)
             
             # 计算相机位置
             position = direction * radius
@@ -90,9 +98,11 @@ class CameraPoseGenerator:
         self, 
         num_views: int, 
         seed: int = 0,
-        base_radius: float = 2.4, # 0.9, 0.8是2.5，0.7是2.86
+        base_radius: float = 2.2, # 0.9, 0.8是2.5，0.7是2.86
         radius_variation: float = 0,
-        hemisphere: str = 'full'
+        hemisphere: str = 'full',
+        radius_mode: str = 'random',
+        radius_layers: int = 1
     ) -> List[Dict[str, List[float]]]:
         """
         生成相机位姿
@@ -107,15 +117,66 @@ class CameraPoseGenerator:
         Returns:
             camera_poses: 相机位姿列表，每个元素包含position和quaternion
         """
-        if hemisphere == 'upper':
-            # 生成上半球面上的均匀分布点
-            sphere_positions, _ = generate_fibonacci_upper_hemisphere_points(num_views, radius=1.0, up_axis=self.up_axis)
+        radius_mode = (radius_mode or "random").lower()
+        radii: Optional[np.ndarray] = None
+        if radius_mode == 'layered' and radius_layers > 1 and radius_variation > 0:
+            layers = max(1, int(radius_layers))
+            radius_min = max(1e-6, base_radius - radius_variation)
+            radius_max = max(radius_min, base_radius + radius_variation)
+            layer_radii = np.linspace(radius_min, radius_max, layers, dtype=np.float32)
+            counts = np.full(layers, num_views // layers, dtype=int)
+            counts[: num_views % layers] += 1
+            positions_list: List[np.ndarray] = []
+            radii_list: List[np.ndarray] = []
+            for layer_idx, count in enumerate(counts):
+                if count <= 0:
+                    continue
+                if hemisphere == 'upper':
+                    layer_positions, _ = generate_fibonacci_upper_hemisphere_points(
+                        count, radius=1.0, up_axis=self.up_axis
+                    )
+                else:
+                    layer_positions, _ = generate_fibonacci_sphere_points(count, radius=1.0)
+                positions_list.append(layer_positions)
+                radii_list.append(np.full(count, layer_radii[layer_idx], dtype=np.float32))
+            if positions_list:
+                sphere_positions = np.concatenate(positions_list, axis=0)
+                radii = np.concatenate(radii_list, axis=0)
+            else:
+                if hemisphere == 'upper':
+                    sphere_positions, _ = generate_fibonacci_upper_hemisphere_points(
+                        num_views, radius=1.0, up_axis=self.up_axis
+                    )
+                else:
+                    sphere_positions, _ = generate_fibonacci_sphere_points(num_views, radius=1.0)
+                radii = np.full(num_views, base_radius, dtype=np.float32)
         else:
-            # 生成球面上的均匀分布点
-            sphere_positions, _ = generate_fibonacci_sphere_points(num_views, radius=1.0)
-        
+            if hemisphere == 'upper':
+                sphere_positions, _ = generate_fibonacci_upper_hemisphere_points(
+                    num_views, radius=1.0, up_axis=self.up_axis
+                )
+            else:
+                sphere_positions, _ = generate_fibonacci_sphere_points(num_views, radius=1.0)
+
+            if radius_mode == 'constant' or radius_variation <= 0:
+                radii = np.full(num_views, base_radius, dtype=np.float32)
+            elif radius_mode == 'random':
+                radii = None  # defer to random sampling
+            else:
+                # layered with insufficient variation defaults to constant radius
+                radii = np.full(num_views, base_radius, dtype=np.float32)
+
+        if radius_mode not in {'constant', 'random', 'layered'}:
+            raise ValueError(
+                f"Unsupported radius_mode '{radius_mode}'. Expected 'constant', 'random', or 'layered'."
+            )
+
         return self._generate_poses_from_positions(
-            sphere_positions, seed, base_radius, radius_variation
+            sphere_positions,
+            seed,
+            base_radius,
+            radius_variation,
+            radii=radii,
         )
     
     def save_camera_poses(self, camera_poses: List[Dict], filepath: str):
