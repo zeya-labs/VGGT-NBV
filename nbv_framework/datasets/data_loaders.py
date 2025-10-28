@@ -47,7 +47,16 @@ def create_data_loader(
             dataset_type = "nbv"  # 默认类型
         
         collate_fn = get_collate_fn(dataset_type)
-    
+
+    if drop_last:
+        try:
+            dataset_size = len(dataset)
+        except TypeError:
+            dataset_size = None
+        if dataset_size is not None and dataset_size < batch_size:
+            # Avoid discarding the only available batch when the dataset is tiny
+            drop_last = False
+
     return DataLoader(
         dataset,
         batch_size=batch_size,

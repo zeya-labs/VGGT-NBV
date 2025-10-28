@@ -358,20 +358,21 @@ class House3KDataset(BaseDataset):
         return self._camera_generator.generate_camera_poses(num_views, seed=seed, hemisphere='upper')
     
     def _get_renderer(self):
-        """获取渲染器（延迟初始化）"""
+        """获取渲染器（延迟初始化），失败时立即抛出异常。"""
         if self._renderer is None:
             try:
                 from ..rendering.differentiable_renderer import DifferentiableRenderer
-                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-                self._renderer = DifferentiableRenderer(
-                    image_size=self.image_size,
-                    device=device
-                )
-            except ImportError as e:
-                print(f"警告：无法导入渲染器: {e}")
-                print("将使用模拟图像数据")
-                self._renderer = None
-        
+            except ImportError as exc:
+                raise RuntimeError(
+                    "无法导入 DifferentiableRenderer，请确认 PyTorch3D 依赖已正确安装。"
+                ) from exc
+
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self._renderer = DifferentiableRenderer(
+                image_size=self.image_size,
+                device=device
+            )
+
         return self._renderer
     
     # def _render_images_from_mesh(
@@ -455,32 +456,26 @@ class House3KDataset(BaseDataset):
             渲染的图像张量 [N, 3, H, W]
         """
         renderer = self._get_renderer()
-        
-        if renderer is None:
-            # 如果渲染器不可用，返回随机图像作为占位符
-            print(f"警告：渲染器不可用，使用随机图像")
-            num_views = len(selected_indices)
-            return torch.rand(num_views, 3, self.image_size, self.image_size)
-        
+
         try:
             # 使用已经归一化的网格
             mesh = gt_mesh_data['normalized_mesh']
 
             # 选择对应的相机位姿
             selected_poses = [camera_poses[i] for i in selected_indices]
-            
+
             # 为每个相机位姿复制网格
             device = renderer.device
-            
+
             # 转换位姿格式
             pose_tensors = [pose_dict_to_tensor(pose, device=device) for pose in selected_poses]
             camera_poses_tensor = torch.cat(pose_tensors, dim=0)
             mesh = mesh.to(device)
-            
+
             # 创建批次化的网格，每个相机位姿对应一个网格副本
             num_views = len(selected_poses)
             meshes_batch = mesh.extend(num_views)
-            
+
             # 渲染图像
             with torch.no_grad():
                 rendered_images = renderer.forward(
@@ -489,15 +484,12 @@ class House3KDataset(BaseDataset):
                     pose_format="cartesian",
                     fov=60.0
                 )
-            
+
             # 确保返回CPU张量，避免pin_memory问题
             return rendered_images.cpu()
-            
-        except Exception as e:
-            print(f"渲染失败: {e}")
-            # 返回随机图像作为后备
-            num_views = len(selected_indices)
-            return torch.rand(num_views, 3, self.image_size, self.image_size)
+
+        except Exception as exc:
+            raise RuntimeError("渲染 House3K 样本失败，请检查网格或相机位姿数据。") from exc
     
     def _load_images(self, image_paths: List[str]) -> torch.Tensor:
         """
@@ -548,11 +540,10 @@ class House3KDataset(BaseDataset):
             )
 
             return rendered_images
-        else:
-            # 后备方案：返回随机图像
-            print(f"警告：无法获取数据项上下文，使用随机图像")
-            num_views = len(virtual_paths)
-            return torch.rand(num_views, 3, self.image_size, self.image_size)
+
+        raise RuntimeError(
+            "无法获取当前数据项或网格上下文，House3KDataset 无法渲染虚拟图像。"
+        )
     
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """
