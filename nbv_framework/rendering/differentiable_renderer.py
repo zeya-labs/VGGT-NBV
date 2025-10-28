@@ -103,7 +103,7 @@ class DifferentiableRenderer(nn.Module):
             # print(f"   渲染分辨率: {self.render_image_size}x{self.render_image_size} -> 下采样到: {image_size}x{image_size}")
             self.raster_settings = RasterizationSettings(
                 image_size=self.render_image_size,
-                blur_radius=0.0,
+                blur_radius=1e-5,
                 faces_per_pixel=1,
             )
         
