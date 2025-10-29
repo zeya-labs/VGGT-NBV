@@ -46,10 +46,13 @@ def render_gt_point_maps(
 
     renderer_device = renderer.device
 
-    if camera_poses.dim() == 2:
-        camera_poses = camera_poses.unsqueeze(0)
-
     batch_size = len(mesh_batch)
+    if camera_poses.dim() == 2:
+        if camera_poses.shape[0] == batch_size:
+            camera_poses = camera_poses.unsqueeze(1)
+        else:
+            camera_poses = camera_poses.unsqueeze(0)
+
     if camera_poses.shape[0] != batch_size:
         if camera_poses.shape[0] == 1 and batch_size > 1:
             camera_poses = camera_poses.expand(batch_size, -1, -1)

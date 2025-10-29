@@ -118,8 +118,10 @@ class MapAnythingWrapper(nn.Module):
         images: torch.Tensor,
         camera_poses: torch.Tensor,
         *,
+        depth_z: Optional[torch.Tensor] = None,
         is_metric_scale: bool = False,
         fov_degrees: Optional[float] = None,
+        view_save_dir: Optional[str] = None,
     ) -> torch.Tensor:
         """提取多视角场景特征, 返回形状 [B, S, P, D]."""
         effective_fov = self.default_fov_degrees if fov_degrees is None else fov_degrees
@@ -130,11 +132,14 @@ class MapAnythingWrapper(nn.Module):
             device=self.device,
             fov_degrees=effective_fov,
             is_metric_scale=is_metric_scale,
+            depth_z=depth_z,
+            save_dir=view_save_dir,
         )
         batch_size = normalized.shape[0]
         self._configure_geometric_inputs(
             use_calibration=True,
             use_pose=True,
+            use_depth=depth_z is not None,
         )
         try:
             encoder_features = self.base_model._encode_n_views(views)
@@ -171,8 +176,10 @@ class MapAnythingWrapper(nn.Module):
         images: torch.Tensor,
         camera_poses: torch.Tensor,
         *,
+        depth_z: Optional[torch.Tensor] = None,
         is_metric_scale: bool = False,
         fov_degrees: Optional[float] = None,
+        view_save_dir: Optional[str] = None,
     ) -> TensorDict:
         """运行 MapAnything 前向, 返回与 VGGTWrapper 对齐的关键输出."""
         effective_fov = self.default_fov_degrees if fov_degrees is None else fov_degrees
@@ -183,11 +190,17 @@ class MapAnythingWrapper(nn.Module):
             device=self.device,
             fov_degrees=effective_fov,
             is_metric_scale=is_metric_scale,
+            depth_z=depth_z,
+            save_dir=view_save_dir,
         )
         self._configure_geometric_inputs(
             use_calibration=True,
             use_pose=True,
+            use_depth=depth_z is not None,
         )
+        # 输出views(list)的键
+        # print("views keys:", views[0].keys())
+
         try:
             predictions = self.base_model.forward(
                 views, memory_efficient_inference=self.memory_efficient_inference
@@ -195,7 +208,7 @@ class MapAnythingWrapper(nn.Module):
         finally:
             self._restore_geometric_inputs()
         # 列出 predictions 中的所有键
-        print("predictions keys:", predictions[0].keys())
+        # print("predictions keys:", predictions[0].keys())
         # predictions keys: dict_keys(['pts3d', 'pts3d_cam', 'ray_directions', 'depth_along_ray', 'cam_trans', 'cam_quats', 'metric_scaling_factor', 'conf', 'non_ambiguous_mask', 'non_ambiguous_mask_logits'])
         recon = self._stack_predictions(predictions)
         self._maybe_retain_grad_from_result(recon, normalized)
@@ -207,22 +220,28 @@ class MapAnythingWrapper(nn.Module):
         camera_poses: torch.Tensor,
         *,
         mode: str = "encode",
+        depth_z: Optional[torch.Tensor] = None,
         is_metric_scale: bool = False,
         fov_degrees: Optional[float] = None,
+        view_save_dir: Optional[str] = None,
     ) -> Union[torch.Tensor, TensorDict]:
         if mode == "encode":
             return self.extract_scene_features(
                 images,
                 camera_poses,
+                depth_z=depth_z,
                 is_metric_scale=is_metric_scale,
                 fov_degrees=fov_degrees,
+                view_save_dir=view_save_dir,
             )
         if mode == "reconstruct":
             return self.reconstruct_and_evaluate(
                 images,
                 camera_poses,
+                depth_z=depth_z,
                 is_metric_scale=is_metric_scale,
                 fov_degrees=fov_degrees,
+                view_save_dir=view_save_dir,
             )
         raise ValueError(f"Unknown mode: {mode}. Supported modes: encode, reconstruct")
 

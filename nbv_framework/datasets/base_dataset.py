@@ -253,17 +253,10 @@ class BaseDataset(Dataset, ABC):
                 num_samples=num_samples,
             )
             return mesh_data
-        except Exception as e:
-            print(f"Error loading mesh {mesh_path}: {e}")
-            # 返回默认数据以避免训练中断
-            return {
-                "mesh_path": mesh_path,
-                "vertices": torch.randn(1000, 3),
-                "faces": torch.randint(0, 1000, (1800, 3)),
-                "gt_points": torch.randn(num_samples, 3),
-                "normalize_method": normalize_method,
-                "num_samples": num_samples,
-            }
+        except Exception as exc:
+            raise RuntimeError(
+                f"加载网格失败：{mesh_path}，请检查数据文件与归一化配置。"
+            ) from exc
     
     def _select_initial_images(self, available_images: List[str]) -> Tuple[List[str], List[int]]:
         """

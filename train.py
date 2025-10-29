@@ -51,19 +51,21 @@ def setup_config() -> Dict[str, Any]:
         "policy_output_mode": "position_only",
         
         # 训练配置
-        "learning_rate": 1e-4,
+        "learning_rate": 1e-5,
         "batch_size": 1,  # 根据GPU内存调整
         "num_epochs": 1000,
-        "normalize_method": "mean",
+        "normalize_method": "quantile",
         "num_samples": 20000,
         "weight_decay": 1e-5,
+        "enable_validation": False,
+        "use_epoch_seed": False,
         
         # 数据配置
         "synthetic_data_root": "./models/synthetic_data",
-        "min_initial_views": 3,
-        "max_initial_views": 3,
+        "min_initial_views": 1,
+        "max_initial_views": 1,
         "randomize_initial_views": True,
-        "image_size": 224,
+        "image_size": 518,
         "up_axis": "Y",  # 数据集模型默认上方向 ('Y' 或 'Z')
         "max_meshes": 1,  # 限制加载的mesh数量，用于控制训练规模
         
@@ -171,9 +173,10 @@ def setup_data_loaders(config: Dict[str, Any]):
     # 选项2: House3K数据集
     dataset_train_configs = [
         {
-            "name": "house3k_data",
+            "name": "House3KDataset",
             "type": "house3k",
-            "data_root": "/mnt/sdb/chenmohan/VGGT-NBV/models/House3K_obj",
+            # "data_root": "/mnt/sdb/chenmohan/VGGT-NBV/models/House3K_obj",
+            "data_root": "/mnt/sdb/chenmohan/VGGT-NBV/models/test",
             "num_initial_views": config["max_initial_views"],
             "image_size": config["image_size"],
             "normalize_method": config["normalize_method"],
@@ -187,7 +190,7 @@ def setup_data_loaders(config: Dict[str, Any]):
 
     dataset_val_configs = [
         {
-            "name": "house3k_data",
+            "name": "House3KDataset",
             "type": "house3k",
             "data_root": "/mnt/sdb/chenmohan/VGGT-NBV/models/House3K_obj",
             "num_initial_views": config["max_initial_views"],
@@ -278,6 +281,8 @@ def train_nbv_policy(config: Dict[str, Any],
         min_initial_views=config["min_initial_views"],
         max_initial_views=config["max_initial_views"],
         randomize_initial_views=config.get("randomize_initial_views", True),
+        enable_validation=config.get("enable_validation", False),
+        use_epoch_seed=config.get("use_epoch_seed", False),
     )
     
     # 断点续训逻辑
@@ -312,9 +317,7 @@ def train_nbv_policy(config: Dict[str, Any],
         val_loader=val_loader,
         save_dir=config["save_dir"]
     )
-    
-    print("Training completed!")
-    
+
     return trainer
 
 def run_evaluation(config: Dict[str, Any],

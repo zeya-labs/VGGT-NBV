@@ -54,8 +54,8 @@ class ReconstructionLoss(nn.Module):
             log_to_tensorboard=log_tensorboard,
         )
         self.viewpoint_loss = ViewpointLoss()
-        self.pose_outer_radius = 4.0
-        self.pose_inner_radius = 2.0
+        self.pose_outer_radius = 8.0
+        self.pose_inner_radius = 1.5
         self.pose_floor_margin = 1.0
 
     @staticmethod
@@ -330,13 +330,15 @@ class ReconstructionLoss(nn.Module):
             "pose_penalty_outer": outer_penalty,
             "pose_penalty_floor": floor_penalty,
         }
-        # print("target_positions:",target_positions)
-        # print("distances:",distances)
+        print("====================================================")
+        print("target_positions:",target_positions)
+        print("distances:",distances)
 
-        # print("pose_penalty_inner:", inner_violation)
-        # print("pose_penalty_outer:", outer_violation)
-        # print("pose_penalty_floor:", floor_violation)
+        print("pose_penalty_inner:", inner_violation)
+        print("pose_penalty_outer:", outer_violation)
+        print("pose_penalty_floor:", floor_violation)
 
+        print("====================================================")
         penalty_value = torch.stack(list(penalty_terms.values())).sum()
         weighted_penalty = pose_penalty_weight * penalty_value
 
@@ -367,7 +369,7 @@ class ReconstructionLoss(nn.Module):
         loss_components: Dict[str, float] = {}
 
         chamfer_save_dir: Optional[str]
-        print(point_cloud_dir)
+        # print(point_cloud_dir)
         if self.save_point_clouds:
             if point_cloud_dir is not None:
                 chamfer_save_dir = point_cloud_dir

@@ -27,10 +27,9 @@ if TYPE_CHECKING:
     from ..models import MapAnythingWrapper, BaseNBVPolicy
 from ..rendering import DifferentiableRenderer
 from .loss import ReconstructionLoss, ChamferDistance
-from ..utils.camera_utils import position_to_pose_tensor
-from ..utils.mapanything_views import (
-    compute_pinhole_intrinsics,
-    pose7d_to_opencv_cam2world_with_official_func,
+from ..utils.camera_utils import (
+    position_to_pose_tensor,
+    world_points_to_camera_depth,
 )
 from ..utils.render_utils import render_gt_point_maps
 
@@ -55,7 +54,8 @@ class NBVTrainer:
                  weight_decay: float = 1e-5,
                  log_dir: str = "runs/nbv_experiment",
                  device: str = "cuda",
-                 enable_validation: bool = False):
+                 enable_validation: bool = False,
+                 use_epoch_seed: bool = False):
         """
         初始化训练器
         
@@ -81,6 +81,7 @@ class NBVTrainer:
         self.num_epochs = num_epochs
         self.log_dir = log_dir
         self.enable_validation = enable_validation
+        self.use_epoch_seed = use_epoch_seed
 
         self.min_initial_views = min_initial_views
         self.max_initial_views = max_initial_views
@@ -149,14 +150,6 @@ class NBVTrainer:
             self.writer.add_scalar(f'train/gradients/vggt/{key}_grad_mean_abs', mean_val, self.global_step) if has_grad else None
             self.writer.add_scalar(f'train/gradients/vggt/{key}_has_grad', has_grad, self.global_step) if has_grad else None
 
-        input_norm = grad_stats.get('input/grad_norm', 0.0)
-        input_mean = grad_stats.get('input/grad_mean_abs', 0.0)
-        input_has_grad = 1.0 if 'input/grad_norm' in grad_stats else 0.0
-
-        self.writer.add_scalar('train/gradients/vggt/input_grad_norm', input_norm, self.global_step) if input_has_grad else None
-        self.writer.add_scalar('train/gradients/vggt/input_grad_mean_abs', input_mean, self.global_step) if input_has_grad else None
-        self.writer.add_scalar('train/gradients/vggt/input_has_grad', input_has_grad, self.global_step) if input_has_grad else None
-
         has_new_grad = 1.0 if new_images.grad is not None else 0.0
         self.writer.add_scalar('train/gradients/new_view_has_grad', has_new_grad, self.global_step)
 
@@ -168,16 +161,17 @@ class NBVTrainer:
             new_view_mean = 0.0
             self.logger.warning("new_images gradient is None at global step %d", self.global_step)
 
-        self.writer.add_scalar('train/gradients/new_view_grad_norm', new_view_norm, self.global_step)
-        self.writer.add_scalar('train/gradients/new_view_grad_mean_abs', new_view_mean, self.global_step)
+        self.writer.add_scalar('new_view_gradients/norm', new_view_norm, self.global_step)
+        self.writer.add_scalar('new_view_gradients/mean_abs', new_view_mean, self.global_step)
 
     def _select_initial_views(
         self,
         initial_images: torch.Tensor,
         camera_poses: torch.Tensor,
         *,
+        depth_z: Optional[torch.Tensor] = None,
         randomize: bool,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], torch.Tensor, int]:
         """选取训练/验证需要的初始视图子集。"""
 
         min_views = max(self.min_initial_views, 1)
@@ -205,11 +199,13 @@ class NBVTrainer:
         selection, _ = torch.sort(selection)
         initial_images = initial_images.index_select(1, selection)
         camera_poses = camera_poses.index_select(1, selection)
+        if depth_z is not None:
+            depth_z = depth_z.index_select(1, selection)
 
         self._last_initial_view_count = num_views
         self._last_initial_view_indices = selection.detach().cpu()
 
-        return initial_images, camera_poses, selection, num_views
+        return initial_images, camera_poses, depth_z, selection, num_views
     
     def training_step(self, 
                      batch: Dict[str, torch.Tensor],
@@ -232,16 +228,20 @@ class NBVTrainer:
             self.optimizer.zero_grad()
         else:
             self.policy_network.eval()
-        
+
         initial_images = batch["initial_images"]  # [B, N, 3, H, W]
         gt_mesh_data = batch["gt_mesh_data"]
         camera_poses_batch = batch["camera_poses"]
         gt_point_maps = gt_mesh_data.get("gt_point_maps")
         gt_valid_masks = gt_mesh_data.get("gt_valid_masks")
-
-        initial_images, camera_poses_batch, selection, active_view_count = self._select_initial_views(
+        depth_z_batch = gt_mesh_data.get("depth_z")
+        # print("keys",batch["gt_mesh_data"].keys())
+        # gt_mesh_data_keys dict_keys(['mesh_path', 'gt_points', 'normalize_method', 'num_samples', 'gt_point_maps', 'gt_valid_masks', 'original_mesh', 'normalized_mesh'])
+        # batch_keys dict_keys(['initial_images', 'camera_poses', 'mesh_path', 'batch_name', 'set_name', 'model_name', 'source_dataset', 'source_dataset_idx', 'source_dataset_sample_idx', 'gt_mesh_data'])
+        initial_images, camera_poses_batch, depth_z_batch, selection, active_view_count = self._select_initial_views(
             initial_images,
             camera_poses_batch,
+            depth_z=depth_z_batch,
             randomize=backprop,
         )
 
@@ -250,6 +250,7 @@ class NBVTrainer:
             initial_images,
             camera_poses_batch,
             is_metric_scale=False,
+            depth_z=depth_z_batch,
         )
         # print("scene_features shape:", scene_features.shape)
         # 步骤2: 动作提议 - 策略网络输出下一个相机位姿
@@ -351,25 +352,40 @@ class NBVTrainer:
         gt_valid_masks = torch.cat([gt_valid_masks, new_valid_masks], dim=1).contiguous().to(dtype=torch.bool)
         gt_mesh_data["gt_point_maps"] = gt_point_maps
         gt_mesh_data["gt_valid_masks"] = gt_valid_masks
-        
+        if depth_z_batch is not None:
+            new_depth_z = world_points_to_camera_depth(
+                new_point_maps,
+                next_camera_pose.unsqueeze(1),
+                valid_masks=new_valid_masks,
+                writer=tb_writer,
+                step=render_step,
+                log_prefix="DepthZ/NewView",
+                train_flag=backprop,
+            ).detach()
+            if depth_z_batch.device != new_depth_z.device:
+                depth_z_batch = depth_z_batch.to(new_depth_z.device)
+            if depth_z_batch.dtype != new_depth_z.dtype:
+                depth_z_batch = depth_z_batch.to(new_depth_z.dtype)
+            depth_z_batch = torch.cat([depth_z_batch, new_depth_z], dim=1).contiguous()
+            gt_mesh_data["depth_z"] = depth_z_batch
+            batch["depth_z"] = depth_z_batch
         # 步骤4: 质量评估 - VGGT重建并计算质量
         # 将 new_images 从 [B, 3, H, W] 扩展为 [B, 1, 3, H, W]
-        new_images_expanded = new_images.unsqueeze(1)  # [B, 1, 3, H, W]
+        new_images_expanded = new_images.unsqueeze(1).detach()  # [B, 1, 3, H, W]
         
         # 直接在第二个维度上拼接，得到 [B, N+1, 3, H, W]
         combined_images_batch = torch.cat([initial_images, new_images_expanded], dim=1)
         
         # 保存视图数据（图像 + 相机标定）到日志目录
-        step_output_dir = self._save_combined_images(
-            combined_images_batch=combined_images_batch,
-            combined_camera_poses=combined_camera_poses
-        )
+        step_output_dir = os.path.join(self.log_dir, "images", f"step_{self.global_step:06d}")
         
         # VGGT一次性对整个batch进行重建与评估
         recon_data = self.vggt_wrapper.reconstruct_and_evaluate(
             combined_images_batch,
             combined_camera_poses,
+            depth_z=depth_z_batch,
             is_metric_scale=False,
+            view_save_dir=step_output_dir,
         )
         # print("===================loss开始计算===================")
         # 计算重建质量损失
@@ -400,9 +416,9 @@ class NBVTrainer:
             if pose_grad is None:
                 self.logger.warning("next_camera_pose grad is None")
 
-            self.writer.add_scalar('train/gradients/next_camera_grad_norm', pose_grad_norm, self.global_step)
-            self.writer.add_scalar('train/gradients/next_camera_grad_mean_abs', pose_grad_mean, self.global_step)
-            self.writer.add_scalar('train/gradients/next_camera_has_grad', 1.0 if pose_grad is not None else 0.0, self.global_step)
+            self.writer.add_scalar('next_camera_pose_grad/norm', pose_grad_norm, self.global_step)
+            self.writer.add_scalar('next_camera_pose_grad/mean_abs', pose_grad_mean, self.global_step)
+            self.writer.add_scalar('next_camera_pose_grad/has_grad', 1.0 if pose_grad is not None else 0.0, self.global_step)
 
             # grad_stats, missing = [], []
             # for name, param in self.policy_network.named_parameters():
@@ -436,8 +452,12 @@ class NBVTrainer:
             total_policy_norm = torch.nn.utils.clip_grad_norm_(
                 self.policy_network.parameters(), max_norm=1.0
             )
-            self.writer.add_scalar('train/gradients/policy_total_norm', total_policy_norm.item(), self.global_step)
-            # self.writer.add_scalar('train/gradients/policy_missing_params', float(len(missing)), self.global_step)
+            self.writer.add_scalar('policy_net_gradients/total_norm', total_policy_norm.item(), self.global_step)
+            if total_policy_norm.item() > 1000.0:  # 设置一个远高于正常值的阈值
+                print(f"🚨 检测到梯度爆炸！当前全局step: {self.global_step}, 范数: {total_policy_norm.item()}")
+                problematic_pose = next_camera_pose.detach().cpu().numpy()
+                print(f"   引发问题的位姿: {problematic_pose}")
+            # self.writer.add_scalar('gradients/policy_missing_params', float(len(missing)), self.global_step)
 
             self.optimizer.step()
         
@@ -493,7 +513,7 @@ class NBVTrainer:
         """训练一个epoch"""
         epoch_losses = []
 
-        if hasattr(train_loader, "dataset") and hasattr(train_loader.dataset, "set_epoch"):
+        if self.use_epoch_seed and hasattr(train_loader, "dataset") and hasattr(train_loader.dataset, "set_epoch"):
             train_loader.dataset.set_epoch(self.current_epoch)
 
         progress_bar = tqdm(train_loader, desc=f"Epoch {self.current_epoch}")
@@ -709,79 +729,3 @@ class NBVTrainer:
         self.best_loss = checkpoint["best_loss"]
         
         self.logger.info(f"Checkpoint loaded: {checkpoint_path}")
-
-    def _save_combined_images(
-        self,
-        combined_images_batch: torch.Tensor,
-        combined_camera_poses: torch.Tensor,
-        fov_degrees: float = 60.0,
-    ) -> Optional[str]:
-        """
-        保存视图的图像与标定数据到log_dir下的images文件夹。
-
-        Args:
-            combined_images_batch: [B, N+1, 3, H, W] 的图片张量
-            combined_camera_poses: [B, N+1, 7] 的相机位姿张量
-            fov_degrees: 渲染视场角（默认60°），用于构造内参矩阵
-        """
-        if combined_images_batch is None or combined_camera_poses is None:
-            return None
-
-        # 确保形状匹配
-        if combined_images_batch.shape[:2] != combined_camera_poses.shape[:2]:
-            self.logger.warning(
-                "Skip saving combined views: image batch shape %s incompatible with pose batch shape %s.",
-                combined_images_batch.shape,
-                combined_camera_poses.shape,
-            )
-            return None
-
-        images_dir = os.path.join(self.log_dir, "images")
-        os.makedirs(images_dir, exist_ok=True)
-
-        step_dir = os.path.join(images_dir, f"step_{self.global_step:06d}")
-        os.makedirs(step_dir, exist_ok=True)
-
-        images_cpu = combined_images_batch.detach().cpu()
-        poses_cpu = combined_camera_poses.detach().cpu()
-
-        batch_size, num_views, _, height, width = images_cpu.shape
-        # print("combined_images_batch.shape",combined_images_batch.shape)
-        # print("combined_camera_poses.shape",combined_camera_poses.shape)
-        intrinsics = compute_pinhole_intrinsics(height, width, fov_degrees)
-
-        for batch_idx in range(batch_size):
-            batch_dir = os.path.join(step_dir, f"batch_{batch_idx:03d}")
-            os.makedirs(batch_dir, exist_ok=True)
-
-            for view_idx in range(num_views):
-                raw_img = images_cpu[batch_idx, view_idx]
-                pose_tensor = poses_cpu[batch_idx, view_idx]
-
-                # PNG保存仍使用[3,H,W]且范围[0,1]
-                png_img = torch.clamp(raw_img, 0.0, 1.0)
-                png_path = os.path.join(batch_dir, f"image_{view_idx:02d}.png")
-                torchvision.utils.save_image(png_img, png_path)
-
-                # 视图数据按(H, W, 3)且像素范围[0,255]
-                img_uint8 = (png_img.permute(1, 2, 0) * 255.0).round().to(torch.uint8)
-                # print("保存",pose_tensor)
-                cam2world = pose7d_to_opencv_cam2world_with_official_func(pose_tensor)
-
-                view_payload = {
-                    "img": img_uint8,
-                    "intrinsics": intrinsics.clone(),
-                    "camera_poses": cam2world,
-                    "is_metric_scale": torch.tensor([False], dtype=torch.bool),
-                }
-
-                payload_path = os.path.join(batch_dir, f"view_{view_idx:02d}.pt")
-                torch.save(view_payload, payload_path)
-
-        self.logger.info(
-            "Saved view data for %d batches (%d views each) to %s",
-            batch_size,
-            num_views,
-            step_dir,
-        )
-        return step_dir

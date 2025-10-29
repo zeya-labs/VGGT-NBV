@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import math
-from typing import Any, Dict, List, Tuple
+import os
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
+import torchvision
 from mapanything.utils.image import IMAGE_NORMALIZATION_DICT
 from mapanything.utils.inference import (
     preprocess_input_views_for_inference,
@@ -17,6 +20,9 @@ from pytorch3d.utils.camera_conversions import opencv_from_cameras_projection
 
 _DEFAULT_MEAN = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32)
 _DEFAULT_STD = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32)
+
+
+logger = logging.getLogger(__name__)
 
 
 def compute_pinhole_intrinsics(height: int, width: int, fov_degrees: float) -> torch.Tensor:
@@ -97,6 +103,8 @@ def prepare_mapanything_views(
     device: torch.device,
     fov_degrees: float = 60.0,
     is_metric_scale: bool = False,
+    depth_z: Optional[torch.Tensor] = None,
+    save_dir: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], torch.Tensor]:
     """验证输入并基于原始分辨率构建 MapAnything 视图描述。"""
     if images.dim() != 5 or images.shape[2] != 3:
@@ -111,6 +119,14 @@ def prepare_mapanything_views(
 
     images = images.clamp(0.0, 1.0).to(device)
     camera_poses = camera_poses.to(device=device, dtype=torch.float32)
+    if depth_z is not None:
+        if depth_z.dim() == 5 and depth_z.shape[-1] == 1:
+            depth_z = depth_z.squeeze(-1)
+        if depth_z.dim() != 4:
+            raise ValueError(
+                f"depth_z expected shape [B, S, H, W] or [B, S, H, W, 1], got {tuple(depth_z.shape)}"
+            )
+        depth_z = depth_z.to(device=device, dtype=torch.float32)
 
     batch_size, num_views, num_channels, _, _ = images.shape
     if num_channels != 3:
@@ -118,6 +134,10 @@ def prepare_mapanything_views(
     if camera_poses.shape[:2] != (batch_size, num_views):
         raise ValueError(
             f"camera_poses 与 images 的 batch/view 数不匹配：{camera_poses.shape[:2]} vs {(batch_size, num_views)}"
+        )
+    if depth_z is not None and depth_z.shape[:2] != (batch_size, num_views):
+        raise ValueError(
+            f"depth_z 与 images 的 batch/view 数不匹配：{depth_z.shape[:2]} vs {(batch_size, num_views)}"
         )
 
     norm_cfg = IMAGE_NORMALIZATION_DICT.get(data_norm_type)
@@ -153,17 +173,61 @@ def prepare_mapanything_views(
             image_size=(height, width),
         ).to(device=device)
 
-        base_views.append(
-            {
-                "img": normalized,
-                "data_norm_type": [data_norm_type],
-                "intrinsics": intrinsics_batched,
-                "camera_poses": camera_pose_tensor,
-                "is_metric_scale": is_metric_tensor.clone(),
-            }
-        )
+        view_dict: Dict[str, Any] = {
+            "img": normalized,
+            "data_norm_type": [data_norm_type],
+            "intrinsics": intrinsics_batched,
+            "camera_poses": camera_pose_tensor,
+            "is_metric_scale": is_metric_tensor.clone(),
+        }
+        if depth_z is not None:
+            view_dict["depth_z"] = depth_z[:, view_idx].contiguous()
+
+        base_views.append(view_dict)
 
     validated_views = validate_input_views_for_inference(base_views)
     processed_views = preprocess_input_views_for_inference(validated_views)
+    if save_dir is not None:
+        os.makedirs(save_dir, exist_ok=True)
+        images_cpu = images.detach().cpu()
+        poses_cpu = camera_poses.detach().cpu()
+        depth_cpu = depth_z.detach().cpu() if depth_z is not None else None
+
+        batch_size, num_views, _, height, width = images_cpu.shape
+        intrinsics = compute_pinhole_intrinsics(height, width, fov_degrees)
+
+        for batch_idx in range(batch_size):
+            batch_dir = os.path.join(save_dir, f"batch_{batch_idx:03d}")
+            os.makedirs(batch_dir, exist_ok=True)
+
+            for view_idx in range(num_views):
+                raw_img = images_cpu[batch_idx, view_idx]
+                pose_tensor = poses_cpu[batch_idx, view_idx]
+
+                png_img = torch.clamp(raw_img, 0.0, 1.0)
+                png_path = os.path.join(batch_dir, f"image_{view_idx:02d}.png")
+                torchvision.utils.save_image(png_img, png_path)
+
+                img_uint8 = (png_img.permute(1, 2, 0) * 255.0).round().to(torch.uint8)
+                cam2world = pose7d_to_opencv_cam2world_with_official_func(pose_tensor)
+
+                view_payload: Dict[str, Any] = {
+                    "img": img_uint8,
+                    "intrinsics": intrinsics.clone(),
+                    "camera_poses": cam2world,
+                    "is_metric_scale": torch.tensor([bool(is_metric_scale)], dtype=torch.bool),
+                }
+                if depth_cpu is not None:
+                    view_payload["depth_z"] = depth_cpu[batch_idx, view_idx].contiguous()
+
+                payload_path = os.path.join(batch_dir, f"view_{view_idx:02d}.pt")
+                torch.save(view_payload, payload_path)
+
+        logger.info(
+            "Saved view data for %d batches (%d views each) to %s",
+            batch_size,
+            num_views,
+            save_dir,
+        )
     normalized_stack = torch.stack(normalized_views, dim=1)
     return processed_views, normalized_stack

@@ -38,7 +38,7 @@ class BaseNBVPolicy(nn.Module):
     ):
         super().__init__()
         self.output_mode = output_mode
-        self.token_pooling_mode = token_pooling_mode  # 处理[B, S, P, 2048]时的token池化方式
+        self.token_pooling_mode = token_pooling_mode  # 处理[B, S, P, 768]时的token池化方式
         if position_bounds is None:
             position_bounds = (-3.0,3.0)
         if position_bounds[0] >= position_bounds[1]:
@@ -173,11 +173,11 @@ class BasicNBVPolicy(BaseNBVPolicy):
     """
     基础NBV策略网络
     
-    接收[B, S, 2048]场景特征，通过简单的池化和MLP输出相机位姿
+    接收[B, S, 768]场景特征，通过简单的池化和MLP输出相机位姿
     """
     
     def __init__(self, 
-                 scene_feature_dim: int = 2048,
+                 scene_feature_dim: int = 768,
                  hidden_dim: int = 256,
                  num_layers: int = 3,
                  pooling_mode: str = "mean",
@@ -240,7 +240,7 @@ class BasicNBVPolicy(BaseNBVPolicy):
         前向传播
         
         Args:
-            scene_features: 场景特征 [B, S, 2048]
+            scene_features: 场景特征 [B, S, 768]
             
         Returns:
             camera_pose: 相机位姿 [B, target_dim]
@@ -278,7 +278,7 @@ class AttentionNBVPolicy(BaseNBVPolicy):
     """
     
     def __init__(self, 
-                 scene_feature_dim: int = 2048,
+                 scene_feature_dim: int = 768,
                  hidden_dim: int = 512,
                  num_heads: int = 8,
                  num_layers: int = 4,
@@ -339,7 +339,7 @@ class AttentionNBVPolicy(BaseNBVPolicy):
         前向传播
         
         Args:
-            scene_features: 场景特征 [B, S, 2048]
+            scene_features: 场景特征 [B, S, 768]
             
         Returns:
             camera_pose: 相机位姿 [B, target_dim]
@@ -375,7 +375,7 @@ class IterativeNBVPolicy(BaseNBVPolicy):
     """
     
     def __init__(self,
-                 scene_feature_dim: int = 2048,
+                 scene_feature_dim: int = 768,
                  hidden_dim: int = 512,
                  trunk_depth: int = 4,
                  num_heads: int = 8,
@@ -439,7 +439,7 @@ class IterativeNBVPolicy(BaseNBVPolicy):
         迭代细化前向传播
         
         Args:
-            scene_features: 场景特征 [B, S, 2048]
+            scene_features: 场景特征 [B, S, 768]
             num_iterations: 迭代次数
             
         Returns:
@@ -504,7 +504,7 @@ class MultiScaleNBVPolicy(BaseNBVPolicy):
     """
     
     def __init__(self,
-                 scene_feature_dim: int = 2048,
+                 scene_feature_dim: int = 768,
                  feature_scales: List[int] = [512, 1024, 1536, 2048],
                  hidden_dim: int = 512,
                  output_mode: str = "cartesian",
@@ -568,7 +568,7 @@ class MultiScaleNBVPolicy(BaseNBVPolicy):
         多尺度特征融合前向传播
         
         Args:
-            scene_features: 场景特征 [B, S, 2048]
+            scene_features: 场景特征 [B, S, 768]
             
         Returns:
             nbv_prediction: NBV预测 [B, target_dim]
@@ -614,7 +614,7 @@ class HybridNBVPolicy(BaseNBVPolicy):
     """
     
     def __init__(self,
-                 scene_feature_dim: int = 2048,
+                 scene_feature_dim: int = 768,
                  hidden_dim: int = 512,
                  feature_scales: List[int] = [1024, 1536, 2048],
                  num_iterations: int = 3,
@@ -654,7 +654,7 @@ class HybridNBVPolicy(BaseNBVPolicy):
         混合架构前向传播
         
         Args:
-            scene_features: 场景特征 [B, S, 2048]
+            scene_features: 场景特征 [B, S, 768]
             
         Returns:
             nbv_prediction: 最终NBV预测 [B, target_dim]
@@ -681,7 +681,7 @@ class GeometryAwareNBVPolicy(BaseNBVPolicy):
     """
     
     def __init__(self,
-                 scene_feature_dim: int = 2048,
+                 scene_feature_dim: int = 768,
                  geometry_feature_dim: int = 7,
                  hidden_dim: int = 512,
                  output_mode: str = "cartesian",
@@ -737,7 +737,7 @@ class GeometryAwareNBVPolicy(BaseNBVPolicy):
         几何感知前向传播
         
         Args:
-            scene_features: 场景特征 [B, S, 2048]
+            scene_features: 场景特征 [B, S, 768]
             geometry_features: 几何特征 [B, geometry_feature_dim]
             
         Returns:

@@ -1,3 +1,33 @@
+# TODO：House3K depth_z 数据流补全
+
+## 背景
+- 训练侧计划接入 MapAnything，要求在提取场景特征时同时提供相机坐标系的 Z 深度。
+- House3KDataset 目前只在 `_build_gt_targets` 中生成 `gt_point_maps` 与 `gt_valid_masks`，尚未暴露深度。
+- MapAnything 推理前处理已支持 `depth_z` → `depth_along_ray` 的转换，需要我们在 dataset → trainer → wrapper 的链路中补齐。
+
+## 修改目标
+1. House3KDataset 返回的样本中包含形状为 `(N, H, W, 1)` 的 `depth_z`（float32，按视图堆叠）。
+2. Trainer 在抽样初始视图、调用 `extract_scene_features` 时同步传递 `depth_z` 并与图像选择保持一致。
+3. MapAnything 视图准备与封装器支持可选 `depth_z`，在开启时打开 `use_depth`，对接官方预处理逻辑。
+
+## 详细代办事项
+1. **生成与挂载 depth_z**  
+   - 在 `House3KDataset._build_gt_targets` 中基于 `point_maps[..., 2:3]` 计算深度，维度整理为 `(num_views, H, W, 1)`。  
+   - 确保 dtype 为 `torch.float32`，与 `gt_point_maps` 同步搬运至 CPU；将结果写回 `gt_mesh_data` 并在 `result` 顶层提供 `depth_z`。
+2. **样本聚合兼容性检查**  
+   - 如果默认 `collate_fn` 能按视图维度堆叠则无需改动；若出现 list → tensor 失败，调整自定义 collate 统一堆叠。  
+   - 约定缺失时返回 `None`，便于上游显式判断。
+3. **Trainer 管道更新**  
+   - `_select_initial_views` 返回时追加 `depth_z` 的索引与裁剪逻辑，同时缓存随机选择索引用于深度/点云同步。  
+   - `training_step` 中获取 batch 深度，完成索引、设备与 dtype 对齐，必要时回填到 `gt_mesh_data['depth_z']`。  
+   - 调用 `extract_scene_features` / 其他 MapAnything 编码接口时以关键字参数传入 `depth_z`。
+4. **MapAnything 视图准备增强**  
+   - 扩展 `prepare_mapanything_views` 签名与实现，接受 `depth_z`（支持 `(B, S, H, W, 1)` 或 `(B, S, H, W)`），按视图拆分后 squeeze 最后一维并附加到 view dict。  
+   - 更新 `MapAnythingWrapper.extract_scene_features` / `.forward` / `.reconstruct_and_evaluate` 以可选参数形式下传，并在 `_configure_geometric_inputs` 中根据是否提供深度开启 `use_depth`。
+5. **验证与回归**  
+   - 编写快速断言脚本：加载单个 `House3KDataset` 样本，检查 `depth_z` 形状与数值范围。  
+   - 跑一次 `train.py --mode train --max_steps 1`，确保数据搬运、特征提取无异常日志。必要时记录 TODO：追加新视图深度渲染或后续需求。
+
 # TODO：调整GT点云与掩码生成链路
 
 ## 背景
