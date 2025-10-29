@@ -243,30 +243,75 @@ def tensor_to_pose_dict(pose_tensor: torch.Tensor) -> Dict[str, List[float]]:
     }
 
 
-def position_to_pose_tensor(positions: torch.Tensor, up_axis: str = "Y") -> torch.Tensor:
+def position_to_pose_tensor(
+    positions: torch.Tensor,
+    up_axis: str = "Y",
+    look_at: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
     """
     将位置张量转换为完整的相机位姿张量（包含位置和四元数）
     
     Args:
         positions: 相机位置张量 [B, 3] (x, y, z)
         up_axis: 上朝向轴，默认为"Y"
+        look_at: 可选的目标点张量，形状可为 [3] 或 [B, 3]，默认看向原点
         
     Returns:
         pose_tensor: 相机位姿张量 [B, 7] (x, y, z, qx, qy, qz, qw)
     """
+    if not torch.is_tensor(positions):
+        positions = torch.tensor(positions, dtype=torch.float32)
+    else:
+        positions = positions.to(dtype=torch.float32)
+
+    if positions.ndim == 1:
+        if positions.numel() != 3:
+            raise ValueError(
+                f"positions expects 3 values for a single camera, but got shape {tuple(positions.shape)}"
+            )
+        positions = positions.unsqueeze(0)
+    elif positions.ndim != 2 or positions.shape[1] != 3:
+        raise ValueError(
+            f"positions must have shape [B, 3], but received {tuple(positions.shape)}"
+        )
+
     batch_size = positions.shape[0]
     device = positions.device
     
     # 获取up向量
     up_vector = get_up_vector(up_axis)
-    up = torch.tensor(up_vector, dtype=torch.float32).to(device).unsqueeze(0).expand(batch_size, -1)
+    up = (
+        torch.tensor(up_vector, dtype=torch.float32, device=device)
+        .unsqueeze(0)
+        .expand(batch_size, -1)
+        .contiguous()
+    )
     
-    # 目标点（看向原点）
-    at = torch.zeros(batch_size, 3, dtype=torch.float32, device=device)
+    if look_at is None:
+        at = torch.zeros(batch_size, 3, dtype=torch.float32, device=device)
+    else:
+        look_at_tensor = torch.as_tensor(look_at, dtype=torch.float32, device=device)
+        if look_at_tensor.ndim == 1:
+            if look_at_tensor.numel() != 3:
+                raise ValueError(
+                    f"look_at expects 3 values for a single target, but got shape {tuple(look_at_tensor.shape)}"
+                )
+            look_at_tensor = look_at_tensor.unsqueeze(0)
+        elif look_at_tensor.ndim != 2 or look_at_tensor.shape[1] != 3:
+            raise ValueError(
+                f"look_at must have shape [B, 3] or [3], but received {tuple(look_at_tensor.shape)}"
+            )
+
+        if look_at_tensor.shape[0] == 1 and batch_size > 1:
+            look_at_tensor = look_at_tensor.expand(batch_size, -1)
+        elif look_at_tensor.shape[0] != batch_size:
+            raise ValueError(
+                f"look_at batch size ({look_at_tensor.shape[0]}) does not match positions batch size ({batch_size})."
+            )
+        at = look_at_tensor
     
-    positions_float32 = positions.to(torch.float32)
     # 使用PyTorch3D的look_at_view_transform生成旋转矩阵
-    R, T = look_at_view_transform(eye=positions_float32, at=at, up=up)
+    R, T = look_at_view_transform(eye=positions, at=at, up=up)
     
     # 确保旋转矩阵在正确的设备上
     R = R.to(device)

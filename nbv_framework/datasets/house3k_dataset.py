@@ -8,10 +8,11 @@ import hashlib
 import glob
 import random
 import torch
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Sequence, Union
 from .base_dataset import BaseDataset
 from ..utils.camera_utils import (
     pose_dict_to_tensor,
+    position_to_pose_tensor,
     world_points_to_camera_depth,
     normalize_depth_for_visualization,
 )
@@ -53,7 +54,22 @@ class House3KDataset(BaseDataset):
         val_ratio: float = 0.1,
         max_meshes: int = None,
         use_cache: bool = True,
-        **kwargs
+        manual_camera_position: Optional[
+            Union[
+                Sequence[float],
+                Sequence[Sequence[float]],
+                Dict[Union[str, int], Sequence[Sequence[float]]],
+            ]
+        ] = None,
+        manual_camera_look_at: Optional[
+            Union[
+                Sequence[float],
+                Sequence[Sequence[float]],
+                Dict[Union[str, int], Sequence[Sequence[float]]],
+            ]
+        ] = None,
+        use_manual_camera: bool = False,
+        **kwargs,
     ):
         """
         初始化House3K数据集
@@ -69,6 +85,9 @@ class House3KDataset(BaseDataset):
             val_ratio: 验证集比例
             max_meshes: 全局最大mesh数量限制（用于控制训练规模）
             use_cache: 是否使用缓存加速数据加载
+            manual_camera_position: 手动指定的相机位置，支持单个位置、列表或按模型名称/索引映射
+            manual_camera_look_at: 手动指定的相机朝向目标点，格式同上，默认为原点
+            use_manual_camera: 是否启用手动相机逻辑
             **kwargs: 其他参数
         """
         self.train_ratio = train_ratio
@@ -76,6 +95,9 @@ class House3KDataset(BaseDataset):
         self.test_ratio = 1.0 - train_ratio - val_ratio
         self.max_meshes = max_meshes
         self.use_cache = use_cache
+        self.use_manual_camera = use_manual_camera
+        self.manual_camera_position = manual_camera_position
+        self.manual_camera_look_at = manual_camera_look_at
         
         # 验证分割比例
         if self.test_ratio < 0:
@@ -454,6 +476,177 @@ class House3KDataset(BaseDataset):
         except Exception as exc:
             raise RuntimeError("渲染 House3K 样本失败，请检查网格或相机位姿数据。") from exc
     
+    def _resolve_manual_config(self, config, idx: int, data_item: Dict):
+        if config is None:
+            return None
+        if callable(config):
+            return config(data_item, idx)
+        if isinstance(config, dict):
+            keys_to_try = [
+                data_item.get("model_name"),
+                (data_item.get("batch_name"), data_item.get("set_name"), data_item.get("model_name")),
+                idx,
+            ]
+            for key in keys_to_try:
+                if key in config:
+                    return config[key]
+            return None
+        return config
+
+    def _resolve_manual_camera_positions(
+        self,
+        idx: int,
+        data_item: Dict,
+        device: torch.device,
+    ) -> Optional[torch.Tensor]:
+        value = self._resolve_manual_config(self.manual_camera_position, idx, data_item)
+        if value is None:
+            return None
+
+        positions = torch.as_tensor(value, dtype=torch.float32, device=device)
+        if positions.ndim == 1:
+            if positions.numel() != 3:
+                raise ValueError(
+                    f"manual camera position expects 3 values, but received shape {tuple(positions.shape)}"
+                )
+            positions = positions.unsqueeze(0)
+        elif positions.ndim == 2 and positions.shape[1] == 3:
+            pass
+        else:
+            raise ValueError(
+                f"manual camera position must have shape [N, 3] or [3], got {tuple(positions.shape)}"
+            )
+
+        return positions
+
+    def _resolve_manual_camera_look_at(
+        self,
+        idx: int,
+        data_item: Dict,
+        device: torch.device,
+    ) -> Optional[torch.Tensor]:
+        value = self._resolve_manual_config(self.manual_camera_look_at, idx, data_item)
+        if value is None:
+            return None
+
+        look_at = torch.as_tensor(value, dtype=torch.float32, device=device)
+        if look_at.ndim == 1:
+            if look_at.numel() != 3:
+                raise ValueError(
+                    f"manual camera look_at expects 3 values, but received shape {tuple(look_at.shape)}"
+                )
+            look_at = look_at.unsqueeze(0)
+        elif look_at.ndim == 2 and look_at.shape[1] == 3:
+            pass
+        else:
+            raise ValueError(
+                f"manual camera look_at must have shape [N, 3] or [3], got {tuple(look_at.shape)}"
+            )
+
+        return look_at
+    
+    def render_custom_view(
+        self,
+        idx: int,
+        position: Union[Sequence[float], torch.Tensor],
+        *,
+        look_at: Optional[Union[Sequence[float], torch.Tensor]] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        根据自定义相机位置渲染图像，并自动计算朝向。
+
+        Args:
+            idx: 数据集中样本的索引。
+            position: 相机位置 (x, y, z)，可以是长度为3的序列或张量。
+            look_at: 可选的目标点 (x, y, z)，默认为原点。
+
+        Returns:
+            包含渲染图像、相机位姿以及基础元数据的字典。
+        """
+        data_item = self.data_list[idx]
+        mesh_path = self._get_mesh_path(data_item)
+        gt_mesh_data = self._load_mesh_data(
+            mesh_path,
+            normalize_method=self.normalize_method,
+            num_samples=self.num_samples,
+        )
+
+        renderer = self._get_renderer()
+        device = renderer.device
+
+        position_tensor = torch.as_tensor(position, dtype=torch.float32)
+        if position_tensor.ndim == 1:
+            if position_tensor.numel() != 3:
+                raise ValueError(
+                    f"position expects 3 values, but received shape {tuple(position_tensor.shape)}"
+                )
+            position_tensor = position_tensor.unsqueeze(0)
+        elif position_tensor.ndim != 2 or position_tensor.shape[1] != 3:
+            raise ValueError(
+                f"position must have shape [N, 3] or [3], but received {tuple(position_tensor.shape)}"
+            )
+        position_tensor = position_tensor.to(device)
+
+        look_at_tensor: Optional[torch.Tensor] = None
+        if look_at is not None:
+            look_at_tensor = torch.as_tensor(look_at, dtype=torch.float32)
+            if look_at_tensor.ndim == 1:
+                if look_at_tensor.numel() != 3:
+                    raise ValueError(
+                        f"look_at expects 3 values, but received shape {tuple(look_at_tensor.shape)}"
+                    )
+                look_at_tensor = look_at_tensor.unsqueeze(0)
+            elif look_at_tensor.ndim != 2 or look_at_tensor.shape[1] != 3:
+                raise ValueError(
+                    f"look_at must have shape [N, 3] or [3], but received {tuple(look_at_tensor.shape)}"
+                )
+            look_at_tensor = look_at_tensor.to(device)
+
+        camera_pose_tensor = position_to_pose_tensor(
+            position_tensor,
+            up_axis=self.up_axis,
+            look_at=look_at_tensor,
+        )
+
+        mesh = gt_mesh_data["normalized_mesh"].to(device)
+        num_views = camera_pose_tensor.shape[0]
+        meshes_batch = mesh.extend(num_views)
+
+        with torch.no_grad():
+            rendered_images = renderer.forward(
+                gt_mesh=meshes_batch,
+                camera_poses=camera_pose_tensor,
+                pose_format="cartesian",
+                fov=60.0,
+            )
+
+        rendered_images = rendered_images.detach().cpu()
+        camera_pose_cpu = camera_pose_tensor.detach().cpu()
+
+        pose_dicts = [
+            {
+                "position": camera_pose_cpu[i, :3].tolist(),
+                "quaternion": camera_pose_cpu[i, 3:].tolist(),
+            }
+            for i in range(camera_pose_cpu.shape[0])
+        ]
+
+        result = {
+            "rendered_images": rendered_images,
+            "camera_poses": camera_pose_cpu,
+            "gt_mesh_data": gt_mesh_data,
+            "mesh_path": mesh_path,
+            "batch_name": data_item["batch_name"],
+            "set_name": data_item["set_name"],
+            "model_name": data_item["model_name"],
+        }
+        result["camera_pose_dicts"] = pose_dicts
+
+        if look_at_tensor is not None:
+            result["look_at"] = look_at_tensor.detach().cpu()
+
+        return result
+    
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """
         获取单个数据样本。
@@ -477,27 +670,66 @@ class House3KDataset(BaseDataset):
         initial_images: torch.Tensor
         camera_poses_tensor: torch.Tensor
 
-        if selected_indices:
-            seed = abs(hash(model_name)) % (2 ** 32 - 1)
-            camera_poses_list = self._generate_camera_poses(num_candidate_views, seed=seed)
-
-            initial_images = self._render_images_from_mesh_data(
-                gt_mesh_data=gt_mesh_data,
-                camera_poses=camera_poses_list,
-                selected_indices=selected_indices,
+        manual_mode = False
+        if self.use_manual_camera:
+            renderer = self._get_renderer()
+            manual_positions = self._resolve_manual_camera_positions(
+                idx, data_item, renderer.device
             )
+            if manual_positions is not None:
+                manual_mode = True
+                manual_look_at = self._resolve_manual_camera_look_at(
+                    idx, data_item, renderer.device
+                )
+                manual_camera_pose = position_to_pose_tensor(
+                    manual_positions,
+                    up_axis=self.up_axis,
+                    look_at=manual_look_at,
+                )
+                mesh = gt_mesh_data["normalized_mesh"].to(renderer.device)
+                meshes_batch = mesh.extend(manual_camera_pose.shape[0])
+                with torch.no_grad():
+                    rendered = renderer.forward(
+                        gt_mesh=meshes_batch,
+                        camera_poses=manual_camera_pose,
+                        pose_format="cartesian",
+                        fov=60.0,
+                    )
+                initial_images = rendered.detach().cpu()
+                camera_poses_tensor = manual_camera_pose.detach().cpu()
+                selected_indices = list(range(camera_poses_tensor.shape[0]))
+                camera_poses_list = [
+                    {
+                        "position": camera_poses_tensor[i, :3].tolist(),
+                        "quaternion": camera_poses_tensor[i, 3:].tolist(),
+                    }
+                    for i in range(camera_poses_tensor.shape[0])
+                ]
 
-            selected_camera_poses = [camera_poses_list[i] for i in selected_indices]
-            camera_pose_rows = [
-                torch.tensor(pose["position"] + pose["quaternion"], dtype=torch.float32)
-                for pose in selected_camera_poses
-            ]
-            camera_poses_tensor = torch.stack(camera_pose_rows, dim=0)
-        else:
-            initial_images = torch.empty(
-                (0, 3, self.image_size, self.image_size), dtype=torch.float32
-            )
-            camera_poses_tensor = torch.empty((0, 7), dtype=torch.float32)
+        if not manual_mode:
+            if selected_indices:
+                seed = abs(hash(model_name)) % (2 ** 32 - 1)
+                camera_poses_list = self._generate_camera_poses(
+                    num_candidate_views, seed=seed
+                )
+
+                initial_images = self._render_images_from_mesh_data(
+                    gt_mesh_data=gt_mesh_data,
+                    camera_poses=camera_poses_list,
+                    selected_indices=selected_indices,
+                )
+
+                selected_camera_poses = [camera_poses_list[i] for i in selected_indices]
+                camera_pose_rows = [
+                    torch.tensor(pose["position"] + pose["quaternion"], dtype=torch.float32)
+                    for pose in selected_camera_poses
+                ]
+                camera_poses_tensor = torch.stack(camera_pose_rows, dim=0)
+            else:
+                initial_images = torch.empty(
+                    (0, 3, self.image_size, self.image_size), dtype=torch.float32
+                )
+                camera_poses_tensor = torch.empty((0, 7), dtype=torch.float32)
 
         result = {
             "initial_images": initial_images,
@@ -580,5 +812,6 @@ class House3KDataset(BaseDataset):
             "use_cache": self.use_cache,
             "dynamic_rendering": True,
             "has_prerendered_images": False,
+            "manual_camera_enabled": self.use_manual_camera,
         })
         return base_info
