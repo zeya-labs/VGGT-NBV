@@ -374,70 +374,7 @@ class House3KDataset(BaseDataset):
             )
 
         return self._renderer
-    
-    # def _render_images_from_mesh(
-    #     self,
-    #     mesh_path: str,
-    #     camera_poses: List[Dict],
-    #     selected_indices: List[int]
-    # ) -> torch.Tensor:
-    #     """
-    #     从3D网格渲染图像
-        
-    #     Args:
-    #         mesh_path: 网格文件路径
-    #         camera_poses: 相机位姿列表
-    #         selected_indices: 选中的视图索引
-            
-    #     Returns:
-    #         渲染的图像张量 [N, 3, H, W]
-    #     """
-    #     renderer = self._get_renderer()
-        
-    #     if renderer is None:
-    #         # 如果渲染器不可用，返回随机图像作为占位符
-    #         print(f"警告：渲染器不可用，使用随机图像 {mesh_path}")
-    #         num_views = len(selected_indices)
-    #         return torch.rand(num_views, 3, self.image_size, self.image_size)
-        
-    #     try:
-    #         # 加载3D网格
-    #         from ..utils.mesh_utils import load_mesh_as_pytorch3d
-    #         mesh = load_mesh_as_pytorch3d(mesh_path)
-            
-    #         # 选择对应的相机位姿
-    #         selected_poses = [camera_poses[i] for i in selected_indices]
-            
-    #         # 为每个相机位姿复制网格
-    #         device = renderer.device
-            
-    #         # 转换位姿格式
-    #         pose_tensors = [pose_dict_to_tensor(pose, device=device) for pose in selected_poses]
-    #         camera_poses_tensor = torch.cat(pose_tensors, dim=0)
-    #         mesh = mesh.to(device)
-            
-    #         # 创建批次化的网格，每个相机位姿对应一个网格副本
-    #         num_views = len(selected_poses)
-    #         meshes_batch = mesh.extend(num_views)
-            
-    #         # 渲染图像
-    #         with torch.no_grad():
-    #             rendered_images = renderer.forward(
-    #                 gt_mesh=meshes_batch,
-    #                 camera_poses=camera_poses_tensor,
-    #                 pose_format="cartesian",
-    #                 fov=60.0
-    #             )
-            
-    #         # 确保返回CPU张量，避免pin_memory问题
-    #         return rendered_images.cpu()
-            
-    #     except Exception as e:
-    #         print(f"渲染失败 {mesh_path}: {e}")
-    #         # 返回随机图像作为后备
-    #         num_views = len(selected_indices)
-    #         return torch.rand(num_views, 3, self.image_size, self.image_size)
-    
+
     def _render_images_from_mesh_data(
         self,
         gt_mesh_data: Dict,

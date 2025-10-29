@@ -208,7 +208,7 @@ class MapAnythingWrapper(nn.Module):
         finally:
             self._restore_geometric_inputs()
         # 列出 predictions 中的所有键
-        print("predictions keys:", predictions[0].keys())
+        # print("predictions keys:", predictions[0].keys())
         # predictions keys: dict_keys(['pts3d', 'pts3d_cam', 'ray_directions', 'depth_along_ray', 'cam_trans', 'cam_quats', 'metric_scaling_factor', 'conf', 'non_ambiguous_mask', 'non_ambiguous_mask_logits'])
         recon = self._stack_predictions(predictions)
         self._maybe_retain_grad_from_result(recon, normalized)

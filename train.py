@@ -53,10 +53,12 @@ def setup_config() -> Dict[str, Any]:
         # 训练配置
         "learning_rate": 1e-5,
         "batch_size": 1,  # 根据GPU内存调整
-        "num_epochs": 10000,
+        "num_epochs": 1000,
         "normalize_method": "quantile",
         "num_samples": 20000,
         "weight_decay": 1e-5,
+        "enable_validation": False,
+        "use_epoch_seed": False,
         
         # 数据配置
         "synthetic_data_root": "./models/synthetic_data",
@@ -173,7 +175,8 @@ def setup_data_loaders(config: Dict[str, Any]):
         {
             "name": "House3KDataset",
             "type": "house3k",
-            "data_root": "/mnt/sdb/chenmohan/VGGT-NBV/models/House3K_obj",
+            # "data_root": "/mnt/sdb/chenmohan/VGGT-NBV/models/House3K_obj",
+            "data_root": "/mnt/sdb/chenmohan/VGGT-NBV/models/test",
             "num_initial_views": config["max_initial_views"],
             "image_size": config["image_size"],
             "normalize_method": config["normalize_method"],
@@ -278,6 +281,8 @@ def train_nbv_policy(config: Dict[str, Any],
         min_initial_views=config["min_initial_views"],
         max_initial_views=config["max_initial_views"],
         randomize_initial_views=config.get("randomize_initial_views", True),
+        enable_validation=config.get("enable_validation", False),
+        use_epoch_seed=config.get("use_epoch_seed", False),
     )
     
     # 断点续训逻辑
@@ -312,9 +317,7 @@ def train_nbv_policy(config: Dict[str, Any],
         val_loader=val_loader,
         save_dir=config["save_dir"]
     )
-    
-    print("Training completed!")
-    
+
     return trainer
 
 def run_evaluation(config: Dict[str, Any],
