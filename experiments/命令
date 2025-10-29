@@ -1,8 +1,12 @@
 python -m experiments.two_view_chamfer_experiment \
  --mesh_path models/House3K_obj/BATCH_7/SET_B/BAT7_SETB_HOUSE33_WTR.obj \
  --num_views 1000 \
+ --camera_base_radius 2.2 \
+ --camera_radius_variation 0.4 \
+ --camera_radius_mode layered \
+ --camera_radius_layers 5 \
  --output_dir outputs/my_mesh_1000 \
- --device_ids 0,1,2,3 \
+ --device_ids 1,2,3 \
  --skip_view_artifacts --skip_glb --skip_depth_png
 
 python -m experiments.two_view_chamfer_experiment \
