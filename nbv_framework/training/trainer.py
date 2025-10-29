@@ -101,7 +101,7 @@ class NBVTrainer:
         self.writer = SummaryWriter(self.log_dir)
         
         # 优化器（只优化策略网络）
-        self.optimizer = optim.AdamW(
+        self.optimizer = optim.Adam(
             self.policy_network.parameters(),
             lr=learning_rate,
             weight_decay=weight_decay

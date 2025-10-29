@@ -4,11 +4,11 @@ House3K数据集加载器
 """
 
 import os
+import hashlib
 import glob
 import random
-import numpy as np
 import torch
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 from .base_dataset import BaseDataset
 from ..utils.camera_utils import (
     pose_dict_to_tensor,
@@ -302,21 +302,41 @@ class House3KDataset(BaseDataset):
     
     def _get_image_paths(self, data_item: Dict) -> List[str]:
         """
-        获取可用图像路径列表
-        
-        由于House3K数据集没有预渲染图像，这里返回虚拟的图像路径
-        实际图像将在运行时动态生成
+        返回可用视图的符号标识列表。
+
+        House3K 样本的图像在加载时即时渲染，因此这里不返回真实文件路径，
+        而是生成用于确定性采样的稳定标识。
         """
-        # 生成虚拟图像路径，用于后续的视图选择
         model_name = data_item["model_name"]
-        num_virtual_views = max(20, self.num_initial_views * 2)  # 确保有足够的虚拟视图
-        
-        virtual_paths = []
-        for i in range(num_virtual_views):
-            virtual_path = f"virtual://{model_name}/view_{i:03d}.png"
-            virtual_paths.append(virtual_path)
-        
-        return virtual_paths
+        return [self._view_token(model_name, i) for i in range(self._num_candidate_views())]
+
+    def _view_token(self, model_name: str, index: int) -> str:
+        """为指定模型的视图生成稳定且可解析的标识符。"""
+        return f"{model_name}#view_{index:03d}"
+
+    def _num_candidate_views(self) -> int:
+        """返回每个网格可用的候选视图数量。"""
+        return max(20, self.num_initial_views * 2)
+
+    def _sample_view_indices(self, model_name: str, num_candidate_views: int) -> List[int]:
+        """
+        根据模型名称和当前 epoch 均匀采样初始视图索引，保持与基类相同的确定性行为。
+        """
+        if num_candidate_views < self.num_initial_views:
+            raise ValueError(
+                f"Not enough candidate views ({num_candidate_views}) for initial selection "
+                f"({self.num_initial_views})."
+            )
+
+        canonical = "\n".join(self._view_token(model_name, i) for i in range(num_candidate_views))
+        epoch = getattr(self, "_epoch", 0)
+        base_seed = getattr(self, "_base_seed", None)
+        seed_material = f"{canonical}|{base_seed if base_seed is not None else 0}|{epoch}"
+        digest = hashlib.md5(seed_material.encode("utf-8")).hexdigest()
+        seed = int(digest, 16) % (2 ** 32 - 1)
+        rng = random.Random(seed)
+
+        return sorted(rng.sample(range(num_candidate_views), self.num_initial_views))
     
     def _get_camera_poses_path(self, data_item: Dict) -> Optional[str]:
         """
@@ -328,13 +348,19 @@ class House3KDataset(BaseDataset):
         return None
     
     def _extract_image_index(self, image_path: str) -> Optional[int]:
-        """从虚拟图像路径中提取索引"""
-        if image_path.startswith("virtual://"):
-            # 从 "virtual://model_name/view_XXX.png" 中提取索引
+        """从视图标识符中提取索引。"""
+        marker = "view_"
+        if marker in image_path:
             try:
-                filename = image_path.split("/")[-1]  # view_XXX.png
-                index_str = filename.split("_")[1].split(".")[0]  # XXX
-                return int(index_str)
+                suffix = image_path.split(marker, 1)[1]
+                digits = ""
+                for char in suffix:
+                    if char.isdigit():
+                        digits += char
+                    else:
+                        break
+                if digits:
+                    return int(digits)
             except (IndexError, ValueError):
                 return None
         return super()._extract_image_index(image_path)
@@ -428,157 +454,77 @@ class House3KDataset(BaseDataset):
         except Exception as exc:
             raise RuntimeError("渲染 House3K 样本失败，请检查网格或相机位姿数据。") from exc
     
-    def _load_images(self, image_paths: List[str]) -> torch.Tensor:
-        """
-        加载和预处理图像
-        
-        重写此方法以支持动态渲染
-        """
-        # 检查是否为虚拟图像路径
-        if all(path.startswith("virtual://") for path in image_paths):
-            # 需要动态渲染图像
-            return self._render_virtual_images(image_paths)
-        else:
-            # 使用基类方法加载实际图像文件
-            return super()._load_images(image_paths)
-    
-    def _render_virtual_images(self, virtual_paths: List[str]) -> torch.Tensor:
-        """
-        渲染虚拟图像路径对应的图像
-        
-        这个方法在_load_images中被调用，此时我们有当前数据项的上下文
-        使用与__getitem__中相同的相机位姿生成逻辑，确保一致性
-        """
-        # 这里需要获取当前数据项的信息
-        # 由于这是在_load_images中调用的，我们需要从虚拟路径中提取信息
-
-        # 提取模型名称和视图索引
-        model_name = virtual_paths[0].split("//")[1].split("/")[0]
-        view_indices = []
-
-        for path in virtual_paths:
-            index = self._extract_image_index(path)
-            if index is not None:
-                view_indices.append(index)
-
-        # 从当前处理的数据项中获取已加载的网格数据
-        # 这需要在__getitem__中设置上下文
-        if hasattr(self, '_current_data_item') and hasattr(self, '_current_gt_mesh_data'):
-            if hasattr(self, '_current_camera_poses_list'):
-                camera_poses = self._current_camera_poses_list
-            else:
-                max_view_index = max(view_indices) if view_indices else -1
-                seed = abs(hash(model_name)) % (2**32 - 1)
-                camera_poses = self._generate_camera_poses(max_view_index + 1, seed=seed) if max_view_index >= 0 else []
-
-            # 使用已加载的网格数据进行渲染
-            rendered_images = self._render_images_from_mesh_data(
-                self._current_gt_mesh_data, camera_poses, view_indices
-            )
-
-            return rendered_images
-
-        raise RuntimeError(
-            "无法获取当前数据项或网格上下文，House3KDataset 无法渲染虚拟图像。"
-        )
-    
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """
-        获取单个数据样本
-        
-        重写以支持动态渲染和相机位姿生成
+        获取单个数据样本。
+
+        对于 House3K，我们在此处直接生成候选视图、渲染图像并返回对应的相机位姿，
+        避免通过虚拟路径的间接流程。
         """
-        # print(idx,"worker:",torch.utils.data.get_worker_info(),self.split)
         data_item = self.data_list[idx]
-        
-        # 设置当前数据项上下文，供_load_images使用
-        self._current_data_item = data_item
-        self._current_gt_mesh_data = None  # 将在加载后设置
-        
-        try:
-            # 获取网格路径并加载网格数据（先加载，供渲染使用）
-            mesh_path = self._get_mesh_path(data_item)
-            gt_mesh_data = self._load_mesh_data(
-                mesh_path,
-                normalize_method=self.normalize_method,
-                num_samples=self.num_samples,
+        mesh_path = self._get_mesh_path(data_item)
+        gt_mesh_data = self._load_mesh_data(
+            mesh_path,
+            normalize_method=self.normalize_method,
+            num_samples=self.num_samples,
+        )
+
+        model_name = data_item["model_name"]
+        num_candidate_views = self._num_candidate_views()
+        selected_indices = self._sample_view_indices(model_name, num_candidate_views)
+
+        camera_poses_list: List[Dict] = []
+        initial_images: torch.Tensor
+        camera_poses_tensor: torch.Tensor
+
+        if selected_indices:
+            seed = abs(hash(model_name)) % (2 ** 32 - 1)
+            camera_poses_list = self._generate_camera_poses(num_candidate_views, seed=seed)
+
+            initial_images = self._render_images_from_mesh_data(
+                gt_mesh_data=gt_mesh_data,
+                camera_poses=camera_poses_list,
+                selected_indices=selected_indices,
             )
-            
-            # 设置网格数据上下文，供渲染使用
-            self._current_gt_mesh_data = gt_mesh_data
-            
-            # 获取可用图像路径
-            available_image_paths = self._get_image_paths(data_item)
-            
-            # 选择初始视图并获取对应索引
-            selected_image_paths, selected_indices = self._select_initial_images(available_image_paths)
 
-            # 预先生成相机位姿，避免在渲染时重复计算
-            if selected_indices:
-                max_view_index = max(selected_indices)
-                seed = abs(hash(data_item["model_name"])) % (2**32 - 1)
-                camera_poses_list = self._generate_camera_poses(max_view_index + 1, seed=seed)
-            else:
-                camera_poses_list = []
-
-            self._current_camera_poses_list = camera_poses_list
-
-            # 加载图像（此时gt_mesh_data已可用于渲染）
-            initial_images = self._load_images(selected_image_paths)
-
-            # 只选择对应的相机位姿
             selected_camera_poses = [camera_poses_list[i] for i in selected_indices]
-            
-            # 将相机位姿转换为张量格式，与渲染时使用的格式一致
-            camera_poses_tensor = []
-            for pose in selected_camera_poses:
-                # 转换为 [x, y, z, qx, qy, qz, qw] 格式
-                # print(pose)
-                pose_tensor = torch.tensor(
-                    pose["position"] + pose["quaternion"], 
-                    dtype=torch.float32
-                )
-                # print(pose_tensor)
-                camera_poses_tensor.append(pose_tensor)
-            
-            camera_poses = torch.stack(camera_poses_tensor) if camera_poses_tensor else torch.empty(0, 7)
-            # print(camera_poses)
-            result = {
-                "initial_images": initial_images,
-                "gt_mesh_data": gt_mesh_data,
-                "camera_poses": camera_poses,
-                "mesh_path": mesh_path,
-                # "dataset_type": self.__class__.__name__,
-                "batch_name": data_item["batch_name"],
-                "set_name": data_item["set_name"],
-                "model_name": data_item["model_name"],
-            }
+            camera_pose_rows = [
+                torch.tensor(pose["position"] + pose["quaternion"], dtype=torch.float32)
+                for pose in selected_camera_poses
+            ]
+            camera_poses_tensor = torch.stack(camera_pose_rows, dim=0)
+        else:
+            initial_images = torch.empty(
+                (0, 3, self.image_size, self.image_size), dtype=torch.float32
+            )
+            camera_poses_tensor = torch.empty((0, 7), dtype=torch.float32)
 
-            metadata = {
-                "data_item": data_item,
-                "selected_indices": selected_indices,
-                "camera_poses_list": camera_poses_list,
-            }
-            gt_targets = self._build_gt_targets(gt_mesh_data, camera_poses, metadata)
-            if gt_targets:
-                gt_mesh_data.update(gt_targets)
-                depth_z_value = gt_targets.get("depth_z")
-                if depth_z_value is not None:
-                    result["depth_z"] = depth_z_value
-                depth_viz_value = gt_targets.get("depth_z_viz")
-                if depth_viz_value is not None:
-                    result["depth_z_viz"] = depth_viz_value
+        result = {
+            "initial_images": initial_images,
+            "gt_mesh_data": gt_mesh_data,
+            "camera_poses": camera_poses_tensor,
+            "mesh_path": mesh_path,
+            "batch_name": data_item["batch_name"],
+            "set_name": data_item["set_name"],
+            "model_name": model_name,
+        }
 
-            return result
-            
-        finally:
-            # 清理上下文
-            if hasattr(self, '_current_data_item'):
-                delattr(self, '_current_data_item')
-            if hasattr(self, '_current_gt_mesh_data'):
-                delattr(self, '_current_gt_mesh_data')
-            if hasattr(self, '_current_camera_poses_list'):
-                delattr(self, '_current_camera_poses_list')
+        metadata = {
+            "data_item": data_item,
+            "selected_indices": selected_indices,
+            "camera_poses_list": camera_poses_list,
+        }
+        gt_targets = self._build_gt_targets(gt_mesh_data, camera_poses_tensor, metadata)
+        if gt_targets:
+            gt_mesh_data.update(gt_targets)
+            depth_z_value = gt_targets.get("depth_z")
+            if depth_z_value is not None:
+                result["depth_z"] = depth_z_value
+            depth_viz_value = gt_targets.get("depth_z_viz")
+            if depth_viz_value is not None:
+                result["depth_z_viz"] = depth_viz_value
+
+        return result
 
     def _build_gt_targets(
         self,

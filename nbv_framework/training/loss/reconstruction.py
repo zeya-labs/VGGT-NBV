@@ -117,7 +117,7 @@ class ReconstructionLoss(nn.Module):
 
             if combined_images_batch is not None:
                 pixel_intensity = combined_images_batch.mean(dim=2)
-                black_threshold = 0.05
+                black_threshold = 0.1
                 non_black_mask = pixel_intensity > black_threshold
                 combined_mask = high_conf_mask & non_black_mask
             else:
