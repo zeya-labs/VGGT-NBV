@@ -68,6 +68,9 @@ def setup_config() -> Dict[str, Any]:
         "image_size": 518,
         "up_axis": "Y",  # 数据集模型默认上方向 ('Y' 或 'Z')
         "max_meshes": 1,  # 限制加载的mesh数量，用于控制训练规模
+        "manual_camera_position": [[-1.093546,1.648833,-1.686863]],
+        "manual_camera_look_at": [0,0,0],
+        "use_manual_camera": True,
         
         # 设备配置
         "device": "cuda" if torch.cuda.is_available() else "cpu",
@@ -184,7 +187,10 @@ def setup_data_loaders(config: Dict[str, Any]):
             "split": "train",
             "max_meshes": config.get("max_meshes", 100),  # 限制总mesh数量
             "use_cache": True,
-            "up_axis": config.get("up_axis", "Y")  # 数据集模型默认上方向
+            "up_axis": config.get("up_axis", "Y"),  # 数据集模型默认上方向
+            "manual_camera_position": config.get("manual_camera_position", None),
+            "manual_camera_look_at": config.get("manual_camera_look_at", None),
+            "use_manual_camera": config.get("use_manual_camera", False),
         }
     ]
 
