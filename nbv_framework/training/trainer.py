@@ -54,7 +54,8 @@ class NBVTrainer:
                  weight_decay: float = 1e-5,
                  log_dir: str = "runs/nbv_experiment",
                  device: str = "cuda",
-                 enable_validation: bool = False):
+                 enable_validation: bool = False,
+                 use_epoch_seed: bool = False):
         """
         初始化训练器
         
@@ -80,6 +81,7 @@ class NBVTrainer:
         self.num_epochs = num_epochs
         self.log_dir = log_dir
         self.enable_validation = enable_validation
+        self.use_epoch_seed = use_epoch_seed
 
         self.min_initial_views = min_initial_views
         self.max_initial_views = max_initial_views
@@ -148,14 +150,6 @@ class NBVTrainer:
             self.writer.add_scalar(f'train/gradients/vggt/{key}_grad_mean_abs', mean_val, self.global_step) if has_grad else None
             self.writer.add_scalar(f'train/gradients/vggt/{key}_has_grad', has_grad, self.global_step) if has_grad else None
 
-        input_norm = grad_stats.get('input/grad_norm', 0.0)
-        input_mean = grad_stats.get('input/grad_mean_abs', 0.0)
-        input_has_grad = 1.0 if 'input/grad_norm' in grad_stats else 0.0
-
-        self.writer.add_scalar('train/gradients/vggt/input_grad_norm', input_norm, self.global_step) if input_has_grad else None
-        self.writer.add_scalar('train/gradients/vggt/input_grad_mean_abs', input_mean, self.global_step) if input_has_grad else None
-        self.writer.add_scalar('train/gradients/vggt/input_has_grad', input_has_grad, self.global_step) if input_has_grad else None
-
         has_new_grad = 1.0 if new_images.grad is not None else 0.0
         self.writer.add_scalar('train/gradients/new_view_has_grad', has_new_grad, self.global_step)
 
@@ -167,8 +161,8 @@ class NBVTrainer:
             new_view_mean = 0.0
             self.logger.warning("new_images gradient is None at global step %d", self.global_step)
 
-        self.writer.add_scalar('train/gradients/new_view_grad_norm', new_view_norm, self.global_step)
-        self.writer.add_scalar('train/gradients/new_view_grad_mean_abs', new_view_mean, self.global_step)
+        self.writer.add_scalar('new_view_gradients/norm', new_view_norm, self.global_step)
+        self.writer.add_scalar('new_view_gradients/mean_abs', new_view_mean, self.global_step)
 
     def _select_initial_views(
         self,
@@ -241,9 +235,9 @@ class NBVTrainer:
         gt_point_maps = gt_mesh_data.get("gt_point_maps")
         gt_valid_masks = gt_mesh_data.get("gt_valid_masks")
         depth_z_batch = gt_mesh_data.get("depth_z")
-        print("keys",batch["gt_mesh_data"].keys())
-        # keys dict_keys(['mesh_path', 'gt_points', 'normalize_method', 'num_samples', 'gt_point_maps', 'gt_valid_masks', 'original_mesh', 'normalized_mesh'])
-        # keys dict_keys(['initial_images', 'camera_poses', 'mesh_path', 'batch_name', 'set_name', 'model_name', 'source_dataset', 'source_dataset_idx', 'source_dataset_sample_idx', 'gt_mesh_data'])
+        # print("keys",batch["gt_mesh_data"].keys())
+        # gt_mesh_data_keys dict_keys(['mesh_path', 'gt_points', 'normalize_method', 'num_samples', 'gt_point_maps', 'gt_valid_masks', 'original_mesh', 'normalized_mesh'])
+        # batch_keys dict_keys(['initial_images', 'camera_poses', 'mesh_path', 'batch_name', 'set_name', 'model_name', 'source_dataset', 'source_dataset_idx', 'source_dataset_sample_idx', 'gt_mesh_data'])
         initial_images, camera_poses_batch, depth_z_batch, selection, active_view_count = self._select_initial_views(
             initial_images,
             camera_poses_batch,
@@ -367,7 +361,7 @@ class NBVTrainer:
                 step=render_step,
                 log_prefix="DepthZ/NewView",
                 train_flag=backprop,
-            )
+            ).detach()
             if depth_z_batch.device != new_depth_z.device:
                 depth_z_batch = depth_z_batch.to(new_depth_z.device)
             if depth_z_batch.dtype != new_depth_z.dtype:
@@ -377,7 +371,7 @@ class NBVTrainer:
             batch["depth_z"] = depth_z_batch
         # 步骤4: 质量评估 - VGGT重建并计算质量
         # 将 new_images 从 [B, 3, H, W] 扩展为 [B, 1, 3, H, W]
-        new_images_expanded = new_images.unsqueeze(1)  # [B, 1, 3, H, W]
+        new_images_expanded = new_images.unsqueeze(1).detach()  # [B, 1, 3, H, W]
         
         # 直接在第二个维度上拼接，得到 [B, N+1, 3, H, W]
         combined_images_batch = torch.cat([initial_images, new_images_expanded], dim=1)
@@ -422,9 +416,9 @@ class NBVTrainer:
             if pose_grad is None:
                 self.logger.warning("next_camera_pose grad is None")
 
-            self.writer.add_scalar('train/gradients/next_camera_grad_norm', pose_grad_norm, self.global_step)
-            self.writer.add_scalar('train/gradients/next_camera_grad_mean_abs', pose_grad_mean, self.global_step)
-            self.writer.add_scalar('train/gradients/next_camera_has_grad', 1.0 if pose_grad is not None else 0.0, self.global_step)
+            self.writer.add_scalar('next_camera_pose_grad/norm', pose_grad_norm, self.global_step)
+            self.writer.add_scalar('next_camera_pose_grad/mean_abs', pose_grad_mean, self.global_step)
+            self.writer.add_scalar('next_camera_pose_grad/has_grad', 1.0 if pose_grad is not None else 0.0, self.global_step)
 
             # grad_stats, missing = [], []
             # for name, param in self.policy_network.named_parameters():
@@ -458,8 +452,12 @@ class NBVTrainer:
             total_policy_norm = torch.nn.utils.clip_grad_norm_(
                 self.policy_network.parameters(), max_norm=1.0
             )
-            self.writer.add_scalar('train/gradients/policy_total_norm', total_policy_norm.item(), self.global_step)
-            # self.writer.add_scalar('train/gradients/policy_missing_params', float(len(missing)), self.global_step)
+            self.writer.add_scalar('policy_net_gradients/total_norm', total_policy_norm.item(), self.global_step)
+            if total_policy_norm.item() > 1000.0:  # 设置一个远高于正常值的阈值
+                print(f"🚨 检测到梯度爆炸！当前全局step: {self.global_step}, 范数: {total_policy_norm.item()}")
+                problematic_pose = next_camera_pose.detach().cpu().numpy()
+                print(f"   引发问题的位姿: {problematic_pose}")
+            # self.writer.add_scalar('gradients/policy_missing_params', float(len(missing)), self.global_step)
 
             self.optimizer.step()
         
@@ -515,7 +513,7 @@ class NBVTrainer:
         """训练一个epoch"""
         epoch_losses = []
 
-        if hasattr(train_loader, "dataset") and hasattr(train_loader.dataset, "set_epoch"):
+        if self.use_epoch_seed and hasattr(train_loader, "dataset") and hasattr(train_loader.dataset, "set_epoch"):
             train_loader.dataset.set_epoch(self.current_epoch)
 
         progress_bar = tqdm(train_loader, desc=f"Epoch {self.current_epoch}")
