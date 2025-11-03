@@ -109,7 +109,7 @@ class NBVTrainer:
         
         # 学习率调度器
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, T_max=self.num_epochs, eta_min=1e-6
+            self.optimizer, T_max=self.num_epochs, eta_min=1e-7
         )
         
         # 训练状态

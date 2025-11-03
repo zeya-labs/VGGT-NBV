@@ -44,7 +44,7 @@ def setup_config() -> Dict[str, Any]:
     config = {
         # 模型配置
         "scene_feature_dim": 768,
-        "policy_hidden_dim": 256,
+        "policy_hidden_dim": 512,
         "policy_num_heads": 4,
         "policy_num_layers": 3,
         # "policy_output_mode": "cartesian",
@@ -55,7 +55,7 @@ def setup_config() -> Dict[str, Any]:
         "batch_size": 1,  # 根据GPU内存调整
         "num_epochs": 1000,
         "normalize_method": "quantile",
-        "num_samples": 20000,
+        "num_samples": 100000,
         "weight_decay": 1e-5,
         "enable_validation": False,
         "use_epoch_seed": False,
