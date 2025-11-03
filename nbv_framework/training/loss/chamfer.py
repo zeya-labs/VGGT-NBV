@@ -11,6 +11,7 @@ import torch.nn as nn
 
 from pytorch3d.loss import chamfer_distance
 from pytorch3d.structures import Pointclouds
+from pytorch3d.ops import sample_farthest_points
 
 from ...utils.tensorboard_mesh import log_point_clouds_to_tensorboard
 
@@ -138,7 +139,30 @@ class ChamferDistance(nn.Module):
                 aligned = pred_points_f32
             aligned_points_list.append(aligned)
 
-        p_pred_aligned = Pointclouds(points=aligned_points_list)
+        target_fps_points = 32768
+        aligned_pointclouds = Pointclouds(points=aligned_points_list)
+        aligned_lengths = aligned_pointclouds.num_points_per_cloud()
+
+        if (aligned_lengths < target_fps_points).any():
+            target_fps_points = int(aligned_lengths.min().item())
+            print(
+                "Farthest point sampling requires all point clouds to have at least "
+                f"{target_fps_points} points. Received minimum length "
+                f"{int(aligned_lengths.min().item())}."
+            )
+
+        padded_aligned = aligned_pointclouds.points_padded()
+        sampled_points, _ = sample_farthest_points(
+            padded_aligned, lengths=aligned_lengths, K=target_fps_points
+        )
+        fps_aligned_points_list = [sampled_points[i] for i in range(sampled_points.shape[0])]
+
+        p_pred_aligned = Pointclouds(points=fps_aligned_points_list)
+
+        
+        point_counts = [int(points.shape[0]) for points in p_pred_aligned.points_list()]
+        print(f"Predicted point counts per batch: {point_counts}")
+
         p_gt_float = Pointclouds(points=gt_list)
 
         should_log_tb = self.log_tensorboard and writer is not None and step is not None
@@ -159,7 +183,7 @@ class ChamferDistance(nn.Module):
                     ),
                     (
                         "aligned_predicted",
-                        Pointclouds(points=aligned_points_list),
+                        Pointclouds(points=fps_aligned_points_list),
                         np.array([255, 0, 0], dtype=np.uint8),
                     ),
                 ]
