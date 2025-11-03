@@ -368,13 +368,9 @@ class ReconstructionLoss(nn.Module):
         total_loss = torch.tensor(0.0, device=device)
         loss_components: Dict[str, float] = {}
 
-        chamfer_save_dir: Optional[str]
-        # print(point_cloud_dir)
-        if self.save_point_clouds:
-            if point_cloud_dir is not None:
-                chamfer_save_dir = point_cloud_dir
-        else:
-            chamfer_save_dir = None
+        chamfer_save_dir: Optional[str] = None
+        if self.save_point_clouds and point_cloud_dir is not None:
+            chamfer_save_dir = point_cloud_dir
 
         weighted_chamfer, chamfer_raw, confidence_mask = self._compute_chamfer_component(
             recon_data,

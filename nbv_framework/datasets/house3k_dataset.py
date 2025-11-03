@@ -749,12 +749,12 @@ class House3KDataset(BaseDataset):
         gt_targets = self._build_gt_targets(gt_mesh_data, camera_poses_tensor, metadata)
         if gt_targets:
             gt_mesh_data.update(gt_targets)
-            depth_z_value = gt_targets.get("depth_z")
-            if depth_z_value is not None:
-                result["depth_z"] = depth_z_value
-            depth_viz_value = gt_targets.get("depth_z_viz")
-            if depth_viz_value is not None:
-                result["depth_z_viz"] = depth_viz_value
+            # depth_z_value = gt_targets.get("depth_z")
+            # if depth_z_value is not None:
+            #     result["depth_z"] = depth_z_value
+            # depth_viz_value = gt_targets.get("depth_z_viz")
+            # if depth_viz_value is not None:
+            #     result["depth_z_viz"] = depth_viz_value
 
         return result
 

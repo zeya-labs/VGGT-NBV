@@ -58,7 +58,7 @@ def setup_config() -> Dict[str, Any]:
         "num_samples": 100000,
         "weight_decay": 1e-5,
         "enable_validation": False,
-        "use_epoch_seed": False,
+        "use_epoch_seed": True,
         
         # 数据配置
         "synthetic_data_root": "./models/synthetic_data",
@@ -70,7 +70,7 @@ def setup_config() -> Dict[str, Any]:
         "max_meshes": 1,  # 限制加载的mesh数量，用于控制训练规模
         "manual_camera_position": [[-1.093546,1.648833,-1.686863]],
         "manual_camera_look_at": [0,0,0],
-        "use_manual_camera": True,
+        "use_manual_camera": False,
         
         # 设备配置
         "device": "cuda" if torch.cuda.is_available() else "cpu",

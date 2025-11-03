@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING, NamedTuple
 import numpy as np
 import os
 import logging
@@ -32,6 +32,14 @@ from ..utils.camera_utils import (
     world_points_to_camera_depth,
 )
 from ..utils.render_utils import render_gt_point_maps
+
+
+class PoseEvaluationResult(NamedTuple):
+    total_loss: torch.Tensor
+    loss_components: Dict[str, float]
+    new_images: torch.Tensor
+    gt_mesh_data: Dict[str, torch.Tensor]
+    depth_z: Optional[torch.Tensor]
 
 
 class NBVTrainer:
@@ -55,7 +63,8 @@ class NBVTrainer:
                  log_dir: str = "runs/nbv_experiment",
                  device: str = "cuda",
                  enable_validation: bool = False,
-                 use_epoch_seed: bool = False):
+                 use_epoch_seed: bool = False,
+                 enable_random_baseline: bool = True):
         """
         初始化训练器
         
@@ -72,6 +81,7 @@ class NBVTrainer:
             log_dir: TensorBoard日志目录
             device: 计算设备
             enable_validation: 是否在训练过程中执行验证流程
+            enable_random_baseline: 是否计算随机基线视角的 Chamfer 统计
         """
         self.vggt_wrapper = vggt_wrapper
         self.policy_network = policy_network
@@ -82,6 +92,7 @@ class NBVTrainer:
         self.log_dir = log_dir
         self.enable_validation = enable_validation
         self.use_epoch_seed = use_epoch_seed
+        self.enable_random_baseline = bool(enable_random_baseline)
 
         self.min_initial_views = min_initial_views
         self.max_initial_views = max_initial_views
@@ -134,6 +145,264 @@ class NBVTrainer:
         )
         self.logger = logging.getLogger(__name__)
 
+    def _configure_policy_mode(self, backprop: bool) -> None:
+        """根据是否反向传播设置策略网络模式并清空梯度。"""
+        if backprop:
+            self.policy_network.train()
+            self.optimizer.zero_grad()
+        else:
+            self.policy_network.eval()
+
+    def _extract_scene_features(
+        self,
+        initial_images: torch.Tensor,
+        camera_poses_batch: torch.Tensor,
+        depth_z_batch: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """封装 MapAnything scene feature 提取，便于复用和测试。"""
+        return self.vggt_wrapper.extract_scene_features(
+            initial_images,
+            camera_poses_batch,
+            is_metric_scale=False,
+            depth_z=depth_z_batch,
+        )
+
+    def _compute_policy_pose(
+        self,
+        policy_output: torch.Tensor,
+        camera_poses_batch: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """根据策略输出计算绝对位姿及相关中间量。"""
+        reference_position = camera_poses_batch[:, 0, :3]
+        predicted_relative_position = policy_output[:, :3]
+        absolute_position = reference_position + predicted_relative_position
+        next_camera_pose = position_to_pose_tensor(absolute_position)
+        return next_camera_pose, predicted_relative_position, absolute_position
+
+    def _log_camera_pose_stats(
+        self,
+        next_camera_pose: torch.Tensor,
+        predicted_relative_position: torch.Tensor,
+        step_index: Optional[int],
+    ) -> None:
+        """记录相机位姿统计信息。"""
+        if step_index is None or not hasattr(self, "writer"):
+            return
+
+        positions = next_camera_pose[:, :3]
+        quaternions = next_camera_pose[:, 3:]
+
+        position_norms = torch.norm(positions, dim=1)
+        self.writer.add_scalar('camera_pose/position_norm_mean', position_norms.mean(), step_index)
+        if position_norms.numel() > 1:
+            self.writer.add_scalar('camera_pose/position_norm_std', position_norms.std(), step_index)
+
+        quaternion_norms = torch.norm(quaternions, dim=1)
+        if quaternion_norms.numel() > 1:
+            self.writer.add_scalar('camera_pose/quaternion_norm_std', quaternion_norms.std(), step_index)
+
+        relative_position_norms = torch.norm(predicted_relative_position, dim=1)
+        self.writer.add_scalar('camera_pose/relative_position_norm_mean', relative_position_norms.mean(), step_index)
+        if relative_position_norms.numel() > 1:
+            self.writer.add_scalar('camera_pose/relative_position_norm_std', relative_position_norms.std(), step_index)
+
+    def _trim_gt_mesh_data(
+        self,
+        gt_mesh_data: Dict[str, torch.Tensor],
+        selection: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        """根据采样到的初始视图索引截取 GT 数据，避免后续函数重复实现。"""
+        trimmed = dict(gt_mesh_data)
+        if selection is None:
+            return trimmed
+
+        selection_device = selection
+        for key in ("gt_point_maps", "gt_valid_masks", "depth_z"):
+            value = trimmed.get(key)
+            if value is None:
+                continue
+            selection_device = selection.to(value.device)
+            trimmed[key] = value.index_select(1, selection_device).contiguous()
+        return trimmed
+
+    def _evaluate_candidate_pose(
+        self,
+        *,
+        pose: torch.Tensor,
+        initial_images: torch.Tensor,
+        camera_poses_batch: torch.Tensor,
+        gt_mesh_data: Dict[str, torch.Tensor],
+        render_step: Optional[int],
+        train_flag: bool,
+        point_cloud_dir: Optional[str],
+        log_to_tensorboard: bool,
+    ) -> PoseEvaluationResult:
+        """统一执行渲染、重建与损失计算，便于策略预测与随机基线共用。"""
+        batched_mesh = gt_mesh_data['normalized_mesh']
+        batched_mesh = batched_mesh.to(self.renderer.device)
+
+        new_images = self.renderer(
+            gt_mesh=batched_mesh,
+            camera_poses=pose,
+        )
+        if new_images.device != initial_images.device:
+            new_images = new_images.to(initial_images.device)
+        new_images = new_images.detach()
+
+        gt_point_maps = gt_mesh_data.get("gt_point_maps")
+        gt_valid_masks = gt_mesh_data.get("gt_valid_masks")
+        if gt_point_maps is None or gt_valid_masks is None:
+            raise KeyError(
+                "gt_mesh_data must contain 'gt_point_maps' and 'gt_valid_masks' for pose evaluation."
+            )
+
+        gt_point_maps = gt_point_maps.to(device=initial_images.device, dtype=torch.float32)
+        gt_valid_masks = gt_valid_masks.to(device=initial_images.device, dtype=torch.bool)
+
+        if camera_poses_batch.dim() == 2:
+            base_camera_poses = camera_poses_batch.unsqueeze(1)
+        else:
+            base_camera_poses = camera_poses_batch
+
+        tb_writer = self.writer if log_to_tensorboard and hasattr(self, "writer") else None
+        step_arg = render_step if log_to_tensorboard else None
+
+        new_point_maps, new_valid_masks = render_gt_point_maps(
+            renderer=self.renderer,
+            mesh_batch=batched_mesh,
+            camera_poses=pose,
+            output_device=initial_images.device,
+            writer=tb_writer,
+            step=step_arg,
+            train_flag=train_flag,
+        )
+
+        updated_point_maps = torch.cat([gt_point_maps, new_point_maps], dim=1).contiguous()
+        updated_valid_masks = torch.cat([gt_valid_masks, new_valid_masks], dim=1).contiguous().to(dtype=torch.bool)
+
+        updated_gt_mesh_data = dict(gt_mesh_data)
+        updated_gt_mesh_data["gt_point_maps"] = updated_point_maps
+        updated_gt_mesh_data["gt_valid_masks"] = updated_valid_masks
+
+        depth_z_batch = gt_mesh_data.get("depth_z")
+        updated_depth_z = None
+        if depth_z_batch is not None:
+            depth_z_batch_local = depth_z_batch.to(initial_images.device, dtype=torch.float32)
+            new_depth_z = world_points_to_camera_depth(
+                new_point_maps,
+                pose.unsqueeze(1),
+                valid_masks=new_valid_masks,
+                writer=tb_writer,
+                step=step_arg,
+                log_prefix="DepthZ/NewView",
+                train_flag=train_flag,
+            ).detach()
+            if depth_z_batch_local.device != new_depth_z.device:
+                depth_z_batch_local = depth_z_batch_local.to(new_depth_z.device)
+            if depth_z_batch_local.dtype != new_depth_z.dtype:
+                depth_z_batch_local = depth_z_batch_local.to(new_depth_z.dtype)
+            updated_depth_z = torch.cat([depth_z_batch_local, new_depth_z], dim=1).contiguous()
+            updated_gt_mesh_data["depth_z"] = updated_depth_z
+
+        combined_images_batch = torch.cat([initial_images, new_images.unsqueeze(1)], dim=1)
+        combined_camera_poses = torch.cat([base_camera_poses, pose.unsqueeze(1)], dim=1)
+
+        recon_data = self.vggt_wrapper.reconstruct_and_evaluate(
+            combined_images_batch,
+            combined_camera_poses,
+            depth_z=updated_depth_z,
+            is_metric_scale=False,
+            view_save_dir=point_cloud_dir,
+        )
+
+        total_loss, loss_components = self.loss_fn(
+            recon_data,
+            updated_gt_mesh_data,
+            combined_images_batch,
+            combined_camera_poses,
+            return_components=True,
+            writer=tb_writer,
+            step=step_arg,
+            train_flag=train_flag,
+            point_cloud_dir=point_cloud_dir,
+        )
+
+        return PoseEvaluationResult(
+            total_loss=total_loss,
+            loss_components=loss_components,
+            new_images=new_images,
+            gt_mesh_data=updated_gt_mesh_data,
+            depth_z=updated_depth_z,
+        )
+
+    def _sample_random_positions(self, batch_size: int, device: torch.device) -> torch.Tensor:
+        """在姿态约束内随机采样相机位置，保证 pose_penalty_loss=0。"""
+        inner_radius = float(getattr(self.loss_fn, "pose_inner_radius", 1.5))
+        outer_radius = float(getattr(self.loss_fn, "pose_outer_radius", inner_radius + 1.0))
+
+        floor_margin = float(getattr(self.loss_fn, "pose_floor_margin", 1.0))
+        up_axis = getattr(self.loss_fn, "pose_up_axis", "Y").upper()
+        axis_index = {"X": 0, "Y": 1, "Z": 2}.get(up_axis, 1)
+        min_height = -floor_margin
+
+        positions = torch.zeros(batch_size, 3, device=device, dtype=torch.float32)
+        filled = 0
+        attempts = 0
+        while filled < batch_size and attempts < 20:
+            remaining = batch_size - filled
+            sample_count = max(remaining * 2, 4)
+            directions = torch.randn(sample_count, 3, device=device, dtype=torch.float32)
+            directions = directions / directions.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+            radii = torch.rand(sample_count, 1, device=device, dtype=torch.float32)
+            radii = radii * (outer_radius - inner_radius) + inner_radius
+            samples = directions * radii
+            valid_mask = samples[:, axis_index] >= min_height
+            valid_samples = samples[valid_mask]
+            if valid_samples.numel() == 0:
+                attempts += 1
+                continue
+            take = min(valid_samples.size(0), remaining)
+            positions[filled:filled + take] = valid_samples[:take]
+            filled += take
+            attempts += 1
+
+        if filled < batch_size:
+            fallback = torch.randn(batch_size - filled, 3, device=device, dtype=torch.float32)
+            fallback = fallback / fallback.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+            radius = (inner_radius + outer_radius) * 0.5
+            fallback = fallback * radius
+            fallback[:, axis_index] = torch.clamp(fallback[:, axis_index], min=min_height + 1e-4)
+            positions[filled:] = fallback
+
+        return positions
+
+    def _compute_random_baseline(
+        self,
+        *,
+        initial_images: torch.Tensor,
+        camera_poses_batch: torch.Tensor,
+        gt_mesh_data: Dict[str, torch.Tensor],
+        render_step: Optional[int],
+    ) -> float:
+        """生成符合姿态约束的随机位姿并计算其 Chamfer 损失。"""
+        device = initial_images.device
+        random_positions = self._sample_random_positions(initial_images.shape[0], device=device)
+        random_pose = position_to_pose_tensor(random_positions)
+
+        with torch.no_grad():
+            result = self._evaluate_candidate_pose(
+                pose=random_pose,
+                initial_images=initial_images,
+                camera_poses_batch=camera_poses_batch,
+                gt_mesh_data=gt_mesh_data,
+                render_step=render_step,
+                train_flag=False,
+                point_cloud_dir=None,
+                log_to_tensorboard=False,
+            )
+
+        return float(result.loss_components.get("chamfer_loss", 0.0))
+
     def _log_vggt_gradient_stats(self, new_images: torch.Tensor) -> None:
         """记录VGGT相关的梯度统计信息到TensorBoard。"""
         grad_stats = self.vggt_wrapper.collect_gradient_stats()
@@ -152,17 +421,6 @@ class NBVTrainer:
 
         has_new_grad = 1.0 if new_images.grad is not None else 0.0
         self.writer.add_scalar('train/gradients/new_view_has_grad', has_new_grad, self.global_step)
-
-        if new_images.grad is not None:
-            new_view_norm = new_images.grad.norm().detach().item()
-            new_view_mean = new_images.grad.abs().mean().detach().item()
-        else:
-            new_view_norm = 0.0
-            new_view_mean = 0.0
-            self.logger.warning("new_images gradient is None at global step %d", self.global_step)
-
-        self.writer.add_scalar('new_view_gradients/norm', new_view_norm, self.global_step)
-        self.writer.add_scalar('new_view_gradients/mean_abs', new_view_mean, self.global_step)
 
     def _select_initial_views(
         self,
@@ -223,21 +481,15 @@ class NBVTrainer:
             new_images: 渲染的新视图
             initial_images: 初始视图
         """
-        if backprop:
-            self.policy_network.train()
-            self.optimizer.zero_grad()
-        else:
-            self.policy_network.eval()
+        self._configure_policy_mode(backprop)
 
-        initial_images = batch["initial_images"]  # [B, N, 3, H, W]
+        initial_images = batch["initial_images"]
         gt_mesh_data = batch["gt_mesh_data"]
         camera_poses_batch = batch["camera_poses"]
-        gt_point_maps = gt_mesh_data.get("gt_point_maps")
-        gt_valid_masks = gt_mesh_data.get("gt_valid_masks")
         depth_z_batch = gt_mesh_data.get("depth_z")
-        # print("keys",batch["gt_mesh_data"].keys())
-        # gt_mesh_data_keys dict_keys(['mesh_path', 'gt_points', 'normalize_method', 'num_samples', 'gt_point_maps', 'gt_valid_masks', 'original_mesh', 'normalized_mesh'])
-        # batch_keys dict_keys(['initial_images', 'camera_poses', 'mesh_path', 'batch_name', 'set_name', 'model_name', 'source_dataset', 'source_dataset_idx', 'source_dataset_sample_idx', 'gt_mesh_data'])
+        # print("keys",batch.keys())
+        # gt_mesh_data_keys dict_keys(['mesh_path', 'gt_points', 'normalize_method', 'num_samples', 'gt_point_maps', 'gt_valid_masks', 'depth_z', 'depth_z_viz', 'original_mesh', 'normalized_mesh'])
+        # batch_keys dict_keys(['initial_images', 'camera_poses', 'mesh_path', 'batch_name', 'set_name', 'model_name', 'depth_z', 'depth_z_viz', 'source_dataset', 'source_dataset_idx', 'source_dataset_sample_idx', 'gt_mesh_data'])
         initial_images, camera_poses_batch, depth_z_batch, selection, active_view_count = self._select_initial_views(
             initial_images,
             camera_poses_batch,
@@ -245,15 +497,14 @@ class NBVTrainer:
             randomize=backprop,
         )
 
-        # 步骤1: 状态编码 - MapAnything 提取场景特征
-        scene_features = self.vggt_wrapper.extract_scene_features(
+        trimmed_gt_mesh_data = self._trim_gt_mesh_data(gt_mesh_data, selection)
+
+        scene_features = self._extract_scene_features(
             initial_images,
             camera_poses_batch,
-            is_metric_scale=False,
-            depth_z=depth_z_batch,
+            depth_z_batch,
         )
-        # print("scene_features shape:", scene_features.shape)
-        # 步骤2: 动作提议 - 策略网络输出下一个相机位姿
+
         policy_output = self.policy_network(scene_features)
 
         if policy_output.shape[-1] < 3:
@@ -261,151 +512,46 @@ class NBVTrainer:
                 f"policy_network 输出维度需至少包含位置 (3)，实际为 {policy_output.shape[-1]}"
             )
 
-        reference_position = camera_poses_batch[:, 0, :3]
-        predicted_relative_position = policy_output[:, :3]
-        absolute_position = reference_position + predicted_relative_position
-
-        next_camera_pose = position_to_pose_tensor(absolute_position)
+        next_camera_pose, predicted_relative_position, _ = self._compute_policy_pose(
+            policy_output,
+            camera_poses_batch,
+        )
 
         if backprop and next_camera_pose.requires_grad:
             next_camera_pose.retain_grad()
 
-        # 记录位姿数据到TensorBoard
-        if self.global_step % 1 == 0:  # 每10步记录一次，避免过于频繁
-            # 记录位置信息（前3维）
-            positions = next_camera_pose[:, :3]  # [B, 3]
-            
-            # 记录四元数信息（后4维）
-            quaternions = next_camera_pose[:, 3:]  # [B, 4]
+        pose_log_step = self.global_step if backprop else None
+        self._log_camera_pose_stats(next_camera_pose, predicted_relative_position, pose_log_step)
 
-            # 记录位置的统计信息
-            position_norms = torch.norm(positions, dim=1)  # 计算位置向量的模长
-            self.writer.add_scalar('camera_pose/position_norm_mean', position_norms.mean(), self.global_step)
-            if position_norms.numel() > 1:  # 只有当样本数大于1时才计算标准差
-                self.writer.add_scalar('camera_pose/position_norm_std', position_norms.std(), self.global_step)
-            
-            # 记录四元数的模长（应该接近1）
-            quaternion_norms = torch.norm(quaternions, dim=1)
-            # self.writer.add_scalar('camera_pose/quaternion_norm_mean', quaternion_norms.mean(), self.global_step)
-            if quaternion_norms.numel() > 1:  # 只有当样本数大于1时才计算标准差
-                self.writer.add_scalar('camera_pose/quaternion_norm_std', quaternion_norms.std(), self.global_step)
-
-            # 记录相对位移的统计信息，便于监控策略输出尺度
-            relative_position_norms = torch.norm(predicted_relative_position, dim=1)
-            self.writer.add_scalar('camera_pose/relative_position_norm_mean', relative_position_norms.mean(), self.global_step)
-            if relative_position_norms.numel() > 1:
-                self.writer.add_scalar('camera_pose/relative_position_norm_std', relative_position_norms.std(), self.global_step)
-
-        # 构建包含初始视图和新视图的相机位姿列表
-        if camera_poses_batch.dim() == 2:
-            camera_poses_batch = camera_poses_batch.unsqueeze(1)
-        combined_camera_poses = torch.cat([
-            camera_poses_batch,
-            next_camera_pose.unsqueeze(1)
-        ], dim=1)  # [B, N+1, 7]
-
-        # 步骤3: 环境交互 - 可微分渲染生成新视图
-        batched_mesh = gt_mesh_data['normalized_mesh'] # 这现在是单个批次化的 Meshes 对象
-
-        # 确保整个批次化的 mesh 对象位于渲染器设备上
-        batched_mesh = batched_mesh.to(self.renderer.device)
-        new_images = self.renderer(
-            gt_mesh=batched_mesh,
-            camera_poses=next_camera_pose,
-        )
-
-        # 确保与 initial_images 在同一设备
-        if new_images.device != initial_images.device:
-            new_images = new_images.to(initial_images.device)
-
-        if backprop and new_images.requires_grad:
-            new_images.retain_grad()
-
-        # 构建GT点云与掩码（初始视图 + 新视图）
-        if gt_point_maps is None or gt_valid_masks is None:
-            raise KeyError(
-                "Batch gt_mesh_data must include 'gt_point_maps' and 'gt_valid_masks'. "
-                "Ensure dataset preprocessing renders correspondences."
-            )
-
-        selection_device = selection.to(gt_point_maps.device)
-        gt_point_maps = gt_point_maps.index_select(1, selection_device).contiguous()
-        gt_valid_masks = gt_valid_masks.index_select(1, selection_device).contiguous()
-
-        gt_point_maps = gt_point_maps.to(device=initial_images.device, dtype=torch.float32)
-        gt_valid_masks = gt_valid_masks.to(device=initial_images.device, dtype=torch.bool)
-
-        tb_writer = self.writer if hasattr(self, "writer") else None
         render_step = self.global_step if backprop else getattr(self, "val_image_step", None)
-
-        new_point_maps, new_valid_masks = render_gt_point_maps(
-            renderer=self.renderer,
-            mesh_batch=batched_mesh,
-            camera_poses=next_camera_pose,
-            output_device=initial_images.device,
-            writer=tb_writer,
-            step=render_step,
-            train_flag=backprop,
-        )
-
-        gt_point_maps = torch.cat([gt_point_maps, new_point_maps], dim=1).contiguous()
-        gt_valid_masks = torch.cat([gt_valid_masks, new_valid_masks], dim=1).contiguous().to(dtype=torch.bool)
-        gt_mesh_data["gt_point_maps"] = gt_point_maps
-        gt_mesh_data["gt_valid_masks"] = gt_valid_masks
-        if depth_z_batch is not None:
-            new_depth_z = world_points_to_camera_depth(
-                new_point_maps,
-                next_camera_pose.unsqueeze(1),
-                valid_masks=new_valid_masks,
-                writer=tb_writer,
-                step=render_step,
-                log_prefix="DepthZ/NewView",
-                train_flag=backprop,
-            ).detach()
-            if depth_z_batch.device != new_depth_z.device:
-                depth_z_batch = depth_z_batch.to(new_depth_z.device)
-            if depth_z_batch.dtype != new_depth_z.dtype:
-                depth_z_batch = depth_z_batch.to(new_depth_z.dtype)
-            depth_z_batch = torch.cat([depth_z_batch, new_depth_z], dim=1).contiguous()
-            gt_mesh_data["depth_z"] = depth_z_batch
-            batch["depth_z"] = depth_z_batch
-        # 步骤4: 质量评估 - VGGT重建并计算质量
-        # 将 new_images 从 [B, 3, H, W] 扩展为 [B, 1, 3, H, W]
-        new_images_expanded = new_images.unsqueeze(1).detach()  # [B, 1, 3, H, W]
-        
-        # 直接在第二个维度上拼接，得到 [B, N+1, 3, H, W]
-        combined_images_batch = torch.cat([initial_images, new_images_expanded], dim=1)
-        
-        # 保存视图数据（图像 + 相机标定）到日志目录
-        step_output_dir = os.path.join(self.log_dir, "images", f"step_{self.global_step:06d}")
-        
-        # VGGT一次性对整个batch进行重建与评估
-        recon_data = self.vggt_wrapper.reconstruct_and_evaluate(
-            combined_images_batch,
-            combined_camera_poses,
-            depth_z=depth_z_batch,
-            is_metric_scale=False,
-            view_save_dir=step_output_dir,
-        )
-        # print("===================loss开始计算===================")
-        # 计算重建质量损失
-        # 在训练时传递writer和step参数以启用点云可视化
+        step_output_dir = None
         if backprop:
-            total_loss, loss_components = self.loss_fn(
-                recon_data, gt_mesh_data, combined_images_batch,
-                combined_camera_poses,
-                return_components=True, writer=self.writer, step=self.global_step,
-                train_flag=True, point_cloud_dir=step_output_dir
+            step_output_dir = os.path.join(self.log_dir, "images", f"step_{self.global_step:06d}")
+
+        policy_eval = self._evaluate_candidate_pose(
+            pose=next_camera_pose,
+            initial_images=initial_images,
+            camera_poses_batch=camera_poses_batch,
+            gt_mesh_data=trimmed_gt_mesh_data,
+            render_step=render_step,
+            train_flag=backprop,
+            point_cloud_dir=step_output_dir,
+            log_to_tensorboard=backprop
+        )
+
+        total_loss = policy_eval.total_loss
+        loss_components = policy_eval.loss_components
+        new_images = policy_eval.new_images
+
+        random_chamfer = None
+        if backprop and self.enable_random_baseline:
+            random_chamfer = self._compute_random_baseline(
+                initial_images=initial_images,
+                camera_poses_batch=camera_poses_batch,
+                gt_mesh_data=trimmed_gt_mesh_data,
+                render_step=render_step,
             )
-        else:
-            total_loss, loss_components = self.loss_fn(
-                recon_data, gt_mesh_data, combined_images_batch,
-                combined_camera_poses,
-                return_components=True, writer=self.writer, step=self.val_image_step,
-                train_flag=False, point_cloud_dir=step_output_dir
-            )
-        # print("===================loss计算完成===================")
-        # 步骤5: 策略更新 - 反向传播（仅训练时）
+
         if backprop:
             total_loss.backward()
 
@@ -420,48 +566,19 @@ class NBVTrainer:
             self.writer.add_scalar('next_camera_pose_grad/mean_abs', pose_grad_mean, self.global_step)
             self.writer.add_scalar('next_camera_pose_grad/has_grad', 1.0 if pose_grad is not None else 0.0, self.global_step)
 
-            # grad_stats, missing = [], []
-            # for name, param in self.policy_network.named_parameters():
-            #     if not param.requires_grad:
-            #         continue
-            #     grad = param.grad
-            #     if grad is None:
-            #         missing.append(name)
-            #         continue
-            #     grad_stats.append((name, grad.norm().item(), grad.abs().mean().item()))
-
-            # for name, norm_val, mean_abs in grad_stats:  # 只打印前几个防止刷屏
-            #     self.logger.info(
-            #         "grad %s |norm| %.4e |mean|grad| %.4e",
-            #         name, norm_val, mean_abs
-            #     )
-            # if len(grad_stats) > 8:
-            #     overall = torch.sqrt(sum(
-            #         param.grad.pow(2).sum()
-            #         for _, param in self.policy_network.named_parameters()
-            #         if param.grad is not None
-            #     )).item()
-            #     self.logger.info("total grad norm %.4e (remaining layers truncated)", overall)
-            # if missing:
-            #     self.logger.warning("layers without grad: %s", ", ".join(missing[:5]))
-
-            # 记录VGGT与新视图的梯度统计信息
             self._log_vggt_gradient_stats(new_images)
 
-            # 记录策略网络梯度的整体范数（clip_grad_norm_返回裁剪前范数）
             total_policy_norm = torch.nn.utils.clip_grad_norm_(
                 self.policy_network.parameters(), max_norm=1.0
             )
             self.writer.add_scalar('policy_net_gradients/total_norm', total_policy_norm.item(), self.global_step)
-            if total_policy_norm.item() > 1000.0:  # 设置一个远高于正常值的阈值
+            if total_policy_norm.item() > 1000.0:
                 print(f"🚨 检测到梯度爆炸！当前全局step: {self.global_step}, 范数: {total_policy_norm.item()}")
                 problematic_pose = next_camera_pose.detach().cpu().numpy()
                 print(f"   引发问题的位姿: {problematic_pose}")
-            # self.writer.add_scalar('gradients/policy_missing_params', float(len(missing)), self.global_step)
 
             self.optimizer.step()
         
-        # 记录：只挑选需要的loss项并补充训练态量，避免把内部调试字段写入日志
         logged_loss_keys = (
             "total_loss",
             "chamfer_loss",
@@ -474,28 +591,29 @@ class NBVTrainer:
             "weighted_pose_penalty_loss",
         )
         loss_dict = {key: loss_components[key] for key in logged_loss_keys if key in loss_components}
+        if random_chamfer is not None:
+            loss_dict["random_chamfer_loss"] = random_chamfer
         loss_dict["learning_rate"] = self.optimizer.param_groups[0]["lr"]
         loss_dict["num_initial_views"] = float(active_view_count)
 
-        # TensorBoard logging
         if backprop:
-            # 记录总损失和学习率
             self.writer.add_scalar('train/total_loss', loss_dict['total_loss'], self.global_step)
             self.writer.add_scalar('train/learning_rate', loss_dict['learning_rate'], self.global_step)
             self.writer.add_scalar('train/num_initial_views', active_view_count, self.global_step)
-            
-            # 记录各个损失组件（原始值）
-            self.writer.add_scalar('train/losses/chamfer_loss', loss_dict['chamfer_loss'], self.global_step)
-            # self.writer.add_scalar('train/losses/confidence_loss', loss_dict['confidence_loss'], self.global_step)
-            # self.writer.add_scalar('train/losses/viewpoint_loss', loss_dict['viewpoint_loss'], self.global_step)
-            
-            # # 记录加权后的损失组件
-            # self.writer.add_scalar('train/weighted_losses/chamfer_loss', loss_dict['weighted_chamfer_loss'], self.global_step)
-            # self.writer.add_scalar('train/weighted_losses/confidence_loss', loss_dict['weighted_confidence_loss'], self.global_step)
-            # self.writer.add_scalar('train/weighted_losses/viewpoint_loss', loss_dict['weighted_viewpoint_loss'], self.global_step)
-            self.writer.add_scalar('train/losses/pose_penalty_loss', loss_dict['pose_penalty_loss'], self.global_step)
-            # self.writer.add_scalar('train/weighted_losses/pose_penalty_loss', loss_dict['weighted_pose_penalty_loss'], self.global_step)
-            
+
+            if random_chamfer is not None and 'chamfer_loss' in loss_dict:
+                self.writer.add_scalars(
+                    'train/losses/chamfer_loss',
+                    {'policy': loss_dict['chamfer_loss'], 'random': random_chamfer},
+                    self.global_step,
+                )
+                self.writer.add_scalar('train/losses/random_chamfer_loss', random_chamfer, self.global_step)
+            elif 'chamfer_loss' in loss_dict:
+                self.writer.add_scalar('train/losses/chamfer_loss', loss_dict['chamfer_loss'], self.global_step)
+
+            if 'pose_penalty_loss' in loss_dict:
+                self.writer.add_scalar('train/losses/pose_penalty_loss', loss_dict['pose_penalty_loss'], self.global_step)
+
             self.global_step += 1
         
         return loss_dict, new_images, initial_images
