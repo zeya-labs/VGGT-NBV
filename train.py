@@ -6,12 +6,48 @@ NBV框架演示脚本
 
 import torch
 import torch.multiprocessing as mp
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 import time
 import os
 import argparse
 import random
 import numpy as np
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+
+
+def init_distributed_mode(args) -> None:
+    """Initialize torch.distributed if launched via torchrun."""
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+
+    args.world_size = world_size
+    args.rank = rank
+    args.local_rank = local_rank
+    args.distributed = world_size > 1
+
+    if not args.distributed:
+        # Ensure consistent attributes for single-process runs
+        args.world_size = 1
+        args.rank = 0
+        args.local_rank = 0
+        return
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("Distributed training requires CUDA devices.")
+
+    torch.cuda.set_device(args.local_rank)
+    dist.init_process_group(backend=args.dist_backend, init_method="env://")
+    dist.barrier()
+
+
+def cleanup_distributed() -> None:
+    """Tear down torch.distributed state if initialized."""
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+        dist.destroy_process_group()
 
 
 def set_random_seed(seed: int = 42):
@@ -52,13 +88,13 @@ def setup_config() -> Dict[str, Any]:
         
         # 训练配置
         "learning_rate": 1e-5,
-        "batch_size": 2,  # 根据GPU内存调整
+        "batch_size": 1,  # 根据GPU内存调整
         "num_epochs": 1000,
         "normalize_method": "quantile",
         "num_samples": 100000,
         "weight_decay": 1e-5,
         "enable_validation": False,
-        "use_epoch_seed": True,
+        "use_epoch_seed": False,
         
         # 数据配置
         "synthetic_data_root": "./models/synthetic_data",
@@ -68,11 +104,11 @@ def setup_config() -> Dict[str, Any]:
         "image_size": 518,
         "up_axis": "Y",  # 数据集模型默认上方向 ('Y' 或 'Z')
         "max_meshes": 1,  # 限制加载的mesh数量，用于控制训练规模
-        "train_repeat_factor": 5,  # 控制训练集在DataLoader中的重复次数
+        "train_repeat_factor": 4,  # 控制训练集在DataLoader中的重复次数
         "val_repeat_factor": 1,    # 控制验证集在DataLoader中的重复次数
         "manual_camera_position": [[-1.093546,1.648833,-1.686863]],
         "manual_camera_look_at": [0,0,0],
-        "use_manual_camera": False,
+        "use_manual_camera": True,
         
         # 设备配置
         "device": "cuda" if torch.cuda.is_available() else "cpu",
@@ -158,9 +194,15 @@ def setup_models(config: Dict[str, Any]):
     return mapanything_wrapper, policy_network, renderer, loss_fn
 
 
-def setup_data_loaders(config: Dict[str, Any]):
+def setup_data_loaders(config: Dict[str, Any],
+                       distributed: bool = False,
+                       world_size: int = 1,
+                       rank: int = 0,
+                       seed: int = 42):
     """设置数据加载器"""
     print("Setting up data loaders...")
+    train_sampler: Optional[DistributedSampler] = None
+    val_sampler: Optional[DistributedSampler] = None
     
     # 可以选择使用不同的数据集类型
     # 选项1: 合成数据集
@@ -243,16 +285,36 @@ def setup_data_loaders(config: Dict[str, Any]):
         )
     
     # 数据加载器
+    if distributed:
+        train_sampler = DistributedSampler(
+            train_dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=True,
+            seed=seed,
+            drop_last=True,
+        )
+        val_sampler = DistributedSampler(
+            val_dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=False,
+            seed=seed,
+            drop_last=False,
+        )
+
     train_loader = create_train_loader(
         train_dataset,
         batch_size=config["batch_size"],
-        num_workers=1,
+        num_workers=10,
+        sampler=train_sampler,
     )
     
     val_loader = create_val_loader(
         val_dataset,
         batch_size=config["batch_size"],
-        num_workers=1,
+        num_workers=10,
+        sampler=val_sampler,
     )
     
     print(f"Data loaders created - Train: {len(train_dataset)}, Val: {len(val_dataset)}")
@@ -291,7 +353,9 @@ def train_nbv_policy(config: Dict[str, Any],
                     train_loader,
                     val_loader):
     """训练NBV策略"""
-    print("Starting NBV policy training...")
+    is_main_process = config.get("is_main_process", True)
+    if is_main_process:
+        print("Starting NBV policy training...")
     
     # 创建训练器
     trainer = NBVTrainer(
@@ -309,6 +373,9 @@ def train_nbv_policy(config: Dict[str, Any],
         randomize_initial_views=config.get("randomize_initial_views", True),
         enable_validation=config.get("enable_validation", False),
         use_epoch_seed=config.get("use_epoch_seed", False),
+        distributed=config.get("distributed", False),
+        world_size=config.get("world_size", 1),
+        rank=config.get("rank", 0),
     )
     
     # 断点续训逻辑
@@ -317,14 +384,16 @@ def train_nbv_policy(config: Dict[str, Any],
     # 1. 检查是否指定了特定的检查点
     if config.get("resume_checkpoint") and os.path.exists(config["resume_checkpoint"]):
         resume_checkpoint_path = config["resume_checkpoint"]
-        print(f"Resuming from specified checkpoint: {resume_checkpoint_path}")
+        if is_main_process:
+            print(f"Resuming from specified checkpoint: {resume_checkpoint_path}")
     
     # 2. 如果启用自动恢复，查找最新检查点
     elif config.get("auto_resume", True):
         latest_checkpoint = find_latest_checkpoint(config["save_dir"])
         if latest_checkpoint:
             resume_checkpoint_path = latest_checkpoint
-            print(f"Auto-resuming from latest checkpoint: {resume_checkpoint_path}")
+            if is_main_process:
+                print(f"Auto-resuming from latest checkpoint: {resume_checkpoint_path}")
     
     # 3. 加载检查点
     if resume_checkpoint_path:
@@ -332,10 +401,12 @@ def train_nbv_policy(config: Dict[str, Any],
             trainer.load_checkpoint(resume_checkpoint_path)
             print(f"Successfully resumed from epoch {trainer.current_epoch}")
         except Exception as e:
-            print(f"Failed to load checkpoint: {e}")
-            print("Starting training from scratch...")
+            if is_main_process:
+                print(f"Failed to load checkpoint: {e}")
+                print("Starting training from scratch...")
     else:
-        print("No checkpoint found, starting training from scratch...")
+        if is_main_process:
+            print("No checkpoint found, starting training from scratch...")
     
     # 开始训练
     trainer.train(
@@ -351,6 +422,12 @@ def run_evaluation(config: Dict[str, Any],
                   policy_network: BaseNBVPolicy,
                   renderer: DifferentiableRenderer):
     """运行评估"""
+    if not config.get("is_main_process", True):
+        return
+
+    if hasattr(policy_network, "module"):
+        policy_network = policy_network.module  # type: ignore[attr-defined]
+
     print("Running evaluation...")
     
     # 创建测试数据集
@@ -412,59 +489,104 @@ def main():
                        help="Disable automatic resume from latest checkpoint")
     parser.add_argument("--seed", type=int, default=42,
                        help="Random seed for reproducibility")
+    parser.add_argument("--dist-backend", type=str, default="nccl",
+                        help="Backend to use for torch.distributed runs")
     
     args = parser.parse_args()
-    
-    # 设置随机种子（在所有其他操作之前）
-    set_random_seed(args.seed)
-    
-    # 设置配置
-    config = setup_config()
-    
-    # 更新断点续训配置
-    if args.resume:
-        config["resume_checkpoint"] = args.resume
-        print(f"Resume checkpoint specified: {args.resume}")
-    
-    if args.no_auto_resume:
-        config["auto_resume"] = False
-        print("Auto-resume disabled")
-    
-    print("NBV Framework Demo")
-    print("=" * 50)
-    print(f"Device: {config['device']}")
-    print(f"Mode: {args.mode}")
-    print(f"Max meshes: {config['max_meshes']}")
-    print(
-        f"Initial views: min={config['min_initial_views']}, "
-        f"max={config['max_initial_views']}, "
-        f"randomize={config['randomize_initial_views']}"
-    )
-    
-    # 创建合成数据（如果需要）
-    if args.create_data or not os.path.exists(config["synthetic_data_root"]):
-        create_synthetic_data(config)
-    
-    # 设置模型
-    mapanything_wrapper, policy_network, renderer, loss_fn = setup_models(config)
-    
-    if args.mode in ["train", "all"]:
-        # 设置数据加载器
-        train_loader, val_loader = setup_data_loaders(config)
-        
-        # 训练
-        trainer = train_nbv_policy(
-            config, mapanything_wrapper, policy_network, renderer,
-            loss_fn, train_loader, val_loader
-        )
 
-    if args.mode in ["eval", "all"]:
-        # 评估
-        run_evaluation(config, mapanything_wrapper, policy_network, renderer)
+    # Ensure CUDA-capable subprocesses (DataLoader workers) use spawn semantics
+    try:
+        mp.set_start_method("spawn", force=True)
+    except RuntimeError:
+        pass
     
-    print("\nDemo completed successfully!")
+    init_distributed_mode(args)
+    try:
+        # 设置随机种子（在所有其他操作之前, 带上全局rank以避免重复）
+        set_random_seed(args.seed + args.rank)
+
+        # 设置配置
+        config = setup_config()
+        config["seed"] = args.seed
+        config["distributed"] = args.distributed
+        config["world_size"] = args.world_size
+        config["rank"] = args.rank
+        config["local_rank"] = args.local_rank
+        config["is_main_process"] = (args.rank == 0)
+
+        device = torch.device(f"cuda:{args.local_rank}") if torch.cuda.is_available() else torch.device("cpu")
+        config["device"] = device
+
+        # 更新断点续训配置
+        if args.resume:
+            config["resume_checkpoint"] = args.resume
+            if config["is_main_process"]:
+                print(f"Resume checkpoint specified: {args.resume}")
+
+        if args.no_auto_resume:
+            config["auto_resume"] = False
+            if config["is_main_process"]:
+                print("Auto-resume disabled")
+
+        if config["is_main_process"]:
+            print("NBV Framework Demo")
+            print("=" * 50)
+            print(f"Device: {config['device']}")
+            print(f"Mode: {args.mode}")
+            print(f"Max meshes: {config['max_meshes']}")
+            print(
+                f"Initial views: min={config['min_initial_views']}, "
+                f"max={config['max_initial_views']}, "
+                f"randomize={config['randomize_initial_views']}"
+            )
+
+        # 创建合成数据（如果需要，仅主进程执行）
+        if config["is_main_process"] and (args.create_data or not os.path.exists(config["synthetic_data_root"])):
+            create_synthetic_data(config)
+
+        if args.distributed:
+            dist.barrier()
+
+        # 设置模型
+        mapanything_wrapper, policy_network, renderer, loss_fn = setup_models(config)
+
+        if config["distributed"]:
+            device_index = config["device"].index
+            if device_index is None:
+                raise RuntimeError("CUDA device index is required for DistributedDataParallel")
+            policy_network = DDP(
+                policy_network,
+                device_ids=[device_index],
+                output_device=device_index,
+                find_unused_parameters=True,
+            )
+
+        if args.mode in ["train", "all"]:
+            # 设置数据加载器
+            train_loader, val_loader = setup_data_loaders(
+                config,
+                distributed=config["distributed"],
+                world_size=config["world_size"],
+                rank=config["rank"],
+                seed=args.seed,
+            )
+            
+            # 训练
+            train_nbv_policy(
+                config, mapanything_wrapper, policy_network, renderer,
+                loss_fn, train_loader, val_loader
+            )
+
+        if args.mode in ["eval", "all"]:
+            # 评估
+            eval_policy = policy_network
+            run_evaluation(config, mapanything_wrapper, eval_policy, renderer)
+
+        if config["is_main_process"]:
+            print("\nDemo completed successfully!")
+    finally:
+        cleanup_distributed()
 
 
 if __name__ == "__main__":
-    mp.set_start_method('spawn') 
     main()
