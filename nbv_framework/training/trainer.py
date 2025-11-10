@@ -236,6 +236,7 @@ class NBVTrainer:
         train_flag: bool,
         point_cloud_dir: Optional[str],
         log_to_tensorboard: bool,
+        retain_gradients: bool,
     ) -> PoseEvaluationResult:
         """统一执行渲染、重建与损失计算，便于策略预测与随机基线共用。"""
         batched_mesh = gt_mesh_data['normalized_mesh']
@@ -247,7 +248,11 @@ class NBVTrainer:
         )
         if new_images.device != initial_images.device:
             new_images = new_images.to(initial_images.device)
-        new_images = new_images.detach()
+        if retain_gradients:
+            if new_images.requires_grad:
+                new_images.retain_grad()
+        else:
+            new_images = new_images.detach()
 
         gt_point_maps = gt_mesh_data.get("gt_point_maps")
         gt_valid_masks = gt_mesh_data.get("gt_valid_masks")
@@ -383,11 +388,12 @@ class NBVTrainer:
         camera_poses_batch: torch.Tensor,
         gt_mesh_data: Dict[str, torch.Tensor],
         render_step: Optional[int],
-    ) -> float:
+    ) -> Tuple[float, torch.Tensor, float]:
         """生成符合姿态约束的随机位姿并计算其 Chamfer 损失。"""
         device = initial_images.device
         random_positions = self._sample_random_positions(initial_images.shape[0], device=device)
         random_pose = position_to_pose_tensor(random_positions)
+        position_norm_mean = random_positions.norm(dim=1).mean().item()
 
         with torch.no_grad():
             result = self._evaluate_candidate_pose(
@@ -399,9 +405,14 @@ class NBVTrainer:
                 train_flag=False,
                 point_cloud_dir=None,
                 log_to_tensorboard=False,
+                retain_gradients=False,
             )
 
-        return float(result.loss_components.get("chamfer_loss", 0.0))
+        return (
+            float(result.loss_components.get("chamfer_loss", 0.0)),
+            result.new_images.detach(),
+            position_norm_mean,
+        )
 
     def _log_vggt_gradient_stats(self, new_images: torch.Tensor) -> None:
         """记录VGGT相关的梯度统计信息到TensorBoard。"""
@@ -536,21 +547,35 @@ class NBVTrainer:
             render_step=render_step,
             train_flag=backprop,
             point_cloud_dir=step_output_dir,
-            log_to_tensorboard=backprop
+            log_to_tensorboard=backprop,
+            retain_gradients=backprop,
         )
 
         total_loss = policy_eval.total_loss
         loss_components = policy_eval.loss_components
         new_images = policy_eval.new_images
+        updated_gt_mesh_data = policy_eval.gt_mesh_data
+        updated_depth_z = policy_eval.depth_z
+        batch["gt_mesh_data"] = updated_gt_mesh_data
+        if updated_depth_z is not None:
+            batch["depth_z"] = updated_depth_z
 
         random_chamfer = None
+        random_images = None
+        random_position_norm_mean = None
         if backprop and self.enable_random_baseline:
-            random_chamfer = self._compute_random_baseline(
+            random_chamfer, random_images, random_position_norm_mean = self._compute_random_baseline(
                 initial_images=initial_images,
                 camera_poses_batch=camera_poses_batch,
                 gt_mesh_data=trimmed_gt_mesh_data,
                 render_step=render_step,
             )
+            if random_position_norm_mean is not None:
+                self.logger.info(
+                    "Random baseline position_norm_mean: %.4f (step %d)",
+                    random_position_norm_mean,
+                    self.global_step,
+                )
 
         if backprop:
             total_loss.backward()
@@ -608,6 +633,23 @@ class NBVTrainer:
                     self.global_step,
                 )
                 self.writer.add_scalar('train/losses/random_chamfer_loss', random_chamfer, self.global_step)
+                if random_position_norm_mean is not None:
+                    self.writer.add_scalar('train/random_baseline/position_norm_mean', random_position_norm_mean, self.global_step)
+                if random_images is not None:
+                    random_image_dir = os.path.join(self.log_dir, "images", f"step_{self.global_step:06d}", "random_baseline")
+                    os.makedirs(random_image_dir, exist_ok=True)
+                    save_path = os.path.join(random_image_dir, "random_view.png")
+                    try:
+                        random_images_cpu = random_images.detach().cpu()
+                        torchvision.utils.save_image(random_images_cpu, save_path)
+                        if random_images_cpu.dim() == 4 and random_images_cpu.size(0) > 0:
+                            first_image = random_images_cpu[0]
+                        else:
+                            first_image = random_images_cpu
+                        self.writer.add_image('train/random_baseline/new_view', first_image, self.global_step)
+                        self.logger.info("Random baseline image saved to %s", save_path)
+                    except Exception as exc:
+                        self.logger.warning("Failed to save random baseline image: %s", exc)
             elif 'chamfer_loss' in loss_dict:
                 self.writer.add_scalar('train/losses/chamfer_loss', loss_dict['chamfer_loss'], self.global_step)
 
