@@ -9,6 +9,10 @@ from typing import List, Dict, Optional, Tuple
 import torch
 from torch.utils.data import Dataset
 
+from nbv_framework.utils.logging_utils import get_logger
+
+LOGGER = get_logger(__name__)
+
 
 class BaseDataset(Dataset, ABC):
     """
@@ -60,8 +64,17 @@ class BaseDataset(Dataset, ABC):
         # 由子类实现具体的数据加载逻辑
         self.data_list = self._load_data_list()
         
-        print(f"[{self.__class__.__name__}] Loaded {len(self.data_list)} samples for {split} split")
-        print(f"Mesh normalization: {normalize_method}, Sample points: {num_samples}")
+        LOGGER.info(
+            "[%s] Loaded %d samples for %s split",
+            self.__class__.__name__,
+            len(self.data_list),
+            split,
+        )
+        LOGGER.info(
+            "Mesh normalization: %s, Sample points: %d",
+            normalize_method,
+            num_samples,
+        )
     
     @abstractmethod # 由子类实现具体的数据加载逻辑
     def _load_data_list(self) -> List[Dict]:
@@ -150,7 +163,7 @@ class BaseDataset(Dataset, ABC):
                     all_poses = torch.tensor(poses_data, dtype=torch.float32)
             
             if all_poses is None:
-                print(f"Warning: Unsupported camera poses format in {camera_poses_path}")
+                LOGGER.warning("Unsupported camera poses format in %s", camera_poses_path)
                 return None
             
             # 如果指定了选中的索引，则只返回对应的位姿
@@ -158,13 +171,13 @@ class BaseDataset(Dataset, ABC):
                 try:
                     return all_poses[selected_indices]
                 except IndexError as e:
-                    print(f"Warning: Index out of range when selecting poses: {e}")
+                    LOGGER.warning("Index out of range when selecting poses: %s", e)
                     return None
             
             return all_poses
             
         except Exception as e:
-            print(f"Error loading camera poses from {camera_poses_path}: {e}")
+            LOGGER.error("Error loading camera poses from %s: %s", camera_poses_path, e)
             return None
     
     def _parse_position_quaternion_format(self, poses_data: List[Dict]) -> torch.Tensor:
@@ -283,7 +296,7 @@ class BaseDataset(Dataset, ABC):
         seed_material = f"{canonical}|{base_seed if base_seed is not None else 0}|{epoch}"
         digest = hashlib.md5(seed_material.encode("utf-8")).hexdigest()
         seed = int(digest, 16) % (2 ** 32 - 1)
-        print(f"Using seed {seed} for initial view selection")
+        LOGGER.info("Using seed %s for initial view selection", seed)
         rng = random.Random(seed)
         selected_paths = rng.sample(available_images, self.num_initial_views)
         
@@ -299,7 +312,7 @@ class BaseDataset(Dataset, ABC):
                     index = available_images.index(path)
                     selected_indices.append(index)
                 except ValueError:
-                    print(f"Warning: Cannot determine index for image {path}")
+                    LOGGER.warning("Cannot determine index for image %s", path)
         
         # 按索引升序排列，保持路径与索引一一对应
         pairs = sorted(zip(selected_indices, selected_paths), key=lambda x: x[0])

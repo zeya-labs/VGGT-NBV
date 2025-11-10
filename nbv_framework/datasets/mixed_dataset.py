@@ -8,6 +8,9 @@ from torch.utils.data import Dataset
 
 from .base_dataset import BaseDataset
 from .dataset_factory import DatasetFactory
+from nbv_framework.utils.logging_utils import get_logger
+
+LOGGER = get_logger(__name__)
 
 
 class MixedDataset(Dataset):
@@ -56,10 +59,10 @@ class MixedDataset(Dataset):
         self.total_length = total
         self._epoch: int = 0
 
-        print("混合数据集创建成功 (deterministic mode):")
+        LOGGER.info("混合数据集创建成功 (deterministic mode):")
         for name, length in zip(self.dataset_names, self.dataset_lengths):
-            print(f"  - {name}: {length} 样本")
-        print(f"总计: {self.total_length} 样本")
+            LOGGER.info("  - %s: %d 样本", name, length)
+        LOGGER.info("总计: %d 样本", self.total_length)
 
     def __len__(self) -> int:
         return self.total_length

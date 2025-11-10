@@ -11,6 +11,10 @@ from mpl_toolkits.mplot3d import Axes3D
 from typing import Dict, List, Optional, Tuple
 import os
 
+from nbv_framework.utils.logging_utils import get_logger
+
+LOGGER = get_logger(__name__)
+
 
 def visualize_reconstruction(recon_data: Dict[str, torch.Tensor],
                            save_path: Optional[str] = None,
@@ -32,7 +36,7 @@ def visualize_reconstruction(recon_data: Dict[str, torch.Tensor],
     images = recon_data.get("images")  # [B, S, 3, H, W]
     
     if world_points is None:
-        print("No world points available for visualization")
+        LOGGER.warning("No world points available for visualization")
         return
     
     # 处理批次维度
@@ -126,7 +130,7 @@ def visualize_reconstruction(recon_data: Dict[str, torch.Tensor],
     
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"Visualization saved to {save_path}")
+        LOGGER.info("Visualization saved to %s", save_path)
     
     plt.show()
 
@@ -167,7 +171,7 @@ def plot_training_curves(train_losses: List[float],
     
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"Training curves saved to {save_path}")
+        LOGGER.info("Training curves saved to %s", save_path)
     
     plt.show()
 
@@ -240,7 +244,7 @@ def visualize_nbv_strategy(camera_poses: torch.Tensor,
     
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"NBV strategy visualization saved to {save_path}")
+        LOGGER.info("NBV strategy visualization saved to %s", save_path)
     
     plt.show()
 
@@ -290,7 +294,7 @@ def create_training_report(train_losses: List[float],
         improvement = (initial_loss - final_loss) / initial_loss * 100
         f.write(f"Training Loss Improvement: {improvement:.2f}%\n")
     
-    print(f"Training report saved to {save_dir}")
+    LOGGER.info("Training report saved to %s", save_dir)
 
 
 def plot_loss_components(loss_history: Dict[str, List[float]],
@@ -330,6 +334,6 @@ def plot_loss_components(loss_history: Dict[str, List[float]],
     
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"Loss components plot saved to {save_path}")
+        LOGGER.info("Loss components plot saved to %s", save_path)
     
     plt.show()

@@ -17,6 +17,8 @@ from typing import List, Dict, Tuple, Optional, Sequence, Union
 import sys
 import os
 
+from nbv_framework.utils.logging_utils import get_logger
+
 # 添加vggt路径到sys.path
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../vggt'))
 
@@ -24,6 +26,8 @@ from vggt.models.vggt import VGGT
 from vggt.utils.load_fn import load_and_preprocess_images
 from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 from vggt.utils.geometry_torch import unproject_depth_map_to_point_map_torch
+
+LOGGER = get_logger(__name__)
 
 
 class VGGTWrapper(nn.Module):
@@ -49,7 +53,7 @@ class VGGTWrapper(nn.Module):
         
         self.device = device
         # 加载预训练的VGGT模型
-        print(f"Loading VGGT model: {model_name}")
+        LOGGER.info("Loading VGGT model: %s", model_name)
         self.vggt_model = VGGT.from_pretrained(model_name).to(device)
         
         # 冻结所有参数
@@ -57,7 +61,7 @@ class VGGTWrapper(nn.Module):
             param.requires_grad = False
         
         self.vggt_model.eval()
-        print("VGGT model loaded and frozen successfully")
+        LOGGER.info("VGGT model loaded and frozen successfully")
 
         # 梯度捕获配置（用于TensorBoard分析）
         self._capture_gradients: bool = False

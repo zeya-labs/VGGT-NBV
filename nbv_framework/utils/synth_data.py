@@ -11,6 +11,9 @@ from .mesh_generator import MeshGenerator, create_pytorch3d_mesh
 from .camera_utils import CameraPoseGenerator, pose_dict_to_tensor
 from ..rendering.differentiable_renderer import DifferentiableRenderer
 from .textures import TextureGenerator
+from .logging_utils import get_logger
+
+LOGGER = get_logger(__name__)
 
 
 class SyntheticDataGenerator:
@@ -79,7 +82,7 @@ class SyntheticDataGenerator:
 
         for i in range(num_objects):
             object_id = f"object_{i:04d}"
-            print(f"--- Generating {object_id} ---")
+            LOGGER.info("--- Generating %s ---", object_id)
             
             # 生成单个对象的数据
             data_item = self._generate_single_object(
@@ -219,10 +222,13 @@ class SyntheticDataGenerator:
     
     def _print_statistics(self, total_objects: int, train_count: int, val_count: int):
         """打印数据集统计信息"""
-        print("\n========================================")
-        print(f"Generated {total_objects} synthetic objects")
-        print(f"Train: {train_count}, Val: {val_count}")
-        print(f"Up axis: {self.up_axis}")
+        LOGGER.info(
+            "Generated %d synthetic objects | Train: %d | Val: %d | Up axis: %s",
+            total_objects,
+            train_count,
+            val_count,
+            self.up_axis,
+        )
 
 
 def create_synthetic_training_data(
@@ -264,6 +270,4 @@ def create_synthetic_training_data(
 
 
 __all__ = ["create_synthetic_training_data", "SyntheticDataGenerator"]
-
-
 

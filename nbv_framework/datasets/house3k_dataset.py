@@ -17,6 +17,9 @@ from ..utils.camera_utils import (
     normalize_depth_for_visualization,
 )
 from ..utils.render_utils import render_gt_point_maps
+from nbv_framework.utils.logging_utils import get_logger
+
+LOGGER = get_logger(__name__)
 
 
 class House3KDataset(BaseDataset):
@@ -128,7 +131,7 @@ class House3KDataset(BaseDataset):
         
         扫描所有BATCH目录，找到所有.obj文件，过滤掉没有纹理的模型，然后按比例分割
         """
-        print(f"正在扫描House3K数据集: {self.data_root}")
+        LOGGER.info("正在扫描House3K数据集: %s", self.data_root)
         
         all_objects = []
         total_scanned = 0
@@ -142,7 +145,7 @@ class House3KDataset(BaseDataset):
                 batch_dirs.append(item)
         
         batch_dirs.sort()  # 确保顺序一致
-        print(f"找到 {len(batch_dirs)} 个批次目录: {batch_dirs}")
+        LOGGER.info("找到 %d 个批次目录: %s", len(batch_dirs), batch_dirs)
         
         for batch_name in batch_dirs:
             batch_path = os.path.join(self.data_root, batch_name)
@@ -162,8 +165,12 @@ class House3KDataset(BaseDataset):
             
 
         
-        print(f"[House3K数据集] 总共扫描 {total_scanned} 个3D模型，其中 {total_with_texture} 个有完整纹理")
-        print(f"[House3K数据集] 最终加载 {len(all_objects)} 个有效3D模型")
+        LOGGER.info(
+            "[House3K数据集] 总共扫描 %d 个3D模型，其中 %d 个有完整纹理",
+            total_scanned,
+            total_with_texture,
+        )
+        LOGGER.info("[House3K数据集] 最终加载 %d 个有效3D模型", len(all_objects))
         
         # 全局mesh数量限制
         if self.max_meshes and len(all_objects) > self.max_meshes:
@@ -173,7 +180,11 @@ class House3KDataset(BaseDataset):
             rng.shuffle(all_objects)
             all_objects = all_objects[:self.max_meshes]
             # print(all_objects)
-            print(f"[House3K数据集] 应用全局mesh限制，从 {original_count} 个减少到 {self.max_meshes} 个")
+            LOGGER.info(
+                "[House3K数据集] 应用全局mesh限制，从 %d 个减少到 %d 个",
+                original_count,
+                self.max_meshes,
+            )
         
         # 按分割比例划分数据集
         split_data = self._split_dataset(all_objects)
@@ -234,7 +245,7 @@ class House3KDataset(BaseDataset):
                 # if not has_valid_textures:
                 #     print(f"模型 {model_name}: 纹理文件不完整或缺失，将被过滤")
         
-        print(f"批次 {batch_name}: 找到 {len(batch_objects)} 个模型")
+        LOGGER.info("批次 %s: 找到 %d 个模型", batch_name, len(batch_objects))
         return batch_objects
     
     def _check_texture_files(self, mtl_file: str, set_path: str) -> bool:
@@ -277,7 +288,7 @@ class House3KDataset(BaseDataset):
             return len(texture_files) > 0
             
         except Exception as e:
-            print(f"读取MTL文件失败 {mtl_file}: {e}")
+            LOGGER.warning("读取MTL文件失败 %s: %s", mtl_file, e)
             return False
     
     def _split_dataset(self, all_objects: List[Dict]) -> List[Dict]:
@@ -311,10 +322,14 @@ class House3KDataset(BaseDataset):
             else:
                 raise ValueError(f"Unknown split: {self.split}")
         
-        print(f"数据集分割 - 总计: {total_count}, "
-              f"训练: {train_count}, 验证: {val_count}, "
-              f"测试: {test_count}")
-        print(f"当前分割 '{self.split}': {len(split_objects)} 个样本")
+        LOGGER.info(
+            "数据集分割 - 总计: %d, 训练: %d, 验证: %d, 测试: %d",
+            total_count,
+            train_count,
+            val_count,
+            test_count,
+        )
+        LOGGER.info("当前分割 '%s': %d 个样本", self.split, len(split_objects))
         
         return split_objects
     
@@ -726,10 +741,10 @@ class House3KDataset(BaseDataset):
                 ]
                 camera_poses_tensor = torch.stack(camera_pose_rows, dim=0)
             else:
-                initial_images = torch.empty(
-                    (0, 3, self.image_size, self.image_size), dtype=torch.float32
+                LOGGER.warning(
+                    "未选择任何相机位姿，模型名称: %s",
+                    model_name,
                 )
-                camera_poses_tensor = torch.empty((0, 7), dtype=torch.float32)
 
         result = {
             "initial_images": initial_images,

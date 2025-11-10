@@ -606,9 +606,13 @@ class NBVTrainer:
             )
             self._add_scalar('Grad_policy_net/total_norm', total_policy_norm.item(), self.global_step)
             if total_policy_norm.item() > 1000.0:
-                print(f"🚨 检测到梯度爆炸！当前全局step: {self.global_step}, 范数: {total_policy_norm.item()}")
                 problematic_pose = next_camera_pose.detach().cpu().numpy()
-                print(f"   引发问题的位姿: {problematic_pose}")
+                self.logger.warning(
+                    "梯度爆炸，step=%d, 范数=%.4f, pose=%s",
+                    self.global_step,
+                    total_policy_norm.item(),
+                    problematic_pose,
+                )
 
             self.optimizer.step()
         
@@ -642,7 +646,7 @@ class NBVTrainer:
                 )
                 self._add_scalar('Train_losses/random_chamfer_loss', random_chamfer, self.global_step)
                 if random_position_norm_mean is not None:
-                    self._add_scalar('Train_random_baseline/position_norm_mean', random_position_norm_mean, self.global_step)
+                    self._add_scalar('Random_baseline/position_norm_mean', random_position_norm_mean, self.global_step)
                 if random_images is not None:
                     random_image_dir = os.path.join(self.log_dir, "images", f"step_{self.global_step:06d}", "random_baseline")
                     os.makedirs(random_image_dir, exist_ok=True)
@@ -654,7 +658,7 @@ class NBVTrainer:
                             first_image = random_images_cpu[0]
                         else:
                             first_image = random_images_cpu
-                        self._add_image('train/random_baseline/new_view', first_image, self.global_step)
+                        self._add_image('Random_baseline/new_view', first_image, self.global_step)
                         self.logger.info("Random baseline image saved to %s", save_path)
                     except Exception as exc:
                         self.logger.warning("Failed to save random baseline image: %s", exc)
@@ -704,10 +708,10 @@ class NBVTrainer:
                 initial_images_flat = initial_images.view(b * n, c, h, w)
                 
                 initial_grid = torchvision.utils.make_grid(initial_images_flat, nrow=n)
-                self._add_image('Train_initial_views', initial_grid, self.global_step)
+                self._add_image('Train_view/initial', initial_grid, self.global_step)
 
                 new_grid = torchvision.utils.make_grid(new_images, nrow=1)
-                self._add_image('Train_next_best_view', new_grid, self.global_step)
+                self._add_image('Train_view/new', new_grid, self.global_step)
             epoch_losses.append(loss_dict)
             
             # 更新进度条

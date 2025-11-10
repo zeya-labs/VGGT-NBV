@@ -14,6 +14,10 @@ import math
 import warnings
 import torch.nn.functional as F
 
+from nbv_framework.utils.logging_utils import get_logger
+
+LOGGER = get_logger(__name__)
+
 try:
     from pytorch3d.structures import Meshes, join_meshes_as_batch
     from pytorch3d.renderer import (
@@ -27,7 +31,7 @@ try:
     from pytorch3d.transforms import quaternion_to_matrix
     PYTORCH3D_AVAILABLE = True
 except ImportError:
-    print("Warning: PyTorch3D not available. Please install it for rendering functionality.")
+    LOGGER.warning("PyTorch3D not available. Please install it for rendering functionality.")
     PYTORCH3D_AVAILABLE = False
 
 class DifferentiableRenderer(nn.Module):
@@ -82,7 +86,7 @@ class DifferentiableRenderer(nn.Module):
         
         # 根据质量设置渲染参数
         if quality == "low":
-            print("🚀 使用 'low' 质量设置 (快速, 无抗锯齿)")
+            LOGGER.info("使用 'low' 质量设置 (快速, 无抗锯齿)")
             self.render_image_size = image_size
             self.raster_settings = RasterizationSettings(
                 image_size=self.render_image_size,
@@ -90,7 +94,7 @@ class DifferentiableRenderer(nn.Module):
                 faces_per_pixel=1,
             )
         elif quality == "medium":
-            print("🚀 使用 'medium' 质量设置 (标准抗锯齿)")
+            LOGGER.info("使用 'medium' 质量设置 (标准抗锯齿)")
             self.render_image_size = image_size
             self.raster_settings = RasterizationSettings(
                 image_size=self.render_image_size,

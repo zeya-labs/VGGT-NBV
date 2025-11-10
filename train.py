@@ -4,6 +4,7 @@ NBV框架演示脚本
 展示如何使用目标驱动的NBV策略学习框架进行训练和评估。
 """
 
+import logging
 import torch
 import torch.multiprocessing as mp
 import torch.distributed as dist
@@ -15,6 +16,8 @@ import argparse
 import random
 import numpy as np
 from typing import Dict, Any, Optional
+
+from nbv_framework.utils.logging_utils import configure_logging, get_logger
 
 
 def init_distributed_mode(args) -> None:
@@ -50,6 +53,9 @@ def cleanup_distributed() -> None:
         dist.destroy_process_group()
 
 
+LOGGER = get_logger(__name__)
+
+
 def set_random_seed(seed: int = 42):
     """设置所有随机种子以确保实验可重现性"""
     random.seed(seed)
@@ -60,7 +66,7 @@ def set_random_seed(seed: int = 42):
     # 设置PyTorch的确定性行为
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-    print(f"Random seed set to {seed} for reproducibility")
+    LOGGER.info("Random seed set to %d for reproducibility", seed)
 
 
 # 导入NBV框架组件
@@ -88,7 +94,7 @@ def setup_config() -> Dict[str, Any]:
         
         # 训练配置
         "learning_rate": 1e-5,
-        "batch_size": 1,  # 根据GPU内存调整
+        "batch_size": 2,  # 根据GPU内存调整
         "num_epochs": 1000,
         "normalize_method": "quantile",
         "num_samples": 100000,
@@ -104,7 +110,7 @@ def setup_config() -> Dict[str, Any]:
         "image_size": 518,
         "up_axis": "Y",  # 数据集模型默认上方向 ('Y' 或 'Z')
         "max_meshes": 1,  # 限制加载的mesh数量，用于控制训练规模
-        "train_repeat_factor": 4,  # 控制训练集在DataLoader中的重复次数
+        "train_repeat_factor": 8,  # 控制训练集在DataLoader中的重复次数
         "val_repeat_factor": 1,    # 控制验证集在DataLoader中的重复次数
         "manual_camera_position": [[-1.093546,1.648833,-1.686863]],
         "manual_camera_look_at": [0,0,0],
@@ -132,7 +138,7 @@ def setup_config() -> Dict[str, Any]:
 
 def create_synthetic_data(config: Dict[str, Any]):
     """创建合成训练数据"""
-    print("Creating synthetic training data...")
+    LOGGER.info("Creating synthetic training data...")
     
     create_synthetic_training_data(
         output_dir=config["synthetic_data_root"],
@@ -141,24 +147,24 @@ def create_synthetic_data(config: Dict[str, Any]):
         image_size=config["image_size"],
     )
     
-    print("Synthetic data created successfully!")
+    LOGGER.info("Synthetic data created successfully!")
 
 
 def setup_models(config: Dict[str, Any]):
     """设置模型组件"""
     device = config["device"]
     
-    print(f"Setting up models on device: {device}")
+    LOGGER.info("Setting up models on device: %s", device)
     
     # 1. VGGT基础模型（冻结）
-    print("Loading MapAnything wrapper...")
+    LOGGER.info("Loading MapAnything wrapper...")
     mapanything_wrapper = MapAnythingWrapper(
         model_name="facebook/map-anything",
         device=device
     )
 
     # 2. NBV策略网络（可训练）
-    print("Creating NBV policy network...")
+    LOGGER.info("Creating NBV policy network...")
     # policy_network = BasicNBVPolicy(
     #     scene_feature_dim=config["scene_feature_dim"],
     #     hidden_dim=config["policy_hidden_dim"],
@@ -175,7 +181,7 @@ def setup_models(config: Dict[str, Any]):
     ).to(device)
 
     # 3. 可微分渲染器
-    print("Setting up differentiable renderer...")
+    LOGGER.info("Setting up differentiable renderer...")
     renderer = DifferentiableRenderer(
         image_size=config["image_size"],
         device=device,
@@ -189,7 +195,7 @@ def setup_models(config: Dict[str, Any]):
         pose_up_axis=config["up_axis"]
     )
     
-    print("Models setup completed!")
+    LOGGER.info("Models setup completed!")
     
     return mapanything_wrapper, policy_network, renderer, loss_fn
 
@@ -200,7 +206,7 @@ def setup_data_loaders(config: Dict[str, Any],
                        rank: int = 0,
                        seed: int = 42):
     """设置数据加载器"""
-    print("Setting up data loaders...")
+    LOGGER.info("Setting up data loaders...")
     train_sampler: Optional[DistributedSampler] = None
     val_sampler: Optional[DistributedSampler] = None
     
@@ -264,9 +270,11 @@ def setup_data_loaders(config: Dict[str, Any],
     if train_repeat_factor > 1:
         original_train_len = len(train_dataset)
         train_dataset = RepeatedDataset(train_dataset, train_repeat_factor)
-        print(
-            f"Train dataset repeated {train_repeat_factor}x: "
-            f"{original_train_len} -> {len(train_dataset)} samples"
+        LOGGER.info(
+            "Train dataset repeated %dx: %d -> %d samples",
+            train_repeat_factor,
+            original_train_len,
+            len(train_dataset),
         )
     
     # 验证数据集
@@ -279,9 +287,11 @@ def setup_data_loaders(config: Dict[str, Any],
     if val_repeat_factor > 1:
         original_val_len = len(val_dataset)
         val_dataset = RepeatedDataset(val_dataset, val_repeat_factor)
-        print(
-            f"Val dataset repeated {val_repeat_factor}x: "
-            f"{original_val_len} -> {len(val_dataset)} samples"
+        LOGGER.info(
+            "Val dataset repeated %dx: %d -> %d samples",
+            val_repeat_factor,
+            original_val_len,
+            len(val_dataset),
         )
     
     # 数据加载器
@@ -317,7 +327,11 @@ def setup_data_loaders(config: Dict[str, Any],
         sampler=val_sampler,
     )
     
-    print(f"Data loaders created - Train: {len(train_dataset)}, Val: {len(val_dataset)}")
+    LOGGER.info(
+        "Data loaders created - Train: %d, Val: %d",
+        len(train_dataset),
+        len(val_dataset),
+    )
     
     return train_loader, val_loader
 
@@ -355,7 +369,7 @@ def train_nbv_policy(config: Dict[str, Any],
     """训练NBV策略"""
     is_main_process = config.get("is_main_process", True)
     if is_main_process:
-        print("Starting NBV policy training...")
+        LOGGER.info("Starting NBV policy training...")
     
     # 创建训练器
     trainer = NBVTrainer(
@@ -385,7 +399,7 @@ def train_nbv_policy(config: Dict[str, Any],
     if config.get("resume_checkpoint") and os.path.exists(config["resume_checkpoint"]):
         resume_checkpoint_path = config["resume_checkpoint"]
         if is_main_process:
-            print(f"Resuming from specified checkpoint: {resume_checkpoint_path}")
+            LOGGER.info("Resuming from specified checkpoint: %s", resume_checkpoint_path)
     
     # 2. 如果启用自动恢复，查找最新检查点
     elif config.get("auto_resume", True):
@@ -393,20 +407,20 @@ def train_nbv_policy(config: Dict[str, Any],
         if latest_checkpoint:
             resume_checkpoint_path = latest_checkpoint
             if is_main_process:
-                print(f"Auto-resuming from latest checkpoint: {resume_checkpoint_path}")
+                LOGGER.info("Auto-resuming from latest checkpoint: %s", resume_checkpoint_path)
     
     # 3. 加载检查点
     if resume_checkpoint_path:
         try:
             trainer.load_checkpoint(resume_checkpoint_path)
-            print(f"Successfully resumed from epoch {trainer.current_epoch}")
+            LOGGER.info("Successfully resumed from epoch %d", trainer.current_epoch)
         except Exception as e:
             if is_main_process:
-                print(f"Failed to load checkpoint: {e}")
-                print("Starting training from scratch...")
+                LOGGER.error("Failed to load checkpoint: %s", e)
+                LOGGER.info("Starting training from scratch...")
     else:
         if is_main_process:
-            print("No checkpoint found, starting training from scratch...")
+            LOGGER.info("No checkpoint found, starting training from scratch...")
     
     # 开始训练
     trainer.train(
@@ -428,7 +442,7 @@ def run_evaluation(config: Dict[str, Any],
     if hasattr(policy_network, "module"):
         policy_network = policy_network.module  # type: ignore[attr-defined]
 
-    print("Running evaluation...")
+    LOGGER.info("Running evaluation...")
     
     # 创建测试数据集
     test_dataset = SyntheticDataset(
@@ -453,12 +467,12 @@ def run_evaluation(config: Dict[str, Any],
         device=config["device"]
     )
     
-    print("Evaluation Results:")
+    LOGGER.info("Evaluation Results:")
     for metric, value in evaluation_results.items():
-        print(f"  {metric}: {value:.6f}")
+        LOGGER.info("  %s: %.6f", metric, value)
     
     # 与基线方法比较
-    print("Comparing with baseline methods...")
+    LOGGER.info("Comparing with baseline methods...")
     comparison_results = compare_with_baselines(
         policy_network=policy_network,
         vggt_wrapper=vggt_wrapper,
@@ -467,13 +481,13 @@ def run_evaluation(config: Dict[str, Any],
         device=config["device"]
     )
     
-    print("Comparison Results:")
+    LOGGER.info("Comparison Results:")
     for method, results in comparison_results.items():
-        print(f"\n{method.upper()}:")
+        LOGGER.info("%s:", method.upper())
         for metric, value in results.items():
-            print(f"  {metric}: {value:.6f}")
+            LOGGER.info("  %s: %.6f", metric, value)
     
-    print("Evaluation completed!")
+    LOGGER.info("Evaluation completed!")
 
 
 def main():
@@ -502,9 +516,6 @@ def main():
     
     init_distributed_mode(args)
     try:
-        # 设置随机种子（在所有其他操作之前, 带上全局rank以避免重复）
-        set_random_seed(args.seed + args.rank)
-
         # 设置配置
         config = setup_config()
         config["seed"] = args.seed
@@ -521,23 +532,38 @@ def main():
         if args.resume:
             config["resume_checkpoint"] = args.resume
             if config["is_main_process"]:
-                print(f"Resume checkpoint specified: {args.resume}")
+                LOGGER.info("Resume checkpoint specified: %s", args.resume)
 
         if args.no_auto_resume:
             config["auto_resume"] = False
             if config["is_main_process"]:
-                print("Auto-resume disabled")
+                LOGGER.info("Auto-resume disabled")
+
+        os.makedirs(config["log_dir"], exist_ok=True)
+
+        log_file = os.path.join(config["log_dir"], f"train_rank{args.rank}.log")
+        configure_logging(
+            level=logging.INFO,
+            log_file=log_file,
+            rank=args.rank,
+            enable_console=config["is_main_process"],
+            replace_print=True,
+        )
+
+        # 设置随机种子（需在日志初始化后避免输出丢失）
+        set_random_seed(args.seed + args.rank)
 
         if config["is_main_process"]:
-            print("NBV Framework Demo")
-            print("=" * 50)
-            print(f"Device: {config['device']}")
-            print(f"Mode: {args.mode}")
-            print(f"Max meshes: {config['max_meshes']}")
-            print(
-                f"Initial views: min={config['min_initial_views']}, "
-                f"max={config['max_initial_views']}, "
-                f"randomize={config['randomize_initial_views']}"
+            LOGGER.info("NBV Framework Demo")
+            LOGGER.info("=" * 50)
+            LOGGER.info("Device: %s", config['device'])
+            LOGGER.info("Mode: %s", args.mode)
+            LOGGER.info("Max meshes: %s", config['max_meshes'])
+            LOGGER.info(
+                "Initial views: min=%s, max=%s, randomize=%s",
+                config['min_initial_views'],
+                config['max_initial_views'],
+                config['randomize_initial_views'],
             )
 
         # 创建合成数据（如果需要，仅主进程执行）
@@ -583,7 +609,7 @@ def main():
             run_evaluation(config, mapanything_wrapper, eval_policy, renderer)
 
         if config["is_main_process"]:
-            print("\nDemo completed successfully!")
+            LOGGER.info("Demo completed successfully!")
     finally:
         cleanup_distributed()
 

@@ -13,7 +13,11 @@ from pytorch3d.loss import chamfer_distance
 from pytorch3d.structures import Pointclouds
 from pytorch3d.ops import sample_farthest_points
 
+from nbv_framework.utils.logging_utils import get_logger
+
 from ...utils.tensorboard_mesh import log_point_clouds_to_tensorboard
+
+LOGGER = get_logger(__name__)
 
 
 class ChamferDistance(nn.Module):
@@ -145,10 +149,10 @@ class ChamferDistance(nn.Module):
 
         if (aligned_lengths < target_fps_points).any():
             target_fps_points = int(aligned_lengths.min().item())
-            print(
-                "Farthest point sampling requires all point clouds to have at least "
-                f"{target_fps_points} points. Received minimum length "
-                f"{int(aligned_lengths.min().item())}."
+            LOGGER.warning(
+                "Farthest point sampling requires >= %d points per cloud. Minimum length=%d",
+                target_fps_points,
+                int(aligned_lengths.min().item()),
             )
 
         padded_aligned = aligned_pointclouds.points_padded()
@@ -161,7 +165,7 @@ class ChamferDistance(nn.Module):
 
         
         point_counts = [int(points.shape[0]) for points in p_pred_aligned.points_list()]
-        print(f"Predicted point counts per batch: {point_counts}")
+        LOGGER.info("Predicted point counts per batch: %s", point_counts)
 
         p_gt_float = Pointclouds(points=gt_list)
 
