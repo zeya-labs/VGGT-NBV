@@ -14,6 +14,7 @@ from .base_dataset import BaseDataset
 # 具体数据集实现
 from .synthetic_dataset import SyntheticDataset
 from .mixed_dataset import MixedDataset
+from .repeated_dataset import RepeatedDataset
 
 # 数据集工厂
 from .dataset_factory import DatasetFactory
@@ -38,6 +39,7 @@ __all__ = [
     "BaseDataset",
     "SyntheticDataset", 
     "MixedDataset",
+    "RepeatedDataset",
     
     # 工厂类
     "DatasetFactory",

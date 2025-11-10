@@ -30,7 +30,7 @@ def set_random_seed(seed: int = 42):
 # 导入NBV框架组件
 from nbv_framework import MapAnythingWrapper, BaseNBVPolicy, BasicNBVPolicy, AttentionNBVPolicy, DifferentiableRenderer, NBVTrainer
 from nbv_framework.training.loss import ReconstructionLoss
-from nbv_framework.datasets import SyntheticDataset, MixedDataset
+from nbv_framework.datasets import SyntheticDataset, MixedDataset, RepeatedDataset
 from nbv_framework.datasets.data_loaders import create_train_loader, create_val_loader
 from nbv_framework.utils.data_utils import create_synthetic_training_data
 from nbv_framework.utils.visualization import visualize_reconstruction, plot_training_curves
@@ -52,7 +52,7 @@ def setup_config() -> Dict[str, Any]:
         
         # 训练配置
         "learning_rate": 1e-5,
-        "batch_size": 1,  # 根据GPU内存调整
+        "batch_size": 2,  # 根据GPU内存调整
         "num_epochs": 1000,
         "normalize_method": "quantile",
         "num_samples": 100000,
@@ -68,6 +68,8 @@ def setup_config() -> Dict[str, Any]:
         "image_size": 518,
         "up_axis": "Y",  # 数据集模型默认上方向 ('Y' 或 'Z')
         "max_meshes": 1,  # 限制加载的mesh数量，用于控制训练规模
+        "train_repeat_factor": 5,  # 控制训练集在DataLoader中的重复次数
+        "val_repeat_factor": 1,    # 控制验证集在DataLoader中的重复次数
         "manual_camera_position": [[-1.093546,1.648833,-1.686863]],
         "manual_camera_look_at": [0,0,0],
         "use_manual_camera": True,
@@ -216,11 +218,29 @@ def setup_data_loaders(config: Dict[str, Any]):
         seed=42
     )
     
+    train_repeat_factor = max(1, int(config.get("train_repeat_factor", 1)))
+    if train_repeat_factor > 1:
+        original_train_len = len(train_dataset)
+        train_dataset = RepeatedDataset(train_dataset, train_repeat_factor)
+        print(
+            f"Train dataset repeated {train_repeat_factor}x: "
+            f"{original_train_len} -> {len(train_dataset)} samples"
+        )
+    
     # 验证数据集
     val_dataset = MixedDataset(
         dataset_configs=dataset_val_configs,
         seed=42
     )
+    
+    val_repeat_factor = max(1, int(config.get("val_repeat_factor", 1)))
+    if val_repeat_factor > 1:
+        original_val_len = len(val_dataset)
+        val_dataset = RepeatedDataset(val_dataset, val_repeat_factor)
+        print(
+            f"Val dataset repeated {val_repeat_factor}x: "
+            f"{original_val_len} -> {len(val_dataset)} samples"
+        )
     
     # 数据加载器
     train_loader = create_train_loader(
