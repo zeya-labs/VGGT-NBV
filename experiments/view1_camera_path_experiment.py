@@ -9,10 +9,10 @@ stored view tensors, and renders an interactive Plotly scene showing:
     - an optional reference camera (default: view 00 at the first step).
 
 Example:
-    python experiments/view1_camera_path_experiment.py \\
-        --run_dir runs/dataset-house3k_bs-1_initv-1_pom-position_only_20251103-142858 \\
-        --mesh_path models/House3K_obj/BATCH_7/SET_B/BAT7_SETB_HOUSE33_WTR.obj \\
-        --max_steps 120
+    python -m experiments.view1_camera_path_experiment \
+        --run_dir /mnt/sdb/chenmohan/VGGT-NBV/runs/dataset-house3k_bs-2_initv-1_pom-position_only_20251110-162954 \
+        --mesh_path models/House3K_obj/BATCH_7/SET_B/BAT7_SETB_HOUSE33_WTR.obj \
+        --max_steps 15
 """
 
 from __future__ import annotations

@@ -54,8 +54,8 @@ class ReconstructionLoss(nn.Module):
             log_to_tensorboard=log_tensorboard,
         )
         self.viewpoint_loss = ViewpointLoss()
-        self.pose_outer_radius = 3.5
-        self.pose_inner_radius = 1.5
+        self.pose_outer_radius = 4.0
+        self.pose_inner_radius = 2.0
         self.pose_floor_margin = 1.0
 
     @staticmethod

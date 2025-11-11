@@ -9,6 +9,7 @@ import glob
 import random
 import torch
 from typing import List, Dict, Optional, Sequence, Union
+from torch.utils.data import get_worker_info
 from .base_dataset import BaseDataset
 from ..utils.camera_utils import (
     pose_dict_to_tensor,
@@ -57,6 +58,8 @@ class House3KDataset(BaseDataset):
         val_ratio: float = 0.1,
         max_meshes: int = None,
         use_cache: bool = True,
+        randomize_views_per_call: bool = False,
+        process_rank: int = 0,
         manual_camera_position: Optional[
             Union[
                 Sequence[float],
@@ -88,6 +91,8 @@ class House3KDataset(BaseDataset):
             val_ratio: 验证集比例
             max_meshes: 全局最大mesh数量限制（用于控制训练规模）
             use_cache: 是否使用缓存加速数据加载
+            randomize_views_per_call: 是否让每次 __getitem__ 都重新采样视图（影响多卡/重复样本时的多样性）
+            process_rank: 当前进程的全局rank，用于分布式场景下区分不同GPU
             manual_camera_position: 手动指定的相机位置，支持单个位置、列表或按模型名称/索引映射
             manual_camera_look_at: 手动指定的相机朝向目标点，格式同上，默认为原点
             use_manual_camera: 是否启用手动相机逻辑
@@ -101,6 +106,9 @@ class House3KDataset(BaseDataset):
         self.use_manual_camera = use_manual_camera
         self.manual_camera_position = manual_camera_position
         self.manual_camera_look_at = manual_camera_look_at
+        self.randomize_views_per_call = bool(randomize_views_per_call)
+        self.process_rank = int(process_rank)
+        self._sample_call_counter = 0
         
         # 验证分割比例
         if self.test_ratio < 0:
@@ -365,15 +373,32 @@ class House3KDataset(BaseDataset):
                 f"({self.num_initial_views})."
             )
 
-        canonical = "\n".join(self._view_token(model_name, i) for i in range(num_candidate_views))
-        epoch = getattr(self, "_epoch", 0)
-        base_seed = getattr(self, "_base_seed", None)
-        seed_material = f"{canonical}|{base_seed if base_seed is not None else 0}|{epoch}"
+        if self.randomize_views_per_call:
+            worker_info = get_worker_info()
+            worker_id = worker_info.id if worker_info is not None else 0
+            call_counter = getattr(self, "_sample_call_counter", 0)
+            self._sample_call_counter = call_counter + 1
+            base_seed_value = self._base_seed if self._base_seed is not None else 0
+            seed_material = (
+                f"{model_name}|{call_counter}|{worker_id}|{self.process_rank}|"
+                f"{self._epoch}|{base_seed_value}"
+            )
+        else:
+            canonical = "\n".join(self._view_token(model_name, i) for i in range(num_candidate_views))
+            epoch = getattr(self, "_epoch", 0)
+            base_seed = getattr(self, "_base_seed", None)
+            seed_material = f"{canonical}|{base_seed if base_seed is not None else 0}|{epoch}"
+
         digest = hashlib.md5(seed_material.encode("utf-8")).hexdigest()
         seed = int(digest, 16) % (2 ** 32 - 1)
         rng = random.Random(seed)
 
         return sorted(rng.sample(range(num_candidate_views), self.num_initial_views))
+
+    def set_epoch(self, epoch: int) -> None:
+        """同时重置采样计数，确保每个 epoch 都重新排列视角。"""
+        super().set_epoch(epoch)
+        self._sample_call_counter = 0
     
     def _get_camera_poses_path(self, data_item: Dict) -> Optional[str]:
         """

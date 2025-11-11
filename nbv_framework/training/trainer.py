@@ -445,6 +445,8 @@ class NBVTrainer:
 
         has_new_grad = 1.0 if new_images.grad is not None else 0.0
         self._add_scalar('Grad_render/new_view_has_grad', has_new_grad, self.global_step)
+        if new_images.grad is not None:
+            self._add_scalar('Grad_render/new_view_grad_norm', new_images.grad.norm().item(), self.global_step)
 
     def _select_initial_views(
         self,
@@ -550,7 +552,12 @@ class NBVTrainer:
         render_step = self.global_step if backprop else getattr(self, "val_image_step", None)
         step_output_dir = None
         if backprop:
-            step_output_dir = os.path.join(self.log_dir, "images", f"step_{self.global_step:06d}")
+            step_output_dir = os.path.join(
+                self.log_dir,
+                "images",
+                f"step_{self.global_step:06d}",
+                f"rank_{self.rank:02d}",
+            )
 
         policy_eval = self._evaluate_candidate_pose(
             pose=next_camera_pose,
@@ -644,24 +651,27 @@ class NBVTrainer:
                     {'policy': loss_dict['chamfer_loss'], 'random': random_chamfer},
                     self.global_step,
                 )
-                self._add_scalar('Train_losses/random_chamfer_loss', random_chamfer, self.global_step)
+                self._add_scalar('Random_baseline/random_chamfer_loss', random_chamfer, self.global_step)
                 if random_position_norm_mean is not None:
                     self._add_scalar('Random_baseline/position_norm_mean', random_position_norm_mean, self.global_step)
                 if random_images is not None:
-                    random_image_dir = os.path.join(self.log_dir, "images", f"step_{self.global_step:06d}", "random_baseline")
-                    os.makedirs(random_image_dir, exist_ok=True)
-                    save_path = os.path.join(random_image_dir, "random_view.png")
-                    try:
-                        random_images_cpu = random_images.detach().cpu()
-                        torchvision.utils.save_image(random_images_cpu, save_path)
-                        if random_images_cpu.dim() == 4 and random_images_cpu.size(0) > 0:
-                            first_image = random_images_cpu[0]
-                        else:
-                            first_image = random_images_cpu
-                        self._add_image('Random_baseline/new_view', first_image, self.global_step)
-                        self.logger.info("Random baseline image saved to %s", save_path)
-                    except Exception as exc:
-                        self.logger.warning("Failed to save random baseline image: %s", exc)
+                    random_image_dir = os.path.join(step_output_dir, "random_baseline") if step_output_dir else None
+                    if random_image_dir is None:
+                        self.logger.warning("Random baseline image directory missing; skip saving image.")
+                    else:
+                        os.makedirs(random_image_dir, exist_ok=True)
+                        save_path = os.path.join(random_image_dir, "random_view.png")
+                        try:
+                            random_images_cpu = random_images.detach().cpu()
+                            torchvision.utils.save_image(random_images_cpu, save_path)
+                            if random_images_cpu.dim() == 4 and random_images_cpu.size(0) > 0:
+                                first_image = random_images_cpu[0]
+                            else:
+                                first_image = random_images_cpu
+                            self._add_image('Random_baseline/new_view', first_image, self.global_step)
+                            self.logger.info("Random baseline image saved to %s", save_path)
+                        except Exception as exc:
+                            self.logger.warning("Failed to save random baseline image: %s", exc)
             elif 'chamfer_loss' in loss_dict:
                 self._add_scalar('Train_losses/chamfer_loss', loss_dict['chamfer_loss'], self.global_step)
 
@@ -689,7 +699,7 @@ class NBVTrainer:
         dataset = getattr(train_loader, "dataset", None)
         if self.distributed and hasattr(sampler, "set_epoch"):
             sampler.set_epoch(self.current_epoch)
-            if hasattr(dataset, "set_epoch"):
+            if self.use_epoch_seed and hasattr(dataset, "set_epoch"):
                 dataset.set_epoch(self.current_epoch)
         elif self.use_epoch_seed and hasattr(dataset, "set_epoch"):
             dataset.set_epoch(self.current_epoch)

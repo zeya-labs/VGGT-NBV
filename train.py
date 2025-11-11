@@ -94,7 +94,7 @@ def setup_config() -> Dict[str, Any]:
         
         # 训练配置
         "learning_rate": 1e-5,
-        "batch_size": 2,  # 根据GPU内存调整
+        "batch_size": 1,  # 根据GPU内存调整
         "num_epochs": 1000,
         "normalize_method": "quantile",
         "num_samples": 100000,
@@ -104,17 +104,18 @@ def setup_config() -> Dict[str, Any]:
         
         # 数据配置
         "synthetic_data_root": "./models/synthetic_data",
-        "min_initial_views": 1,
-        "max_initial_views": 1,
+        "min_initial_views": 2,
+        "max_initial_views": 2,
         "randomize_initial_views": True,
         "image_size": 518,
         "up_axis": "Y",  # 数据集模型默认上方向 ('Y' 或 'Z')
         "max_meshes": 1,  # 限制加载的mesh数量，用于控制训练规模
-        "train_repeat_factor": 8,  # 控制训练集在DataLoader中的重复次数
+        "train_repeat_factor": 4,  # 控制训练集在DataLoader中的重复次数
         "val_repeat_factor": 1,    # 控制验证集在DataLoader中的重复次数
+        "randomize_views_per_call": True,  # 让每个样本/设备获取不同的初始视图
         "manual_camera_position": [[-1.093546,1.648833,-1.686863]],
         "manual_camera_look_at": [0,0,0],
-        "use_manual_camera": True,
+        "use_manual_camera": False,
         
         # 设备配置
         "device": "cuda" if torch.cuda.is_available() else "cpu",
@@ -241,6 +242,8 @@ def setup_data_loaders(config: Dict[str, Any],
             "manual_camera_position": config.get("manual_camera_position", None),
             "manual_camera_look_at": config.get("manual_camera_look_at", None),
             "use_manual_camera": config.get("use_manual_camera", False),
+            "randomize_views_per_call": config.get("randomize_views_per_call", False),
+            "process_rank": rank,
         }
     ]
 
@@ -256,7 +259,9 @@ def setup_data_loaders(config: Dict[str, Any],
             "split": "val",
             "max_meshes": config.get("max_meshes", 100),  # 验证集使用更少的mesh
             "use_cache": True,
-            "up_axis": config.get("up_axis", "Y")  # 数据集模型默认上方向
+            "up_axis": config.get("up_axis", "Y"),  # 数据集模型默认上方向
+            "randomize_views_per_call": False,
+            "process_rank": rank,
         }
     ]
 
@@ -475,7 +480,7 @@ def run_evaluation(config: Dict[str, Any],
     LOGGER.info("Comparing with baseline methods...")
     comparison_results = compare_with_baselines(
         policy_network=policy_network,
-        vggt_wrapper=vggt_wrapper,
+        vggt_wrapper=mapanything_wrapper,
         renderer=renderer,
         test_data=test_data[:3],  # 减少样本数量以节省时间
         device=config["device"]
