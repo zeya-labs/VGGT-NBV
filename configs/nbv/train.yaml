@@ -1,0 +1,21 @@
+defaults:
+  - nbv_schema
+  - _self_
+
+experiment_name: dataset-house3k
+batch_size: 1
+learning_rate: 1e-5
+num_epochs: 1000
+seed: 42
+
+synthetic_data_root: ${hydra:runtime.cwd}/models/synthetic_data
+output_dir: ${hydra:runtime.cwd}/runs/${now:%Y-%m-%d}/${now:%H-%M-%S}_${experiment_name}
+
+hydra:
+  run:
+    dir: ${output_dir}
+  sweep:
+    dir: ${hydra:runtime.cwd}/runs/multirun/${now:%Y-%m-%d_%H-%M-%S}_${experiment_name}
+    subdir: ${hydra.job.num}
+  job:
+    chdir: true

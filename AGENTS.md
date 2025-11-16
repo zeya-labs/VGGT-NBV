@@ -10,9 +10,9 @@
 
 ## Build, Test, and Development Commands
 1. Activate the shared environment: `conda activate /mnt/sdb/chenmohan/env/mapanything/`.
-2. Standard training runs: `python train.py --mode train --create_data` (adds a small synthetic set when needed) or `python train.py --mode train --resume <ckpt>` to continue from a checkpoint.
-3. Evaluation/regression: `python train.py --mode eval --resume <ckpt>` or `python train.py --mode all --no_auto_resume` to execute train+eval in one sweep.
-4. For multi-GPU or distributed jobs, rely on the built-in `init_distributed_mode` hook: `torchrun --nproc_per_node=<gpus> train.py --mode train --no_auto_resume`.
+2. Standard training runs now rely on Hydra overrides: `python train.py mode=train create_data=true` (adds a small synthetic set when needed) or `python train.py mode=train resume_checkpoint=/path/to/ckpt` to continue from a checkpoint.
+3. Evaluation/regression: `python train.py mode=eval resume_checkpoint=/path/to/ckpt` or `python train.py mode=all auto_resume=false` to execute train+eval in one sweep.
+4. For multi-GPU or distributed jobs, rely on the built-in `init_distributed_mode` hook: `torchrun --nproc_per_node=<gpus> train.py mode=train auto_resume=false`.
 5. Always verify CUDA availability with `nvidia-smi` before starting long runs and prefer running on the same driver/toolkit combo captured in `docs/日志使用指南.md`.
 6. Place exploratory sweeps or ablations inside `experiments/` scripts so changes stay isolated from the main trainer.
 
@@ -24,13 +24,13 @@
 
 ## Testing & Experiment Tracking
 - Use `set_random_seed` (already wired inside `train.py`) and document the exact seed plus command line in PR descriptions. GPU-enabled integration runs are the default expectation.
-- When extending datasets, run a dry loader pass and capture metrics via `python train.py --mode all --no_auto_resume --create_data`; attach the resulting log snippet from `runs/<experiment>` to the review.
+- When extending datasets, run a dry loader pass and capture metrics via `python train.py mode=all auto_resume=false create_data=true`; attach the resulting log snippet from `runs/<experiment>` to the review.
 - Reuse the built-in evaluation helpers (`evaluate_nbv_policy`, `compare_with_baselines`) and note any deviations or custom baselines in `docs/` so others can replicate.
 - `experiments/` scripts should print reproducible stats (Chamfer, coverage, etc.) and log to `outputs/` with timestamps. Reference these logs when sharing findings.
 - Add future automated tests under `tests/` (pytest-style) and keep the existing `test/` repro folders for manual debugging artifacts only.
 
 ## Branching, Commit & PR Workflow
-- Always create a fresh branch before making changes; never commit directly to `main`. Use `git checkout -b feature/<scope>-<short-desc>` or `bugfix/<issue>-<summary>` so reviewers can track work in progress.
+- Always create a fresh branch before making changes; never commit directly to `develop`. Use `git checkout -b feature/<scope>-<short-desc>` or `bugfix/<issue>-<summary>` so reviewers can track work in progress.
 - Follow Conventional Commits (`feat(camera): add hemispheric sampler`) and keep summaries ≤72 characters. Squash tiny WIP commits locally before opening a PR.
 - PRs must reference related issues/tasks, call out required assets or checkpoints, and include concise logs or TensorBoard screenshots for behavior changes. List any new environment variables or config options you introduced.
 - Avoid committing generated data (`models/synthetic_data/`, `outputs/`, `runs/`, `checkpoints/`). Large assets should be shared through the agreed storage channel and linked in the PR notes.

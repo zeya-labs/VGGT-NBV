@@ -10,9 +10,9 @@
 
 ## 构建、测试与开发命令
 1. 激活共享环境：`conda activate /mnt/sdb/chenmohan/env/mapanything/`。
-2. 标准训练：`python train.py --mode train --create_data`（需要时追加一份小型合成数据集），或使用 `python train.py --mode train --resume <ckpt>` 从断点恢复。
-3. 评估/回归：`python train.py --mode eval --resume <ckpt>`；如需一次跑完训练+评估，使用 `python train.py --mode all --no_auto_resume`。
-4. 多 GPU / 分布式任务走内置 `init_distributed_mode`：`torchrun --nproc_per_node=<gpus> train.py --mode train --no_auto_resume`。
+2. 标准训练依赖 Hydra 覆写：`python train.py mode=train create_data=true`（需要时追加一份小型合成数据集），或通过 `python train.py mode=train resume_checkpoint=/path/to/ckpt` 从断点恢复。
+3. 评估/回归：`python train.py mode=eval resume_checkpoint=/path/to/ckpt`；如需一次跑完训练+评估，使用 `python train.py mode=all auto_resume=false`。
+4. 多 GPU / 分布式任务走内置 `init_distributed_mode`：`torchrun --nproc_per_node=<gpus> train.py mode=train auto_resume=false`。
 5. 长时间任务前务必用 `nvidia-smi` 确认 CUDA，可优先使用 `docs/日志使用指南.md` 中记录的驱动/工具链组合。
 6. 探索性扫描或消融请放在 `experiments/`，以免影响主训练脚本。
 
@@ -24,13 +24,13 @@
 
 ## 测试与实验记录
 - 使用 `train.py` 中的 `set_random_seed` 并在 PR 描述里记录具体 seed 与命令。默认期望使用 GPU 进行集成测试。
-- 扩展数据集时，运行一次 loader dry run，并通过 `python train.py --mode all --no_auto_resume --create_data` 采集指标；把 `runs/<experiment>` 的日志片段附到评审里。
+- 扩展数据集时，运行一次 loader dry run，并通过 `python train.py mode=all auto_resume=false create_data=true` 采集指标；把 `runs/<experiment>` 的日志片段附到评审里。
 - 复用内建评估辅助函数（`evaluate_nbv_policy`、`compare_with_baselines`），若有自定义基线或偏差，需在 `docs/` 里记录，方便复现。
 - `experiments/` 中的脚本要输出可复现的统计（Chamfer、覆盖度等），并带时间戳写入 `outputs/`。分享结果时引用这些日志。
 - 未来自动化测试请放进 `tests/`（pytest 风格）；现有 `test/` 目录继续保留人工调试用例。
 
 ## 分支、提交与 PR 流程
-- 开发前必须新建分支，不得直接在 `main` 上提交。分支命名推荐 `feature/<scope>-<desc>` 或 `bugfix/<issue>-<summary>`，方便评审追踪。
+- 开发前必须新建分支，不得直接在 `develop` 上提交。分支命名推荐 `feature/<scope>-<desc>` 或 `bugfix/<issue>-<summary>`，方便评审追踪。
 - 遵循 Conventional Commits（如 `feat(camera): add hemispheric sampler`），提交标题最长 72 字符。合并前请本地整理零碎 WIP 提交。
 - PR 需关联相关 issue/任务，说明依赖的资产或 checkpoint，并附上关键日志或 TensorBoard 截图。凡新增环境变量或配置选项，都要列表说明。
 - 禁止提交生成数据（`models/synthetic_data/`、`outputs/`、`runs/`、`checkpoints/`）。大体量资产请通过约定的文件渠道共享，并在 PR 中附链接。
