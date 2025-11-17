@@ -11,6 +11,9 @@ from nbv_framework.datasets.data_loaders import create_train_loader, create_val_
 from nbv_framework.datasets.mixed_dataset import MixedDataset
 from nbv_framework.datasets.repeated_dataset import RepeatedDataset
 from nbv_framework.training.config import NBVExperimentConfig
+from nbv_framework.utils.logging_utils import get_logger
+
+LOGGER = get_logger(__name__)
 
 
 class NBVDataModule(pl.LightningDataModule):
@@ -65,12 +68,18 @@ class NBVDataModule(pl.LightningDataModule):
             dataset = RepeatedDataset(dataset, repeat_factor)  # type: ignore[arg-type]
         return dataset  # type: ignore[return-value]
 
-    def _build_val_dataset(self) -> Dataset:
+    def _build_val_dataset(self) -> Optional[Dataset]:
+
+        if  self.cfg.trainer.get("limit_val_batches", 1.0) == 0.0:
+            LOGGER.info("Validation disabled via trainer.limit_val_batches=0; skipping val dataset.")
+            return None
+
         dataset = MixedDataset(
             dataset_configs=[self._house3k_config(split="val")],
             seed=42,
         )
-        repeat_factor = max(1, int(self.cfg.val_repeat_factor))
+
+        repeat_factor = max(1, int(getattr(self.cfg, "val_repeat_factor", 1)))
         if repeat_factor > 1:
             dataset = RepeatedDataset(dataset, repeat_factor)  # type: ignore[arg-type]
         return dataset  # type: ignore[return-value]
@@ -95,6 +104,7 @@ class NBVDataModule(pl.LightningDataModule):
             "manual_camera_position": self.cfg.manual_camera_position,
             "manual_camera_look_at": self.cfg.manual_camera_look_at,
             "use_manual_camera": self.cfg.use_manual_camera,
-            "randomize_views_per_call": split == "train" and self.cfg.randomize_views_per_call,
+            "view_sampling_mode": getattr(self.cfg, "view_sampling_mode", "deterministic_per_call"),
+            "view_sampling_seed": getattr(self.cfg, "view_sampling_seed", None),
             "process_rank": getattr(self.cfg, "rank", 0),
         }

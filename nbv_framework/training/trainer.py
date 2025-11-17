@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING, NamedTuple
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING, NamedTuple
 
 import torch
 import torch.nn as nn
@@ -22,6 +22,7 @@ import torchvision
 from pytorch_lightning import LightningModule
 from pytorch_lightning.loggers import TensorBoardLogger
 from lightning_fabric.utilities.apply_func import apply_to_collection
+from pytorch3d.structures import Meshes
 
 if TYPE_CHECKING:
     from ..models import MapAnythingWrapper, BaseNBVPolicy
@@ -218,6 +219,7 @@ class NBVTrainer(LightningModule):
         initial_images: torch.Tensor,
         camera_poses_batch: torch.Tensor,
         gt_mesh_data: Dict[str, torch.Tensor],
+        mesh_batch,
         render_step: Optional[int],
         train_flag: bool,
         point_cloud_dir: Optional[str],
@@ -225,11 +227,8 @@ class NBVTrainer(LightningModule):
         retain_gradients: bool,
     ) -> PoseEvaluationResult:
         """统一执行渲染、重建与损失计算，便于策略预测与随机基线共用。"""
-        batched_mesh = gt_mesh_data['normalized_mesh']
-        batched_mesh = batched_mesh.to(self.renderer.device)
-
         new_images = self.renderer(
-            gt_mesh=batched_mesh,
+            gt_mesh=mesh_batch,
             camera_poses=pose,
         )
         if new_images.device != initial_images.device:
@@ -260,7 +259,7 @@ class NBVTrainer(LightningModule):
 
         new_point_maps, new_valid_masks = render_gt_point_maps(
             renderer=self.renderer,
-            mesh_batch=batched_mesh,
+            mesh_batch=mesh_batch,
             camera_poses=pose,
             output_device=initial_images.device,
             writer=tb_writer,
@@ -373,6 +372,7 @@ class NBVTrainer(LightningModule):
         initial_images: torch.Tensor,
         camera_poses_batch: torch.Tensor,
         gt_mesh_data: Dict[str, torch.Tensor],
+        mesh_batch,
         render_step: Optional[int],
     ) -> Tuple[float, torch.Tensor, float]:
         """生成符合姿态约束的随机位姿并计算其 Chamfer 损失。"""
@@ -387,6 +387,7 @@ class NBVTrainer(LightningModule):
                 initial_images=initial_images,
                 camera_poses_batch=camera_poses_batch,
                 gt_mesh_data=gt_mesh_data,
+                mesh_batch=mesh_batch,
                 render_step=render_step,
                 train_flag=False,
                 point_cloud_dir=None,
@@ -463,13 +464,15 @@ class NBVTrainer(LightningModule):
         """
         self._configure_policy_mode(backprop)
 
-        initial_images = batch["initial_images"]
-        gt_mesh_data = batch["gt_mesh_data"]
-        camera_poses_batch = batch["camera_poses"]
+        inputs = batch.get("inputs", {})
+        targets = batch.get("targets", {})
+        mesh_data = batch.get("mesh", {})
+
+        initial_images = inputs["images"]
+        camera_poses_batch = inputs["camera_poses"]
+        gt_mesh_data = targets["gt_mesh_data"]
+        mesh_batch = mesh_data.get("normalized")
         depth_z_batch = gt_mesh_data.get("depth_z")
-        # print("keys",batch.keys())
-        # gt_mesh_data_keys dict_keys(['mesh_path', 'gt_points', 'normalize_method', 'num_samples', 'gt_point_maps', 'gt_valid_masks', 'depth_z', 'depth_z_viz', 'original_mesh', 'normalized_mesh'])
-        # batch_keys dict_keys(['initial_images', 'camera_poses', 'mesh_path', 'batch_name', 'set_name', 'model_name', 'depth_z', 'depth_z_viz', 'source_dataset', 'source_dataset_idx', 'source_dataset_sample_idx', 'gt_mesh_data'])
         initial_images, camera_poses_batch, depth_z_batch, selection, active_view_count = self._select_initial_views(
             initial_images,
             camera_poses_batch,
@@ -505,7 +508,7 @@ class NBVTrainer(LightningModule):
 
         render_step = self.global_step if backprop else getattr(self, "val_image_step", None)
         step_output_dir = None
-        if backprop and self.is_main_process:
+        if backprop:
             step_output_dir = os.path.join(
                 self.log_dir,
                 "images",
@@ -518,6 +521,7 @@ class NBVTrainer(LightningModule):
             initial_images=initial_images,
             camera_poses_batch=camera_poses_batch,
             gt_mesh_data=trimmed_gt_mesh_data,
+            mesh_batch=mesh_batch,
             render_step=render_step,
             train_flag=backprop,
             point_cloud_dir=step_output_dir,
@@ -537,6 +541,7 @@ class NBVTrainer(LightningModule):
                 initial_images=initial_images,
                 camera_poses_batch=camera_poses_batch,
                 gt_mesh_data=trimmed_gt_mesh_data,
+                mesh_batch=mesh_batch,
                 render_step=render_step,
             )
 
@@ -671,12 +676,27 @@ class NBVTrainer(LightningModule):
         return loss
 
     def transfer_batch_to_device(self, batch: Dict[str, torch.Tensor], device: torch.device, dataloader_idx: int):
-        """将batch数据递归移到训练设备，并将浮点张量统一为float32（支持嵌套的dict/list/tuple结构）"""
-        # 定义一个处理函数
-        def fn(t):
-            return t.to(device).to(dtype=torch.float32) if t.is_floating_point() else t.to(device)
+        """递归迁移 inputs/targets 到设备，float 张量统一 float32。meta 保持在 CPU。"""
 
-        return apply_to_collection(batch, dtype=torch.Tensor, function=fn)
+        def move_item(x):
+            if isinstance(x, torch.Tensor):
+                return x.to(device).to(dtype=torch.float32) if x.is_floating_point() else x.to(device)
+            if isinstance(x, Meshes):
+                return x.to(device)
+            return x
+
+        moved: Dict[str, Any] = {}
+        data_keys = {"inputs", "targets", "mesh"}
+        for key, value in batch.items():
+            if key in data_keys:
+                moved[key] = apply_to_collection(
+                    value,
+                    dtype=(torch.Tensor, Meshes),
+                    function=move_item,
+                )
+            else:
+                moved[key] = value
+        return moved
     
     def _add_scalar(self, tag: str, value: float, step: int) -> None:
         if not self.is_main_process:

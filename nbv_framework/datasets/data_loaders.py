@@ -16,6 +16,7 @@ def create_data_loader(
     shuffle: bool = True,
     num_workers: int = 4,
     pin_memory: bool = True,
+    persistent_workers: bool = True,
     drop_last: bool = True,
     collate_fn: Optional[Callable] = None,
     sampler: Optional[Sampler] = None,
@@ -29,6 +30,7 @@ def create_data_loader(
         shuffle: 是否打乱数据
         num_workers: 工作进程数
         pin_memory: 是否使用固定内存
+        persistent_workers: 是否保持工作进程持久化
         drop_last: 是否丢弃最后不完整的批次
         collate_fn: 自定义的collate函数，如果为None则自动选择
         sampler: 可选采样器（如 DistributedSampler）
@@ -42,10 +44,6 @@ def create_data_loader(
         # 映射数据集类名到类型名
         if "synthetic" in dataset_class_name:
             dataset_type = "synthetic"
-        elif "shapenet" in dataset_class_name:
-            dataset_type = "shapenet"
-        elif "modelnet" in dataset_class_name:
-            dataset_type = "modelnet"
         else:
             dataset_type = "nbv"  # 默认类型
         
@@ -61,6 +59,7 @@ def create_data_loader(
         shuffle=shuffle if sampler is None else False,
         num_workers=num_workers,
         pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
         drop_last=drop_last,
         collate_fn=collate_fn,
         sampler=sampler,
@@ -94,6 +93,7 @@ def create_train_loader(
         shuffle=True,
         num_workers=num_workers,
         pin_memory=True,
+        persistent_workers=True,
         drop_last=True,
         sampler=sampler,
         **kwargs
@@ -126,6 +126,7 @@ def create_val_loader(
         shuffle=False,
         num_workers=num_workers,
         pin_memory=True,
+        persistent_workers=True,
         drop_last=False,
         sampler=sampler,
         **kwargs

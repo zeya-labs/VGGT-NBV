@@ -380,50 +380,67 @@ class BaseDataset(Dataset, ABC):
     
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """
-        获取单个数据样本
-        
-        这是通用实现，大部分子类不需要重写
+        获取单个数据样本，采用显式命名空间：inputs/targets/mesh/meta。
+
+        返回示例：
+        {
+            "inputs": {"images": ..., "camera_poses": ...},
+            "targets": {...},
+            "mesh": {"original": Meshes, "normalized": Meshes},
+            "meta": {...}
+        }
         """
         data_item = self.data_list[idx]
-        
-        # 获取可用图像路径
+
         available_image_paths = self._get_image_paths(data_item)
-        
-        # 选择初始视图并获取对应索引
         selected_image_paths, selected_indices = self._select_initial_images(available_image_paths)
-        
-        # 加载图像
+
         initial_images = self._load_images(selected_image_paths)
-        
-        # 获取网格路径并加载网格数据
+
         mesh_path = self._get_mesh_path(data_item)
         gt_mesh_data = self._load_mesh_data(
             mesh_path,
             normalize_method=self.normalize_method,
             num_samples=self.num_samples,
         )
-        
-        # 加载相机位姿数据，只获取选中图像对应的位姿
+
         camera_poses_path = self._get_camera_poses_path(data_item)
         camera_poses = self._load_camera_poses(camera_poses_path, selected_indices)
-        result = {
-            "initial_images": initial_images,
-            "gt_mesh_data": gt_mesh_data,
-            "camera_poses": camera_poses,
-            "mesh_path": mesh_path,
-            "dataset_type": self.__class__.__name__,
+
+        # 构建标准化的 batch 结构
+        gt_supervision = dict(gt_mesh_data)
+        original_mesh = gt_supervision.pop("original_mesh", None)
+        normalized_mesh = gt_supervision.pop("normalized_mesh", None)
+        gt_supervision.pop("mesh_path", None)
+
+        sample = {
+            "inputs": {
+                "images": initial_images,
+                "camera_poses": camera_poses,
+            },
+            "targets": {
+                "gt_mesh_data": gt_supervision,
+            },
+            "mesh": {
+                "original": original_mesh,
+                "normalized": normalized_mesh,
+            },
+            "meta": {
+                "mesh_path": mesh_path,
+                "dataset_type": self.__class__.__name__,
+                "data_item": data_item,
+                "selected_indices": selected_indices,
+                "selected_image_paths": selected_image_paths,
+                "normalize_method": gt_mesh_data.get("normalize_method"),
+                "num_samples": gt_mesh_data.get("num_samples"),
+            },
         }
 
-        metadata = {
-            "data_item": data_item,
-            "selected_indices": selected_indices,
-            "selected_image_paths": selected_image_paths,
-        }
-        gt_targets = self._build_gt_targets(gt_mesh_data, camera_poses, metadata)
+        gt_targets = self._build_gt_targets(gt_mesh_data, camera_poses, sample["meta"])
         if gt_targets:
-            gt_mesh_data.update(gt_targets)
+            sample["targets"].update(gt_targets)
 
-        return result
+        return sample
 
     @property # @是装饰器，用于将一个方法转换为属性，可以像属性一样访问，而不是像方法一样调用，通常用于返回一些元数据或配置信息。
     def dataset_info(self) -> Dict:

@@ -97,6 +97,7 @@ def configure_run(cfg: NBVExperimentConfig) -> None:
     """Populate runtime attributes and log summary."""
     rank = int(os.environ.get("RANK", "0"))
     local_rank = int(os.environ.get("LOCAL_RANK", str(rank)))
+    LOGGER.info(f"RANK: {rank}, LOCAL_RANK: {local_rank}")
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
 
     if torch.cuda.is_available():
@@ -104,7 +105,7 @@ def configure_run(cfg: NBVExperimentConfig) -> None:
     else:
         cfg.device = "cpu"
 
-    cfg.rank = rank
+    cfg.rank = local_rank
     cfg.world_size = world_size
     cfg.distributed = world_size > 1
     cfg.is_main_process = rank == 0

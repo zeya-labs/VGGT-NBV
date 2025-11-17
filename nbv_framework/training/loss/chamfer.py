@@ -164,8 +164,8 @@ class ChamferDistance(nn.Module):
         p_pred_aligned = Pointclouds(points=fps_aligned_points_list)
 
         
-        point_counts = [int(points.shape[0]) for points in p_pred_aligned.points_list()]
-        LOGGER.info("Predicted point counts per batch: %s", point_counts)
+        # point_counts = [int(points.shape[0]) for points in p_pred_aligned.points_list()]
+        # LOGGER.info("Predicted point counts per batch: %s", point_counts)
 
         p_gt_float = Pointclouds(points=gt_list)
 

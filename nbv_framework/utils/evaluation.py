@@ -83,9 +83,17 @@ def _evaluate_single_sample(test_sample: Dict,
                            device: str) -> Dict[str, float]:
     """评估单个测试样本"""
     
-    initial_images = test_sample["initial_images"].to(device)  # [N, 3, H, W]
-    initial_camera_poses = test_sample["camera_poses"].to(device)  # [N, 7]
-    gt_mesh_data = test_sample["gt_mesh_data"]
+    if "inputs" not in test_sample:
+        raise KeyError("Evaluation expects batch with inputs/targets/mesh namespaces")
+
+    inputs = test_sample["inputs"]
+    targets = test_sample.get("targets", {})
+    mesh = test_sample.get("mesh", {})
+
+    initial_images = inputs["images"].to(device)
+    initial_camera_poses = inputs["camera_poses"].to(device)
+    gt_mesh_data = targets["gt_mesh_data"]
+    mesh_batch = mesh.get("normalized")
     
     # 记录开始时间
     start_time = time.time()
@@ -113,8 +121,9 @@ def _evaluate_single_sample(test_sample: Dict,
         next_pose = policy_network(scene_features)
         
         # 渲染新视图
-        gt_mesh = _create_mesh_from_data(gt_mesh_data)
-        new_image = renderer(gt_mesh, next_pose, policy_network.output_mode)
+        if mesh_batch is None:
+            raise RuntimeError("Mesh batch missing in evaluation sample")
+        new_image = renderer(mesh_batch, next_pose, policy_network.output_mode)
         
         # 添加新视图
         current_images = torch.cat([current_images, new_image.squeeze(0)], dim=0)

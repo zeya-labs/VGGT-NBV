@@ -71,10 +71,14 @@ class MixedDataset(Dataset):
         dataset_idx, sample_idx = self._resolve_indices(idx)
         sample = self.datasets[dataset_idx][sample_idx]
 
-        # Annotate provenance for downstream logging/debugging.
-        sample["source_dataset"] = self.dataset_names[dataset_idx]
-        sample["source_dataset_idx"] = dataset_idx
-        sample["source_dataset_sample_idx"] = sample_idx
+        # Annotate provenance under the meta namespace，保持批次结构一致
+        if not isinstance(sample, dict):
+            raise TypeError("MixedDataset expects child datasets to return dict samples")
+
+        meta = sample.setdefault("meta", {})
+        meta["source_dataset"] = self.dataset_names[dataset_idx]
+        meta["source_dataset_idx"] = dataset_idx
+        meta["source_dataset_sample_idx"] = sample_idx
         return sample
 
     def _resolve_indices(self, idx: int) -> Tuple[int, int]:
