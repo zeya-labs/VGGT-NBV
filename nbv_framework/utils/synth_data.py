@@ -184,10 +184,6 @@ class SyntheticDataGenerator:
             img_name = f"view_{j:03d}.png"
             img_path = os.path.join(images_dir, img_name)
             
-            # 设置随机种子以确保可重复性
-            torch.manual_seed(j)
-            np.random.seed(j)
-            
             # 将相机位姿转换为张量格式
             pose_tensor = pose_dict_to_tensor(pose, self.device)
             

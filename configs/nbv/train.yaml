@@ -5,17 +5,28 @@ defaults:
 experiment_name: dataset-house3k
 batch_size: 1
 learning_rate: 1e-5
-num_epochs: 1000
+max_epochs: 1000
 seed: 42
 
 synthetic_data_root: ${hydra:runtime.cwd}/models/synthetic_data
-output_dir: ${hydra:runtime.cwd}/runs/${now:%Y-%m-%d}/${now:%H-%M-%S}_${experiment_name}
+output_dir: ${hydra:runtime.cwd}/runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
 
 hydra:
   run:
     dir: ${output_dir}
   sweep:
-    dir: ${hydra:runtime.cwd}/runs/multirun/${now:%Y-%m-%d_%H-%M-%S}_${experiment_name}
+    dir: ${hydra:runtime.cwd}/runs/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
     subdir: ${hydra.job.num}
   job:
     chdir: true
+
+trainer:
+  accelerator: auto
+  devices: [0,1]
+  strategy: auto
+  precision: 32
+  sync_batchnorm: true
+  benchmark: true
+  accumulate_grad_batches: 1
+  num_sanity_val_steps: 0
+  limit_val_batches: 0.0
