@@ -102,7 +102,7 @@ renderer = DifferentiableRenderer(image_size=518)
 trainer = NBVTrainer(vggt_wrapper, policy_network, renderer, loss_fn)
 
 # 训练
-trainer.train(train_loader, val_loader, num_epochs=100)
+trainer.train(train_loader, val_loader, max_epochs=100)
 ```
 
 ## 训练流程

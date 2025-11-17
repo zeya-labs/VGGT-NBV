@@ -11,19 +11,18 @@ NBV策略训练器
 
 from __future__ import annotations
 
+import logging
+import os
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING, NamedTuple
+
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
-from torch.nn.parallel import DistributedDataParallel
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING, NamedTuple
-import numpy as np
-import os
-import logging
-from tqdm import tqdm
-from torch.utils.tensorboard import SummaryWriter
 import torchvision
+from pytorch_lightning import LightningModule
+from pytorch_lightning.loggers import TensorBoardLogger
+from lightning_fabric.utilities.apply_func import apply_to_collection
+from pytorch3d.structures import Meshes
 
 if TYPE_CHECKING:
     from ..models import MapAnythingWrapper, BaseNBVPolicy
@@ -36,6 +35,9 @@ from ..utils.camera_utils import (
 from ..utils.render_utils import render_gt_point_maps
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 class PoseEvaluationResult(NamedTuple):
     total_loss: torch.Tensor
     loss_components: Dict[str, float]
@@ -44,7 +46,7 @@ class PoseEvaluationResult(NamedTuple):
     depth_z: Optional[torch.Tensor]
 
 
-class NBVTrainer:
+class NBVTrainer(LightningModule):
     """
     NBV策略训练器
     
@@ -59,12 +61,11 @@ class NBVTrainer:
                  min_initial_views: Optional[int] = None,
                  max_initial_views: Optional[int] = None,
                  randomize_initial_views: bool = False,
-                 num_epochs: int = 1000,
+                 max_epochs: int = 1000,
                  learning_rate: float = 1e-4,
                  weight_decay: float = 1e-5,
                  log_dir: str = "runs/nbv_experiment",
                  device: str = "cuda",
-                 enable_validation: bool = False,
                  use_epoch_seed: bool = False,
                  enable_random_baseline: bool = True,
                  distributed: bool = False,
@@ -85,26 +86,34 @@ class NBVTrainer:
             weight_decay: 权重衰减
             log_dir: TensorBoard日志目录
             device: 计算设备
-            enable_validation: 是否在训练过程中执行验证流程
             enable_random_baseline: 是否计算随机基线视角的 Chamfer 统计
             distributed: 是否启用分布式训练
             world_size: 全局进程数
             rank: 当前进程的全局rank
         """
+        super().__init__()
+
         self.vggt_wrapper = vggt_wrapper
         self.policy_network = policy_network
         self.renderer = renderer
         self.loss_fn = loss_fn
-        self.device = device
-        self.num_epochs = num_epochs
+        self.max_epochs = max_epochs
+        self.save_hyperparameters(
+            ignore=[
+                "vggt_wrapper",
+                "policy_network",
+                "renderer",
+                "loss_fn",
+            ]
+        )
         self.log_dir = log_dir
-        self.enable_validation = enable_validation
         self.use_epoch_seed = use_epoch_seed
         self.enable_random_baseline = bool(enable_random_baseline)
-        self.distributed = bool(distributed)
-        self.world_size = max(1, int(world_size))
         self.rank = int(rank)
-        self.is_main_process = (self.rank == 0)
+        self.world_size = max(1, int(world_size))
+        self.is_main_process = True
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
 
         self.min_initial_views = min_initial_views
         self.max_initial_views = max_initial_views
@@ -121,47 +130,13 @@ class NBVTrainer:
         )
 
         # 初始化TensorBoard Writer（仅主进程写入）
-        self.writer = SummaryWriter(self.log_dir) if self.is_main_process else None
-        
-        # 优化器（只优化策略网络）
-        self.optimizer = optim.AdamW(
-            self.policy_network.parameters(),
-            lr=learning_rate,
-            weight_decay=weight_decay
-        )
-        
-        # 学习率调度器
-        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, T_max=self.num_epochs, eta_min=1e-7
-        )
-        
-        # 训练状态
-        self.current_epoch = 0
-        self.global_step = 0
-        self.best_loss = float('inf')
         self.val_image_step = 0
-        
-        # 日志
-        self.setup_logging()
-
-    
-    def setup_logging(self):
-        """设置日志"""
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler('nbv_training.log'),
-                logging.StreamHandler()
-            ]
-        )
-        self.logger = logging.getLogger(__name__)
+        self.tb_writer = None
 
     def _configure_policy_mode(self, backprop: bool) -> None:
-        """根据是否反向传播设置策略网络模式并清空梯度。"""
+        """根据是否反向传播设置策略网络模式。"""
         if backprop:
             self.policy_network.train()
-            self.optimizer.zero_grad()
         else:
             self.policy_network.eval()
 
@@ -244,6 +219,7 @@ class NBVTrainer:
         initial_images: torch.Tensor,
         camera_poses_batch: torch.Tensor,
         gt_mesh_data: Dict[str, torch.Tensor],
+        mesh_batch,
         render_step: Optional[int],
         train_flag: bool,
         point_cloud_dir: Optional[str],
@@ -251,11 +227,8 @@ class NBVTrainer:
         retain_gradients: bool,
     ) -> PoseEvaluationResult:
         """统一执行渲染、重建与损失计算，便于策略预测与随机基线共用。"""
-        batched_mesh = gt_mesh_data['normalized_mesh']
-        batched_mesh = batched_mesh.to(self.renderer.device)
-
         new_images = self.renderer(
-            gt_mesh=batched_mesh,
+            gt_mesh=mesh_batch,
             camera_poses=pose,
         )
         if new_images.device != initial_images.device:
@@ -281,12 +254,12 @@ class NBVTrainer:
         else:
             base_camera_poses = camera_poses_batch
 
-        tb_writer = self.writer if log_to_tensorboard and self.writer is not None else None
+        tb_writer = self.tb_writer if log_to_tensorboard and hasattr(self, "tb_writer") else None
         step_arg = render_step if log_to_tensorboard else None
 
         new_point_maps, new_valid_masks = render_gt_point_maps(
             renderer=self.renderer,
-            mesh_batch=batched_mesh,
+            mesh_batch=mesh_batch,
             camera_poses=pose,
             output_device=initial_images.device,
             writer=tb_writer,
@@ -399,6 +372,7 @@ class NBVTrainer:
         initial_images: torch.Tensor,
         camera_poses_batch: torch.Tensor,
         gt_mesh_data: Dict[str, torch.Tensor],
+        mesh_batch,
         render_step: Optional[int],
     ) -> Tuple[float, torch.Tensor, float]:
         """生成符合姿态约束的随机位姿并计算其 Chamfer 损失。"""
@@ -413,6 +387,7 @@ class NBVTrainer:
                 initial_images=initial_images,
                 camera_poses_batch=camera_poses_batch,
                 gt_mesh_data=gt_mesh_data,
+                mesh_batch=mesh_batch,
                 render_step=render_step,
                 train_flag=False,
                 point_cloud_dir=None,
@@ -425,28 +400,6 @@ class NBVTrainer:
             result.new_images.detach(),
             position_norm_mean,
         )
-
-    def _log_vggt_gradient_stats(self, new_images: torch.Tensor) -> None:
-        """记录VGGT相关的梯度统计信息到TensorBoard。"""
-        grad_stats = self.vggt_wrapper.collect_gradient_stats()
-
-        for key in getattr(self, "_vggt_grad_keys", ("depth", "world_points_from_depth")):
-            norm_key = f"{key}/grad_norm"
-            mean_key = f"{key}/grad_mean_abs"
-
-            norm_val = grad_stats.get(norm_key, 0.0)
-            mean_val = grad_stats.get(mean_key, 0.0)
-            has_grad = 1.0 if norm_key in grad_stats else 0.0
-
-            if has_grad:
-                self._add_scalar(f'Grad_vggt/{key}_grad_norm', norm_val, self.global_step)
-                self._add_scalar(f'Grad_vggt/{key}_grad_mean_abs', mean_val, self.global_step)
-                self._add_scalar(f'Grad_vggt/{key}_has_grad', has_grad, self.global_step)
-
-        has_new_grad = 1.0 if new_images.grad is not None else 0.0
-        self._add_scalar('Grad_render/new_view_has_grad', has_new_grad, self.global_step)
-        if new_images.grad is not None:
-            self._add_scalar('Grad_render/new_view_grad_norm', new_images.grad.norm().item(), self.global_step)
 
     def _select_initial_views(
         self,
@@ -491,9 +444,11 @@ class NBVTrainer:
 
         return initial_images, camera_poses, depth_z, selection, num_views
     
-    def training_step(self, 
-                     batch: Dict[str, torch.Tensor],
-                     backprop: bool = True) -> Tuple[Dict[str, float], Optional[torch.Tensor], Optional[torch.Tensor]]:
+    def _process_batch(
+        self,
+        batch: Dict[str, torch.Tensor],
+        backprop: bool = True,
+    ) -> Tuple[torch.Tensor, Dict[str, float], Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         单个训练步骤
         
@@ -509,13 +464,15 @@ class NBVTrainer:
         """
         self._configure_policy_mode(backprop)
 
-        initial_images = batch["initial_images"]
-        gt_mesh_data = batch["gt_mesh_data"]
-        camera_poses_batch = batch["camera_poses"]
+        inputs = batch.get("inputs", {})
+        targets = batch.get("targets", {})
+        mesh_data = batch.get("mesh", {})
+
+        initial_images = inputs["images"]
+        camera_poses_batch = inputs["camera_poses"]
+        gt_mesh_data = targets["gt_mesh_data"]
+        mesh_batch = mesh_data.get("normalized")
         depth_z_batch = gt_mesh_data.get("depth_z")
-        # print("keys",batch.keys())
-        # gt_mesh_data_keys dict_keys(['mesh_path', 'gt_points', 'normalize_method', 'num_samples', 'gt_point_maps', 'gt_valid_masks', 'depth_z', 'depth_z_viz', 'original_mesh', 'normalized_mesh'])
-        # batch_keys dict_keys(['initial_images', 'camera_poses', 'mesh_path', 'batch_name', 'set_name', 'model_name', 'depth_z', 'depth_z_viz', 'source_dataset', 'source_dataset_idx', 'source_dataset_sample_idx', 'gt_mesh_data'])
         initial_images, camera_poses_batch, depth_z_batch, selection, active_view_count = self._select_initial_views(
             initial_images,
             camera_poses_batch,
@@ -564,6 +521,7 @@ class NBVTrainer:
             initial_images=initial_images,
             camera_poses_batch=camera_poses_batch,
             gt_mesh_data=trimmed_gt_mesh_data,
+            mesh_batch=mesh_batch,
             render_step=render_step,
             train_flag=backprop,
             point_cloud_dir=step_output_dir,
@@ -575,7 +533,7 @@ class NBVTrainer:
         loss_components = policy_eval.loss_components
         new_images = policy_eval.new_images
 
-        random_chamfer = None
+        random_chamfer: Optional[float] = None
         random_images = None
         random_position_norm_mean = None
         if backprop and self.enable_random_baseline:
@@ -583,46 +541,10 @@ class NBVTrainer:
                 initial_images=initial_images,
                 camera_poses_batch=camera_poses_batch,
                 gt_mesh_data=trimmed_gt_mesh_data,
+                mesh_batch=mesh_batch,
                 render_step=render_step,
             )
-            if random_position_norm_mean is not None:
-                self.logger.info(
-                    "Random baseline position_norm_mean: %.4f (step %d)",
-                    random_position_norm_mean,
-                    self.global_step,
-                )
 
-        if backprop:
-            total_loss.backward()
-
-            pose_grad = next_camera_pose.grad
-            pose_grad_norm = pose_grad.norm().detach().item() if pose_grad is not None else 0.0
-            pose_grad_mean = pose_grad.abs().mean().detach().item() if pose_grad is not None else 0.0
-
-            if pose_grad is None:
-                self.logger.warning("next_camera_pose grad is None")
-
-            self._add_scalar('Grad_next_camera_pose/norm', pose_grad_norm, self.global_step)
-            self._add_scalar('Grad_next_camera_pose/mean_abs', pose_grad_mean, self.global_step)
-            self._add_scalar('Grad_next_camera_pose/has_grad', 1.0 if pose_grad is not None else 0.0, self.global_step)
-
-            self._log_vggt_gradient_stats(new_images)
-
-            total_policy_norm = torch.nn.utils.clip_grad_norm_(
-                self.policy_network.parameters(), max_norm=1.0
-            )
-            self._add_scalar('Grad_policy_net/total_norm', total_policy_norm.item(), self.global_step)
-            if total_policy_norm.item() > 1000.0:
-                problematic_pose = next_camera_pose.detach().cpu().numpy()
-                self.logger.warning(
-                    "梯度爆炸，step=%d, 范数=%.4f, pose=%s",
-                    self.global_step,
-                    total_policy_norm.item(),
-                    problematic_pose,
-                )
-
-            self.optimizer.step()
-        
         logged_loss_keys = (
             "total_loss",
             "chamfer_loss",
@@ -634,328 +556,169 @@ class NBVTrainer:
             "pose_penalty_loss",
             "weighted_pose_penalty_loss",
         )
-        loss_dict = {key: loss_components[key] for key in logged_loss_keys if key in loss_components}
+        loss_dict = {
+            key: float(loss_components[key]) for key in logged_loss_keys if key in loss_components
+        }
         if random_chamfer is not None:
-            loss_dict["random_chamfer_loss"] = random_chamfer
-        loss_dict["learning_rate"] = self.optimizer.param_groups[0]["lr"]
+            loss_dict["random_chamfer_loss"] = float(random_chamfer)
         loss_dict["num_initial_views"] = float(active_view_count)
 
         if backprop:
-            self._add_scalar('Train_losses/total_loss', loss_dict['total_loss'], self.global_step)
-            self._add_scalar('Train/learning_rate', loss_dict['learning_rate'], self.global_step)
-            self._add_scalar('Train/num_initial_views', active_view_count, self.global_step)
+            self._log_training_metrics(loss_dict, active_view_count)
+            self._log_random_baseline(
+                loss_dict=loss_dict,
+                random_chamfer=random_chamfer,
+                random_position_norm_mean=random_position_norm_mean,
+                random_images=random_images,
+                step_output_dir=step_output_dir,
+            )
 
-            if random_chamfer is not None and 'chamfer_loss' in loss_dict:
-                self._add_scalars(
-                    'Train_losses/chamfer_loss',
-                    {'policy': loss_dict['chamfer_loss'], 'random': random_chamfer},
-                    self.global_step,
-                )
-                self._add_scalar('Random_baseline/random_chamfer_loss', random_chamfer, self.global_step)
-                if random_position_norm_mean is not None:
-                    self._add_scalar('Random_baseline/position_norm_mean', random_position_norm_mean, self.global_step)
-                if random_images is not None:
-                    random_image_dir = os.path.join(step_output_dir, "random_baseline") if step_output_dir else None
-                    if random_image_dir is None:
-                        self.logger.warning("Random baseline image directory missing; skip saving image.")
-                    else:
-                        os.makedirs(random_image_dir, exist_ok=True)
-                        save_path = os.path.join(random_image_dir, "random_view.png")
-                        try:
-                            random_images_cpu = random_images.detach().cpu()
-                            torchvision.utils.save_image(random_images_cpu, save_path)
-                            if random_images_cpu.dim() == 4 and random_images_cpu.size(0) > 0:
-                                first_image = random_images_cpu[0]
-                            else:
-                                first_image = random_images_cpu
-                            self._add_image('Random_baseline/new_view', first_image, self.global_step)
-                            self.logger.info("Random baseline image saved to %s", save_path)
-                        except Exception as exc:
-                            self.logger.warning("Failed to save random baseline image: %s", exc)
-            elif 'chamfer_loss' in loss_dict:
-                self._add_scalar('Train_losses/chamfer_loss', loss_dict['chamfer_loss'], self.global_step)
-
-            if 'pose_penalty_loss' in loss_dict:
-                self._add_scalar('Train_losses/pose_penalty_loss', loss_dict['pose_penalty_loss'], self.global_step)
-
-            self.global_step += 1
-        
-        return loss_dict, new_images, initial_images
+        return total_loss, loss_dict, new_images, initial_images
     
-    def validation_step(self, 
-                       batch: Dict[str, torch.Tensor]) -> Tuple[Dict[str, float], Optional[torch.Tensor], Optional[torch.Tensor]]:
-        """验证步骤"""
-        self.policy_network.eval()
-        with torch.no_grad():
-            loss_dict, new_images, initial_images = self.training_step(batch, backprop=False)
-        
-        return loss_dict, new_images, initial_images
-    
-    def train_epoch(self, train_loader: DataLoader) -> Dict[str, float]:
-        """训练一个epoch"""
-        epoch_losses = []
+    def _log_training_metrics(self, loss_dict: Dict[str, float], active_view_count: int) -> None:
+        """Record scalar metrics for training."""
+        step = self.global_step
+        self._add_scalar("Train_losses/total_loss", loss_dict["total_loss"], step)
+        self._add_scalar("Train/num_initial_views", active_view_count, step)
 
-        sampler = getattr(train_loader, "sampler", None)
-        dataset = getattr(train_loader, "dataset", None)
-        if self.distributed and hasattr(sampler, "set_epoch"):
-            sampler.set_epoch(self.current_epoch)
-            if self.use_epoch_seed and hasattr(dataset, "set_epoch"):
-                dataset.set_epoch(self.current_epoch)
-        elif self.use_epoch_seed and hasattr(dataset, "set_epoch"):
-            dataset.set_epoch(self.current_epoch)
+        if "chamfer_loss" in loss_dict:
+            self._add_scalar("Train_losses/chamfer_loss", loss_dict["chamfer_loss"], step)
+        if "pose_penalty_loss" in loss_dict:
+            self._add_scalar("Train_losses/pose_penalty_loss", loss_dict["pose_penalty_loss"], step)
 
-        progress_bar = tqdm(train_loader, desc=f"Epoch {self.current_epoch}", disable=not self.is_main_process)
-
-        for batch in progress_bar:
-            # 将数据移到设备
-            batch = self._move_batch_to_device(batch)
-            
-            # 训练步骤
-            loss_dict, new_images, initial_images = self.training_step(batch)
-            if new_images is not None and initial_images is not None:
-                # 将 initial_images 的 B, N, C, H, W 格式转换为 B*N, C, H, W
-                b, n, c, h, w = initial_images.shape
-                initial_images_flat = initial_images.view(b * n, c, h, w)
-                
-                initial_grid = torchvision.utils.make_grid(initial_images_flat, nrow=n)
-                self._add_image('Train_view/initial', initial_grid, self.global_step)
-
-                new_grid = torchvision.utils.make_grid(new_images, nrow=1)
-                self._add_image('Train_view/new', new_grid, self.global_step)
-            epoch_losses.append(loss_dict)
-            
-            # 更新进度条
-            if self.is_main_process:
-                progress_bar.set_postfix({
-                    "loss": f"{loss_dict['total_loss']:.4f}",
-                    "lr": f"{loss_dict['learning_rate']:.2e}",
-                    "views": int(loss_dict.get("num_initial_views", 0)),
-                })
-        
-        # 计算epoch平均损失
-        avg_loss_dict = self._average_loss_dicts(epoch_losses)
-        avg_loss_dict = self._sync_loss_dict(avg_loss_dict)
-        
-        return avg_loss_dict
-    
-    def validate_epoch(self, val_loader: DataLoader) -> Dict[str, float]:
-        """验证一个epoch"""
-        epoch_losses = []
-        sampler = getattr(val_loader, "sampler", None)
-        dataset = getattr(val_loader, "dataset", None)
-        if self.distributed and hasattr(sampler, "set_epoch"):
-            sampler.set_epoch(self.current_epoch)
-            if hasattr(dataset, "set_epoch"):
-                dataset.set_epoch(self.current_epoch)
-        elif hasattr(dataset, "set_epoch"):
-            dataset.set_epoch(0)
-
-        progress_bar = tqdm(val_loader, desc="Validation", disable=not self.is_main_process)
-
-        for i, batch in enumerate(progress_bar):
-            batch = self._move_batch_to_device(batch)
-            loss_dict, new_images, initial_images = self.validation_step(batch)
-            epoch_losses.append(loss_dict)
-
-            # 在第一个batch上记录图像
-            if i == 0 and new_images is not None and initial_images is not None:
-                # 将 initial_images 的 B, N, C, H, W 格式转换为 B*N, C, H, W
-                b, n, c, h, w = initial_images.shape
-                initial_images_flat = initial_images.view(b * n, c, h, w)
-                
-                initial_grid = torchvision.utils.make_grid(initial_images_flat, nrow=n)
-                self._add_image('Val_initial_views', initial_grid, self.val_image_step)
-
-                new_grid = torchvision.utils.make_grid(new_images, nrow=1)
-                self._add_image('Val_next_best_view', new_grid, self.val_image_step)
-                self.val_image_step += 1
-
-            if self.is_main_process:
-                progress_bar.set_postfix({
-                    "val_loss": f"{loss_dict['total_loss']:.4f}",
-                    "views": int(loss_dict.get("num_initial_views", 0)),
-                })
-
-        avg_loss_dict = self._average_loss_dicts(epoch_losses)
-        avg_loss_dict = self._sync_loss_dict(avg_loss_dict)
-
-        # 记录验证损失（以 epoch 作为 step）
-        self._add_scalar('Val_losses/total_loss', avg_loss_dict['total_loss'], self.current_epoch)
-        if 'num_initial_views' in avg_loss_dict:
-            self._add_scalar('Val/num_initial_views', avg_loss_dict['num_initial_views'], self.current_epoch)
-        
-        # 记录各个验证损失组件（原始值）
-        self._add_scalar('Val_losses/chamfer_loss', avg_loss_dict['chamfer_loss'], self.current_epoch)
-        self._add_scalar('Val_losses/viewpoint_loss', avg_loss_dict['viewpoint_loss'], self.current_epoch)
-        
-        # 记录加权后的验证损失组件
-        self._add_scalar('Val_losses/weighted_chamfer_loss', avg_loss_dict['weighted_chamfer_loss'], self.current_epoch)
-        self._add_scalar('Val_losses/weighted_viewpoint_loss', avg_loss_dict['weighted_viewpoint_loss'], self.current_epoch)
-
-        return avg_loss_dict
-    
-    def train(self, 
-             train_loader: DataLoader,
-             val_loader: Optional[DataLoader] = None,
-             save_dir: str = "checkpoints"):
-        """
-        完整训练流程
-        
-        Args:
-            train_loader: 训练数据加载器
-            val_loader: 验证数据加载器
-            save_dir: 模型保存目录
-        """
-        os.makedirs(save_dir, exist_ok=True)
-        
-        self.logger.info(f"Starting training for {self.num_epochs} epochs")
-        self.logger.info(f"Policy network parameters: {sum(p.numel() for p in self.policy_network.parameters())}")
-
-        if self.enable_validation:
-            if val_loader is None:
-                self.logger.warning("Validation is enabled but no val_loader is provided; validation will be skipped.")
-        elif val_loader is not None:
-            self.logger.info("Validation loader supplied but validation is disabled; it will be ignored.")
-        
-        for epoch in range(self.num_epochs):
-            self.current_epoch = epoch
-            
-            # 训练
-            train_loss_dict = self.train_epoch(train_loader)
-            
-            # 验证
-            val_loss_dict = None
-            if self.enable_validation and val_loader is not None:
-                val_loss_dict = self.validate_epoch(val_loader)
-
-            # 学习率调度
-            if self.global_step == 0:
-                self.logger.warning(
-                    "Skipping lr_scheduler.step() at epoch %d because optimizer.step() has not been called yet.",
-                    self.current_epoch,
-                )
-            else:
-                self.scheduler.step()
-            
-            # 日志记录
-            self._log_epoch_results(train_loss_dict, val_loss_dict)
-
-            # 模型保存
-            if val_loss_dict is not None:
-                val_loss = val_loss_dict["total_loss"]
-                if val_loss < self.best_loss:
-                    self.best_loss = val_loss
-                    self._save_checkpoint(save_dir, "best_model.pth")
-            
-            # 定期保存
-            if (epoch + 1) % 10 == 0:
-                self._save_checkpoint(save_dir, f"checkpoint_epoch_{epoch+1}.pth")
-        
-        if self.writer is not None:
-            self.writer.close()
-        self.logger.info("Training completed!")
-    
-    def _move_batch_to_device(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """将batch数据递归移到训练设备，并将浮点张量统一为float32（支持嵌套的dict/list/tuple结构）"""
-        def _to_device(x):
-            if isinstance(x, torch.Tensor):
-                tensor = x.to(self.device)
-                if tensor.is_floating_point() and tensor.dtype != torch.float32:
-                    tensor = tensor.to(dtype=torch.float32)
-                return tensor
-            if isinstance(x, dict):
-                return {k: _to_device(v) for k, v in x.items()}
-            if isinstance(x, list):
-                return [_to_device(v) for v in x]
-            if isinstance(x, tuple):
-                return tuple(_to_device(v) for v in x)
-            return x
-        return _to_device(batch)
-    
-    def _average_loss_dicts(self, loss_dicts: List[Dict[str, float]]) -> Dict[str, float]:
-        """计算损失字典的平均值"""
-        if not loss_dicts:
-            return {}
-        
-        avg_dict = {}
-        for key in loss_dicts[0].keys():
-            avg_dict[key] = np.mean([d[key] for d in loss_dicts])
-        
-        return avg_dict
-
-    def _sync_loss_dict(self, loss_dict: Dict[str, float]) -> Dict[str, float]:
-        """在分布式环境下对损失字典求全局平均。"""
-        if not self.distributed or not loss_dict:
-            return loss_dict
-
-        keys = list(loss_dict.keys())
-        values = torch.tensor([float(loss_dict[k]) for k in keys], device=self.device)
-        dist.all_reduce(values, op=dist.ReduceOp.SUM)
-        values /= self.world_size
-        return {k: v for k, v in zip(keys, values.tolist())}
-
-    def _policy_state_dict(self) -> Dict[str, torch.Tensor]:
-        if isinstance(self.policy_network, DistributedDataParallel):
-            return self.policy_network.module.state_dict()
-        return self.policy_network.state_dict()
-
-    def _load_policy_state_dict(self, state_dict: Dict[str, torch.Tensor]) -> None:
-        target = self.policy_network.module if isinstance(self.policy_network, DistributedDataParallel) else self.policy_network
-        target.load_state_dict(state_dict)
-
-    def _add_scalar(self, tag: str, value: float, step: int) -> None:
-        if self.writer is not None:
-            self.writer.add_scalar(tag, value, step)
-
-    def _add_scalars(self, tag: str, scalar_dict: Dict[str, float], step: int) -> None:
-        if self.writer is not None:
-            self.writer.add_scalars(tag, scalar_dict, step)
-
-    def _add_image(self, tag: str, img_tensor: torch.Tensor, step: int) -> None:
-        if self.writer is not None:
-            self.writer.add_image(tag, img_tensor, step)
-    
-    def _log_epoch_results(self, 
-                          train_loss_dict: Dict[str, float],
-                          val_loss_dict: Optional[Dict[str, float]]):
-        """记录epoch结果"""
-        train_loss = train_loss_dict["total_loss"]
-        log_msg = f"Epoch {self.current_epoch}: train_loss={train_loss:.4f}"
-        
-        if val_loss_dict is not None:
-            val_loss = val_loss_dict["total_loss"]
-            log_msg += f", val_loss={val_loss:.4f}"
-        
-        self.logger.info(log_msg)
-    
-    def _save_checkpoint(self, save_dir: str, filename: str):
-        """保存检查点"""
-        if not self.is_main_process:
+    def _log_random_baseline(
+        self,
+        loss_dict: Dict[str, float],
+        random_chamfer: Optional[float],
+        random_position_norm_mean: Optional[float],
+        random_images: Optional[torch.Tensor],
+        step_output_dir: Optional[str],
+    ) -> None:
+        """Log random baseline diagnostics."""
+        if random_chamfer is None:
             return
 
-        checkpoint = {
-            "epoch": self.current_epoch,
-            "global_step": self.global_step,
-            "policy_network_state_dict": self._policy_state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict(),
-            "scheduler_state_dict": self.scheduler.state_dict(),
-            "best_loss": self.best_loss
-        }
-        
-        save_path = os.path.join(save_dir, filename)
-        torch.save(checkpoint, save_path)
-        self.logger.info(f"Checkpoint saved: {save_path}")
+        step = self.global_step
+        if "chamfer_loss" in loss_dict:
+            self._add_scalars(
+                "Train_losses/chamfer_loss",
+                {"policy": loss_dict["chamfer_loss"], "random": random_chamfer},
+                step,
+            )
+        self._add_scalar("Random_baseline/random_chamfer_loss", random_chamfer, step)
+        if random_position_norm_mean is not None:
+            self._add_scalar("Random_baseline/position_norm_mean", random_position_norm_mean, step)
+        if not self.is_main_process:
+            return
+        if random_images is None or step_output_dir is None:
+            return
+
+        random_image_dir = os.path.join(step_output_dir, "random_baseline")
+        os.makedirs(random_image_dir, exist_ok=True)
+        save_path = os.path.join(random_image_dir, "random_view.png")
+        random_images_cpu = random_images.detach().cpu()
+        torchvision.utils.save_image(random_images_cpu, save_path)
+        if random_images_cpu.dim() == 4 and random_images_cpu.size(0) > 0:
+            first_image = random_images_cpu[0]
+        else:
+            first_image = random_images_cpu
+        self._add_image("Random_baseline/new_view", first_image, step)
     
-    def load_checkpoint(self, checkpoint_path: str):
-        """加载检查点"""
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+    def configure_optimizers(self):
+        optimizer = optim.AdamW(
+            self.policy_network.parameters(),
+            lr=self.learning_rate,
+            weight_decay=self.weight_decay,
+        )
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=self.max_epochs, eta_min=1e-7
+        )
+        self.optimizer = optimizer
+        self.scheduler = scheduler
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {"scheduler": scheduler, "interval": "epoch", "frequency": 1},
+        }
 
-        self._load_policy_state_dict(checkpoint["policy_network_state_dict"])
-        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+    def on_fit_start(self) -> None:
+        if self.trainer is not None:
+            self.rank = getattr(self.trainer, "global_rank", 0)
+            world_size = getattr(self.trainer, "world_size", None)
+            if world_size is None:
+                world_size = max(1, getattr(self.trainer, "num_devices", 1))
+            self.world_size = max(1, int(world_size))
+            self.is_main_process = bool(getattr(self.trainer, "is_global_zero", True))
 
-        self.current_epoch = checkpoint["epoch"]
-        self.global_step = checkpoint["global_step"]
-        self.best_loss = checkpoint["best_loss"]
-        
-        self.logger.info(f"Checkpoint loaded: {checkpoint_path}")
+        if self.is_main_process and isinstance(self.logger, TensorBoardLogger):
+            self.tb_writer = self.logger.experiment
+
+        device = torch.device(self.device)
+        self.vggt_wrapper.to(device)
+        self.renderer.to(device)
+        self.loss_fn.to(device)
+        if hasattr(self.vggt_wrapper, "device"):
+            self.vggt_wrapper.device = device
+        if hasattr(self.renderer, "device"):
+            self.renderer.device = device
+
+    def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
+        loss, loss_dict, _, _ = self._process_batch(batch, backprop=True)
+        for key, value in loss_dict.items():
+            prog = key == "total_loss"
+            self.log(f"train/{key}", value, on_step=True, on_epoch=False, prog_bar=prog, sync_dist=True)
+        return loss
+
+    def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
+        loss, loss_dict, _, _ = self._process_batch(batch, backprop=False)
+        for key, value in loss_dict.items():
+            prog = key == "total_loss"
+            self.log(f"val/{key}", value, on_step=False, on_epoch=True, prog_bar=prog, sync_dist=True)
+        return loss
+
+    def transfer_batch_to_device(self, batch: Dict[str, torch.Tensor], device: torch.device, dataloader_idx: int):
+        """递归迁移 inputs/targets 到设备，float 张量统一 float32。meta 保持在 CPU。"""
+
+        def move_item(x):
+            if isinstance(x, torch.Tensor):
+                return x.to(device).to(dtype=torch.float32) if x.is_floating_point() else x.to(device)
+            if isinstance(x, Meshes):
+                return x.to(device)
+            return x
+
+        moved: Dict[str, Any] = {}
+        data_keys = {"inputs", "targets", "mesh"}
+        for key, value in batch.items():
+            if key in data_keys:
+                moved[key] = apply_to_collection(
+                    value,
+                    dtype=(torch.Tensor, Meshes),
+                    function=move_item,
+                )
+            else:
+                moved[key] = value
+        return moved
+    
+    def _add_scalar(self, tag: str, value: float, step: int) -> None:
+        if not self.is_main_process:
+            return
+        writer = getattr(self, "tb_writer", None)
+        if writer is None:
+            return
+        writer.add_scalar(tag, value, step)
+
+    def _add_scalars(self, tag: str, scalar_dict: Dict[str, float], step: int) -> None:
+        if not self.is_main_process:
+            return
+        writer = getattr(self, "tb_writer", None)
+        if writer is None:
+            return
+        writer.add_scalars(tag, scalar_dict, step)
+
+    def _add_image(self, tag: str, img_tensor: torch.Tensor, step: int) -> None:
+        if not self.is_main_process:
+            return
+        writer = getattr(self, "tb_writer", None)
+        if writer is None:
+            return
+        writer.add_image(tag, img_tensor, step)
+    

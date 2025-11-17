@@ -8,6 +8,7 @@ import hashlib
 import glob
 import random
 import torch
+from pathlib import Path
 from typing import List, Dict, Optional, Sequence, Union
 from torch.utils.data import get_worker_info
 from .base_dataset import BaseDataset
@@ -18,6 +19,11 @@ from ..utils.camera_utils import (
     normalize_depth_for_visualization,
 )
 from ..utils.render_utils import render_gt_point_maps
+from .house3k_utils import (
+    find_batch_directories,
+    scan_house3k_batches,
+    split_house3k_dataset,
+)
 from nbv_framework.utils.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
@@ -54,11 +60,12 @@ class House3KDataset(BaseDataset):
         split: str = "train",
         normalize_method: str = "quantile",
         num_samples: int = 10000,
-        train_ratio: float = 0.8,
-        val_ratio: float = 0.1,
+        train_ratio: float = 1,
+        val_ratio: float = 0,
         max_meshes: int = None,
         use_cache: bool = True,
-        randomize_views_per_call: bool = False,
+        view_sampling_mode: str = "deterministic_per_call",
+        view_sampling_seed: Optional[int] = None,
         process_rank: int = 0,
         manual_camera_position: Optional[
             Union[
@@ -91,7 +98,8 @@ class House3KDataset(BaseDataset):
             val_ratio: 验证集比例
             max_meshes: 全局最大mesh数量限制（用于控制训练规模）
             use_cache: 是否使用缓存加速数据加载
-            randomize_views_per_call: 是否让每次 __getitem__ 都重新采样视图（影响多卡/重复样本时的多样性）
+            view_sampling_mode: 视角采样模式，支持 fixed / deterministic_per_call / fully_random
+            view_sampling_seed: 视角采样的基础种子（可选）；未提供则回退到 dataset seed
             process_rank: 当前进程的全局rank，用于分布式场景下区分不同GPU
             manual_camera_position: 手动指定的相机位置，支持单个位置、列表或按模型名称/索引映射
             manual_camera_look_at: 手动指定的相机朝向目标点，格式同上，默认为原点
@@ -106,9 +114,9 @@ class House3KDataset(BaseDataset):
         self.use_manual_camera = use_manual_camera
         self.manual_camera_position = manual_camera_position
         self.manual_camera_look_at = manual_camera_look_at
-        self.randomize_views_per_call = bool(randomize_views_per_call)
+        self.view_sampling_mode = str(view_sampling_mode).lower()
+        self.view_sampling_seed = view_sampling_seed
         self.process_rank = int(process_rank)
-        self._sample_call_counter = 0
         
         # 验证分割比例
         if self.test_ratio < 0:
@@ -136,209 +144,53 @@ class House3KDataset(BaseDataset):
     def _load_data_list(self) -> List[Dict]:
         """
         加载House3K数据集列表
-        
+
         扫描所有BATCH目录，找到所有.obj文件，过滤掉没有纹理的模型，然后按比例分割
         """
         LOGGER.info("正在扫描House3K数据集: %s", self.data_root)
-        
-        all_objects = []
-        total_scanned = 0
-        total_with_texture = 0
-        
-        # 查找所有批次目录
-        batch_dirs = []
-        for item in os.listdir(self.data_root):
-            item_path = os.path.join(self.data_root, item)
-            if os.path.isdir(item_path) and ('BATCH' in item.upper() or 'Batch' in item):
-                batch_dirs.append(item)
-        
-        batch_dirs.sort()  # 确保顺序一致
-        LOGGER.info("找到 %d 个批次目录: %s", len(batch_dirs), batch_dirs)
-        
-        for batch_name in batch_dirs:
-            batch_path = os.path.join(self.data_root, batch_name)
-            batch_objects = self._scan_batch_directory(batch_path, batch_name)
-            
-            # 统计信息
-            batch_scanned = len(batch_objects)
-            batch_with_texture = len([obj for obj in batch_objects if obj.get('has_texture', True)])
-            total_scanned += batch_scanned
-            total_with_texture += batch_with_texture
-            
-            # 只添加有纹理的模型
-            valid_objects = [obj for obj in batch_objects if obj.get('has_texture', True)]
-            all_objects.extend(valid_objects)
-            
-            # print(f"批次 {batch_name}: 扫描 {batch_scanned} 个模型，有纹理 {batch_with_texture} 个")
-            
+        data_root_path = Path(self.data_root)
 
-        
+        # 1. 查找所有批次目录
+        batch_dirs = find_batch_directories(data_root_path)
+        LOGGER.info("找到 %d 个批次目录: %s", len(batch_dirs), [d.name for d in batch_dirs])
+
+        all_objects, total_scanned = scan_house3k_batches(batch_dirs, logger=LOGGER)
         LOGGER.info(
             "[House3K数据集] 总共扫描 %d 个3D模型，其中 %d 个有完整纹理",
             total_scanned,
-            total_with_texture,
+            len(all_objects),
         )
         LOGGER.info("[House3K数据集] 最终加载 %d 个有效3D模型", len(all_objects))
         
-        # 全局mesh数量限制
+        # 4. 全局mesh数量限制
         if self.max_meshes and len(all_objects) > self.max_meshes:
             original_count = len(all_objects)
-            # 使用固定种子确保可重复性
             rng = random.Random(42)
             rng.shuffle(all_objects)
             all_objects = all_objects[:self.max_meshes]
-            # print(all_objects)
             LOGGER.info(
                 "[House3K数据集] 应用全局mesh限制，从 %d 个减少到 %d 个",
                 original_count,
                 self.max_meshes,
             )
         
-        # 按分割比例划分数据集
-        split_data = self._split_dataset(all_objects)
-        
-        return split_data
-    
-    def _scan_batch_directory(self, batch_path: str, batch_name: str) -> List[Dict]:
-        """
-        扫描单个批次目录，找到所有房屋模型
-        
-        Args:
-            batch_path: 批次目录路径
-            batch_name: 批次名称
-            
-        Returns:
-            该批次中的所有模型信息列表
-        """
-        batch_objects = []
-        
-        # 查找所有Set目录（处理不同的命名格式）
-        set_dirs = []
-        for item in os.listdir(batch_path):
-            item_path = os.path.join(batch_path, item)
-            if os.path.isdir(item_path) and 'SET' in item.upper():
-                set_dirs.append(item)
-        
-        set_dirs.sort()
-        
-        for set_name in set_dirs:
-            set_path = os.path.join(batch_path, set_name)
-            
-            # 查找该Set中的所有.obj文件
-            obj_pattern = os.path.join(set_path, "*.obj")
-            obj_files = glob.glob(obj_pattern)
-            
-            for obj_file in obj_files:
-                # 提取模型信息
-                obj_basename = os.path.basename(obj_file)
-                model_name = os.path.splitext(obj_basename)[0]
-                
-                # 查找对应的.mtl文件
-                mtl_file = os.path.join(set_path, model_name + ".mtl")
-                
-                # 检查纹理文件是否存在
-                has_valid_textures = self._check_texture_files(mtl_file, set_path)
-                
-                # 添加所有模型，但标记是否有纹理
-                batch_objects.append({
-                    "batch_name": batch_name,
-                    "set_name": set_name,
-                    "model_name": model_name,
-                    "obj_path": obj_file,
-                    "mtl_path": mtl_file,
-                    "set_path": set_path,
-                    "has_texture": has_valid_textures,
-                })
-                
-                # if not has_valid_textures:
-                #     print(f"模型 {model_name}: 纹理文件不完整或缺失，将被过滤")
-        
-        LOGGER.info("批次 %s: 找到 %d 个模型", batch_name, len(batch_objects))
-        return batch_objects
-    
-    def _check_texture_files(self, mtl_file: str, set_path: str) -> bool:
-        """
-        检查MTL文件中引用的纹理文件是否存在
-        
-        Args:
-            mtl_file: MTL文件路径
-            set_path: Set目录路径
-            
-        Returns:
-            bool: 如果所有纹理文件都存在则返回True，否则返回False
-        """
-        if not os.path.exists(mtl_file):
-            return False
-        
-        try:
-            with open(mtl_file, 'r', encoding='utf-8', errors='ignore') as f:
-                lines = f.readlines()
-            
-            # 查找纹理文件引用
-            texture_files = []
-            for line in lines:
-                line = line.strip()
-                # 检查常见的纹理映射关键字
-                if line.startswith(('map_Kd', 'map_Ka', 'map_Ks', 'map_Ns', 'map_d', 'map_bump', 'bump')):
-                    # 提取纹理文件名
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        texture_filename = parts[-1]  # 通常纹理文件名是最后一个参数
-                        texture_files.append(texture_filename)
-            
-            # 检查所有纹理文件是否存在
-            for texture_file in texture_files:
-                texture_path = os.path.join(set_path, texture_file)
-                if not os.path.exists(texture_path):
-                    return False
-            
-            # 如果没有找到任何纹理文件引用，也认为是无效的
-            return len(texture_files) > 0
-            
-        except Exception as e:
-            LOGGER.warning("读取MTL文件失败 %s: %s", mtl_file, e)
-            return False
-    
-    def _split_dataset(self, all_objects: List[Dict]) -> List[Dict]:
-        """
-        将所有对象按比例分割成训练/验证/测试集
-        """
-        # 使用局部随机数生成器确保可重复性和多进程安全
-        shuffled_objects = all_objects.copy()
-        rng = random.Random(42)  # 使用固定种子确保数据集分割的一致性
-        rng.shuffle(shuffled_objects)
-        
-        total_count = len(shuffled_objects)
-        
-        # 当数据量很少时，确保每个split都有数据
-        if total_count <= 3:
-            split_objects = shuffled_objects  # 所有split共享数据
-            train_count = total_count
-            val_count = total_count
-            test_count = total_count
-        else:
-            train_count = max(1, int(total_count * self.train_ratio))
-            val_count = max(1, int(total_count * self.val_ratio))
-            test_count = total_count - train_count - val_count
-            
-            if self.split == "train":
-                split_objects = shuffled_objects[:train_count]
-            elif self.split == "val":
-                split_objects = shuffled_objects[train_count:train_count + val_count]
-            elif self.split == "test":
-                split_objects = shuffled_objects[train_count + val_count:]
-            else:
-                raise ValueError(f"Unknown split: {self.split}")
-        
+        # 5. 按分割比例划分数据集
+        split_objects, split_stats = split_house3k_dataset(
+            all_objects,
+            split=self.split,
+            train_ratio=self.train_ratio,
+            val_ratio=self.val_ratio,
+        )
+
         LOGGER.info(
             "数据集分割 - 总计: %d, 训练: %d, 验证: %d, 测试: %d",
-            total_count,
-            train_count,
-            val_count,
-            test_count,
+            split_stats["total"],
+            split_stats["train"],
+            split_stats["val"],
+            split_stats["test"],
         )
-        LOGGER.info("当前分割 '%s': %d 个样本", self.split, len(split_objects))
-        
+        LOGGER.info("当前分割 '%s': 加载了 %d 个样本", self.split, split_stats["current_split"])
+
         return split_objects
     
     def _get_mesh_path(self, data_item: Dict) -> str:
@@ -373,32 +225,41 @@ class House3KDataset(BaseDataset):
                 f"({self.num_initial_views})."
             )
 
-        if self.randomize_views_per_call:
+        mode = self.view_sampling_mode
+        base_seed = (
+            self.view_sampling_seed
+            if self.view_sampling_seed is not None
+            else (self._base_seed if self._base_seed is not None else 0)
+        )
+
+        if mode == "fixed":
+            # 完全固定：同一模型始终返回同一视角；不随 epoch/进程/worker 变化
+            seed_material = f"{model_name}|{base_seed}"
+            digest = hashlib.md5(seed_material.encode("utf-8")).hexdigest()
+            seed = int(digest, 16) % (2 ** 32 - 1)
+            rng = random.Random(seed)
+            return sorted(rng.sample(range(num_candidate_views), self.num_initial_views))
+
+        if mode == "deterministic_per_call":
+            # 可重现的“每次调用随机”：跨 epoch 数据一致，不同 worker/进程打散
             worker_info = get_worker_info()
             worker_id = worker_info.id if worker_info is not None else 0
-            call_counter = getattr(self, "_sample_call_counter", 0)
-            self._sample_call_counter = call_counter + 1
-            base_seed_value = self._base_seed if self._base_seed is not None else 0
-            seed_material = (
-                f"{model_name}|{call_counter}|{worker_id}|{self.process_rank}|"
-                f"{self._epoch}|{base_seed_value}"
-            )
-        else:
-            canonical = "\n".join(self._view_token(model_name, i) for i in range(num_candidate_views))
-            epoch = getattr(self, "_epoch", 0)
-            base_seed = getattr(self, "_base_seed", None)
-            seed_material = f"{canonical}|{base_seed if base_seed is not None else 0}|{epoch}"
+            seed_material = f"{model_name}|{worker_id}|{self.process_rank}|{base_seed}"
+            digest = hashlib.md5(seed_material.encode("utf-8")).hexdigest()
+            seed = int(digest, 16) % (2 ** 32 - 1)
+            rng = random.Random(seed)
+            return sorted(rng.sample(range(num_candidate_views), self.num_initial_views))
 
-        digest = hashlib.md5(seed_material.encode("utf-8")).hexdigest()
-        seed = int(digest, 16) % (2 ** 32 - 1)
-        rng = random.Random(seed)
+        if mode == "fully_random":
+            # 完全随机：不可重现
+            rng = random.SystemRandom()
+            return sorted(rng.sample(range(num_candidate_views), self.num_initial_views))
 
-        return sorted(rng.sample(range(num_candidate_views), self.num_initial_views))
+        raise ValueError(f"Unknown view_sampling_mode: {self.view_sampling_mode}")
 
     def set_epoch(self, epoch: int) -> None:
-        """同时重置采样计数，确保每个 epoch 都重新排列视角。"""
+        """更新 epoch，保持 BaseDataset 的行为。"""
         super().set_epoch(epoch)
-        self._sample_call_counter = 0
     
     def _get_camera_poses_path(self, data_item: Dict) -> Optional[str]:
         """
@@ -688,12 +549,7 @@ class House3KDataset(BaseDataset):
         return result
     
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        """
-        获取单个数据样本。
-
-        对于 House3K，我们在此处直接生成候选视图、渲染图像并返回对应的相机位姿，
-        避免通过虚拟路径的间接流程。
-        """
+        """返回结构化样本：inputs/targets/mesh/meta。"""
         data_item = self.data_list[idx]
         mesh_path = self._get_mesh_path(data_item)
         gt_mesh_data = self._load_mesh_data(
@@ -771,32 +627,48 @@ class House3KDataset(BaseDataset):
                     model_name,
                 )
 
-        result = {
-            "initial_images": initial_images,
-            "gt_mesh_data": gt_mesh_data,
-            "camera_poses": camera_poses_tensor,
-            "mesh_path": mesh_path,
-            "batch_name": data_item["batch_name"],
-            "set_name": data_item["set_name"],
-            "model_name": model_name,
-        }
+        gt_supervision = dict(gt_mesh_data)
+        original_mesh = gt_supervision.pop("original_mesh", None)
+        normalized_mesh = gt_supervision.pop("normalized_mesh", None)
+        gt_supervision.pop("mesh_path", None)
 
         metadata = {
             "data_item": data_item,
             "selected_indices": selected_indices,
             "camera_poses_list": camera_poses_list,
+            "mesh_path": mesh_path,
+            "batch_name": data_item["batch_name"],
+            "set_name": data_item["set_name"],
+            "model_name": model_name,
+            "normalize_method": gt_supervision.get("normalize_method"),
+            "num_samples": gt_supervision.get("num_samples"),
         }
+
         gt_targets = self._build_gt_targets(gt_mesh_data, camera_poses_tensor, metadata)
         if gt_targets:
-            gt_mesh_data.update(gt_targets)
-            # depth_z_value = gt_targets.get("depth_z")
-            # if depth_z_value is not None:
-            #     result["depth_z"] = depth_z_value
-            # depth_viz_value = gt_targets.get("depth_z_viz")
-            # if depth_viz_value is not None:
-            #     result["depth_z_viz"] = depth_viz_value
+            gt_supervision.update(gt_targets)
 
-        return result
+        inputs = {
+            "images": initial_images,
+            "camera_poses": camera_poses_tensor,
+        }
+        depth_z = gt_supervision.get("depth_z")
+        if depth_z is not None:
+            inputs["depth_z"] = depth_z
+
+        sample = {
+            "inputs": inputs,
+            "targets": {
+                "gt_mesh_data": gt_supervision,
+            },
+            "mesh": {
+                "original": original_mesh,
+                "normalized": normalized_mesh,
+            },
+            "meta": metadata,
+        }
+
+        return sample
 
     def _build_gt_targets(
         self,

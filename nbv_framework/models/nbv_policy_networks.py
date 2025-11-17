@@ -1,7 +1,5 @@
 """
 NBV策略网络统一框架
-
-提供多种NBV策略网络架构，支持[B, S, scene_feature_dim]或[B, S, P, scene_feature_dim]输入格式：
 1. BasicNBVPolicy - 基础策略网络
 2. AttentionNBVPolicy - 注意力机制策略网络
 3. IterativeNBVPolicy - 迭代细化策略网络
@@ -9,7 +7,7 @@ NBV策略网络统一框架
 5. HybridNBVPolicy - 混合架构策略网络
 6. GeometryAwareNBVPolicy - 几何感知策略网络
 
-所有网络统一接收[B, S, scene_feature_dim]或[B, S, P, scene_feature_dim]格式的场景特征，其中：
+所有网络统一接收[B, S, P, scene_feature_dim]格式的场景特征，其中：
 - B: batch size
 - S: sequence length (多视角特征数量)
 - P: token数量（相机/注册/patch等）
