@@ -71,8 +71,9 @@ class NBVExperimentConfig:
     save_dir: str = "${output_dir}/checkpoints"
     log_dir: str = "${output_dir}/logs"
 
-    # Device gets populated at runtime
-    device: Optional[Any] = None
+    # Device / dtype get resolved at runtime
+    device: Optional[str] = None
+    tensor_dtype: str = "float32"
 
     # Lightning Trainer overrides (Hydra mapping)
     trainer: Dict[str, Any] = field(default_factory=dict)

@@ -35,6 +35,7 @@ class ReconstructionLoss(nn.Module):
         pose_inner_radius: float = 2.0,
         pose_floor_margin: float = 1.0,
         default_device: Optional[torch.device] = None,
+        tensor_dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__()
 
@@ -65,7 +66,8 @@ class ReconstructionLoss(nn.Module):
             inner_radius=pose_inner_radius,
             floor_margin=pose_floor_margin,
         )
-        self.default_device = default_device
+        self.default_device = default_device or torch.device("cpu")
+        self.tensor_dtype = tensor_dtype
 
     # ---------- helpers ----------
 
@@ -106,8 +108,9 @@ class ReconstructionLoss(nn.Module):
         _ = train_flag  # silence "unused" warnings
 
         device = self.default_device
+        dtype = self.tensor_dtype
 
-        total_loss = torch.zeros((), device=device)
+        total_loss = torch.zeros((), device=device, dtype=dtype)
         loss_components: Dict[str, float] = {}
 
         # --- Chamfer ---
@@ -119,6 +122,7 @@ class ReconstructionLoss(nn.Module):
             writer,
             step,
             device,
+            dtype,
             point_cloud_dir=point_cloud_dir,
         )
         total_loss = self._add_loss(
@@ -133,6 +137,7 @@ class ReconstructionLoss(nn.Module):
         weighted_confidence, confidence_raw = self.confidence_regularizer(
             recon_data,
             device,
+            dtype,
             confidence_mask=confidence_mask,
         )
         total_loss = self._add_loss(
@@ -147,6 +152,7 @@ class ReconstructionLoss(nn.Module):
         weighted_viewpoint, viewpoint_raw = self.viewpoint_regularizer(
             combined_images_batch,
             device,
+            dtype,
         )
         total_loss = self._add_loss(
             total_loss,
@@ -160,6 +166,7 @@ class ReconstructionLoss(nn.Module):
         weighted_pose_penalty, pose_penalty_raw, pose_penalty_terms = self.pose_penalty(
             combined_camera_poses,
             device,
+            dtype,
         )
         total_loss = self._add_loss(
             total_loss,

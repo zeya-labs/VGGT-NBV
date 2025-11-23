@@ -16,6 +16,8 @@ def render_gt_point_maps(
     log_prefix: str = "GTPointMaps",
     train_flag: bool = False,
     output_device: Optional[torch.device] = None,
+    device: Optional[torch.device] = None,
+    tensor_dtype: torch.dtype = torch.float32,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Render GT point maps and validity masks for a batch of meshes.
 
@@ -41,10 +43,13 @@ def render_gt_point_maps(
     if camera_poses is None:
         raise ValueError("camera_poses must be provided when rendering GT point maps.")
 
+    if device is None:
+        raise ValueError("device must be provided when rendering GT point maps.")
+
     if output_device is None:
         output_device = torch.device("cpu")
 
-    renderer_device = renderer.device
+    renderer_device = device
 
     batch_size = len(mesh_batch)
     if camera_poses.dim() == 2:
@@ -70,7 +75,7 @@ def render_gt_point_maps(
             if poses_i.numel() == 0:
                 raise ValueError("camera_poses contains empty view set; cannot compute correspondences.")
 
-            poses_i = poses_i.to(renderer_device, dtype=torch.float32)
+            poses_i = poses_i.to(renderer_device, dtype=tensor_dtype)
             mesh_i = mesh_batch[mesh_idx].to(renderer_device)
             mesh_i = mesh_i.extend(poses_i.shape[0])
             render_out = renderer(
@@ -97,7 +102,7 @@ def render_gt_point_maps(
             point_maps = point_maps.permute(0, 2, 3, 1).contiguous()  # [S, H, W, 3]
             valid_masks = valid_masks.squeeze(1).contiguous()  # [S, H, W]
 
-            point_maps_list.append(point_maps.cpu())
+            point_maps_list.append(point_maps.to(dtype=tensor_dtype).cpu())
             valid_masks_list.append(valid_masks.cpu())
 
     point_maps_batch = torch.stack(point_maps_list, dim=0).to(output_device)

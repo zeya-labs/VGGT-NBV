@@ -67,7 +67,7 @@ class DifferentiableRenderer(nn.Module):
             raise ImportError("PyTorch3D is required for DifferentiableRenderer")
         
         self.image_size = image_size
-        self.device = device
+        self.device = torch.device(device)
         self.quality = quality
         self.downsample_factor = downsample_factor
         
@@ -76,7 +76,7 @@ class DifferentiableRenderer(nn.Module):
         
         # 设置材质
         self.materials = Materials(
-            device=device,
+            device=self.device,
             shininess=128.0
         )
         
@@ -113,7 +113,7 @@ class DifferentiableRenderer(nn.Module):
         
         # 创建渲染器 - 使用与render.py相同的架构
         self.shader = SoftPhongShader(
-            device=device,
+            device=self.device,
             materials=self.materials,
             blend_params=self.blend_params
         )

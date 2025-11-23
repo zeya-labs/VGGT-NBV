@@ -7,6 +7,7 @@ import os
 from typing import Tuple
 
 import torch
+
 from omegaconf import OmegaConf
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
@@ -19,6 +20,12 @@ from nbv_framework.rendering.differentiable_renderer import DifferentiableRender
 from nbv_framework.training.config import NBVExperimentConfig
 from nbv_framework.training.data_module import NBVDataModule
 from nbv_framework.training.loss import ReconstructionLoss
+from nbv_framework.utils.device_utils import (
+    coerce_device,
+    dtype_to_string,
+    resolve_device,
+    resolve_dtype,
+)
 from nbv_framework.training.runtime_utils import set_random_seed
 from nbv_framework.training.trainer import NBVTrainer
 from nbv_framework.utils.data_utils import create_synthetic_training_data
@@ -29,7 +36,9 @@ LOGGER = get_logger(__name__)
 
 def build_lightning_model(cfg: NBVExperimentConfig) -> NBVTrainer:
     """Instantiate the LightningModule-backed trainer with all dependencies."""
-    mapanything, policy, renderer, loss_fn = _build_components(cfg)
+    runtime_device = coerce_device(cfg.device)
+    runtime_dtype = resolve_dtype(cfg.tensor_dtype)
+    mapanything, policy, renderer, loss_fn = _build_components(cfg, runtime_device, runtime_dtype)
     return NBVTrainer(
         vggt_wrapper=mapanything,
         policy_network=policy,
@@ -42,7 +51,8 @@ def build_lightning_model(cfg: NBVExperimentConfig) -> NBVTrainer:
         learning_rate=cfg.learning_rate,
         weight_decay=cfg.weight_decay,
         log_dir=cfg.log_dir,
-        device=str(cfg.device),
+        device=str(runtime_device),
+        tensor_dtype=runtime_dtype,
         use_epoch_seed=cfg.use_epoch_seed,
         enable_random_baseline=True,
         distributed=False,
@@ -100,10 +110,10 @@ def configure_run(cfg: NBVExperimentConfig) -> None:
     LOGGER.info(f"RANK: {rank}, LOCAL_RANK: {local_rank}")
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
 
-    if torch.cuda.is_available():
-        cfg.device = f"cuda:{local_rank}"
-    else:
-        cfg.device = "cpu"
+    resolved_device = resolve_device(getattr(cfg, "device", None), local_rank)
+    resolved_dtype = resolve_dtype(getattr(cfg, "tensor_dtype", None))
+    cfg.device = str(resolved_device)
+    cfg.tensor_dtype = dtype_to_string(resolved_dtype)
 
     cfg.rank = local_rank
     cfg.world_size = world_size
@@ -111,9 +121,10 @@ def configure_run(cfg: NBVExperimentConfig) -> None:
     cfg.is_main_process = rank == 0
 
     LOGGER.info(
-        "NBV Lightning run: mode=%s, device=%s, rank=%d/%d",
+        "NBV Lightning run: mode=%s, device=%s, dtype=%s, rank=%d/%d",
         cfg.mode,
-        cfg.device,
+        resolved_device,
+        resolved_dtype,
         rank,
         world_size,
     )
@@ -121,11 +132,13 @@ def configure_run(cfg: NBVExperimentConfig) -> None:
 
 def _build_components(
     cfg: NBVExperimentConfig,
+    runtime_device: torch.device,
+    runtime_dtype: torch.dtype,
 ) -> Tuple[MapAnythingWrapper, AttentionNBVPolicy, DifferentiableRenderer, ReconstructionLoss]:
-    LOGGER.info("Setting up models on device: %s", cfg.device)
+    LOGGER.info("Setting up models on device: %s", runtime_device)
     mapanything = MapAnythingWrapper(
         model_name="facebook/map-anything",
-        device=str(cfg.device),
+        device=str(runtime_device),
     )
     policy = AttentionNBVPolicy(
         scene_feature_dim=cfg.scene_feature_dim,
@@ -136,13 +149,14 @@ def _build_components(
     )
     renderer = DifferentiableRenderer(
         image_size=cfg.image_size,
-        device=str(cfg.device),
+        device=str(runtime_device),
         quality="high",
         downsample_factor=2,
     )
     loss_fn = ReconstructionLoss(
         renderer=renderer,
         pose_up_axis=cfg.up_axis,
-        default_device=torch.device(str(cfg.device)),
+        default_device=runtime_device,
+        tensor_dtype=runtime_dtype,
     )
     return mapanything, policy, renderer, loss_fn

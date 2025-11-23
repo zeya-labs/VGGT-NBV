@@ -25,9 +25,12 @@ class PosePenalty:
         self.floor_margin = floor_margin
 
     def __call__(
-        self, combined_camera_poses: Optional[torch.Tensor], device: torch.device
+        self,
+        combined_camera_poses: Optional[torch.Tensor],
+        device: torch.device,
+        dtype: torch.dtype,
     ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
-        zero = torch.tensor(0.0, device=device)
+        zero = torch.zeros((), device=device, dtype=dtype)
         if self.weight <= 0 or combined_camera_poses is None:
             return zero, zero, {
                 "pose_penalty_inner": zero,

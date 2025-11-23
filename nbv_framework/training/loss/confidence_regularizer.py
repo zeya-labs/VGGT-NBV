@@ -15,9 +15,10 @@ class ConfidenceRegularizer:
         self,
         recon_data: Dict[str, torch.Tensor],
         device: torch.device,
+        dtype: torch.dtype,
         confidence_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        zero = torch.tensor(0.0, device=device)
+        zero = torch.zeros((), device=device, dtype=dtype)
         if self.weight <= 0:
             return zero, zero
 

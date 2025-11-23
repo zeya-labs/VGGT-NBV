@@ -15,9 +15,12 @@ class ViewpointRegularizer:
         self.viewpoint_loss = ViewpointLoss()
 
     def __call__(
-        self, combined_images_batch: Optional[torch.Tensor], device: torch.device
+        self,
+        combined_images_batch: Optional[torch.Tensor],
+        device: torch.device,
+        dtype: torch.dtype,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        zero = torch.tensor(0.0, device=device)
+        zero = torch.zeros((), device=device, dtype=dtype)
         if self.weight <= 0 or combined_images_batch is None:
             return zero, zero
 

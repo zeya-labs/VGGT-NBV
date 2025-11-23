@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING, NamedTuple
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING, NamedTuple, Union
 
 import torch
 import torch.nn as nn
@@ -66,6 +66,7 @@ class NBVTrainer(LightningModule):
                  weight_decay: float = 1e-5,
                  log_dir: str = "runs/nbv_experiment",
                  device: str = "cuda",
+                 tensor_dtype: torch.dtype = torch.float32,
                  use_epoch_seed: bool = False,
                  enable_random_baseline: bool = True,
                  distributed: bool = False,
@@ -86,6 +87,7 @@ class NBVTrainer(LightningModule):
             weight_decay: 权重衰减
             log_dir: TensorBoard日志目录
             device: 计算设备
+            tensor_dtype: 浮点张量默认dtype
             enable_random_baseline: 是否计算随机基线视角的 Chamfer 统计
             distributed: 是否启用分布式训练
             world_size: 全局进程数
@@ -93,11 +95,15 @@ class NBVTrainer(LightningModule):
         """
         super().__init__()
 
+        device = torch.device(device)
+
         self.vggt_wrapper = vggt_wrapper
         self.policy_network = policy_network
         self.renderer = renderer
         self.loss_fn = loss_fn
         self.max_epochs = max_epochs
+        self.runtime_device = device
+        self.tensor_dtype = tensor_dtype
         self.save_hyperparameters(
             ignore=[
                 "vggt_wrapper",
@@ -231,8 +237,9 @@ class NBVTrainer(LightningModule):
             gt_mesh=mesh_batch,
             camera_poses=pose,
         )
-        if new_images.device != initial_images.device:
-            new_images = new_images.to(initial_images.device)
+        device = self.runtime_device
+        if new_images.device != device:
+            new_images = new_images.to(device)
         if retain_gradients:
             if new_images.requires_grad:
                 new_images.retain_grad()
@@ -246,8 +253,9 @@ class NBVTrainer(LightningModule):
                 "gt_mesh_data must contain 'gt_point_maps' and 'gt_valid_masks' for pose evaluation."
             )
 
-        gt_point_maps = gt_point_maps.to(device=initial_images.device, dtype=torch.float32)
-        gt_valid_masks = gt_valid_masks.to(device=initial_images.device, dtype=torch.bool)
+        device = self.runtime_device
+        gt_point_maps = gt_point_maps.to(device=device, dtype=self.tensor_dtype)
+        gt_valid_masks = gt_valid_masks.to(device=device, dtype=torch.bool)
 
         if camera_poses_batch.dim() == 2:
             base_camera_poses = camera_poses_batch.unsqueeze(1)
@@ -261,10 +269,12 @@ class NBVTrainer(LightningModule):
             renderer=self.renderer,
             mesh_batch=mesh_batch,
             camera_poses=pose,
-            output_device=initial_images.device,
+            output_device=device,
             writer=tb_writer,
             step=step_arg,
             train_flag=train_flag,
+            device=device,
+            tensor_dtype=self.tensor_dtype,
         )
 
         updated_point_maps = torch.cat([gt_point_maps, new_point_maps], dim=1).contiguous()
@@ -277,7 +287,7 @@ class NBVTrainer(LightningModule):
         depth_z_batch = gt_mesh_data.get("depth_z")
         updated_depth_z = None
         if depth_z_batch is not None:
-            depth_z_batch_local = depth_z_batch.to(initial_images.device, dtype=torch.float32)
+            depth_z_batch_local = depth_z_batch.to(device, dtype=self.tensor_dtype)
             new_depth_z = world_points_to_camera_depth(
                 new_point_maps,
                 pose.unsqueeze(1),
@@ -335,15 +345,16 @@ class NBVTrainer(LightningModule):
         axis_index = {"X": 0, "Y": 1, "Z": 2}.get(up_axis, 1)
         min_height = -floor_margin
 
-        positions = torch.zeros(batch_size, 3, device=device, dtype=torch.float32)
+        dtype = self.tensor_dtype
+        positions = torch.zeros(batch_size, 3, device=device, dtype=dtype)
         filled = 0
         attempts = 0
         while filled < batch_size and attempts < 20:
             remaining = batch_size - filled
             sample_count = max(remaining * 2, 4)
-            directions = torch.randn(sample_count, 3, device=device, dtype=torch.float32)
+            directions = torch.randn(sample_count, 3, device=device, dtype=dtype)
             directions = directions / directions.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-            radii = torch.rand(sample_count, 1, device=device, dtype=torch.float32)
+            radii = torch.rand(sample_count, 1, device=device, dtype=dtype)
             radii = radii * (outer_radius - inner_radius) + inner_radius
             samples = directions * radii
             valid_mask = samples[:, axis_index] >= min_height
@@ -357,7 +368,7 @@ class NBVTrainer(LightningModule):
             attempts += 1
 
         if filled < batch_size:
-            fallback = torch.randn(batch_size - filled, 3, device=device, dtype=torch.float32)
+            fallback = torch.randn(batch_size - filled, 3, device=device, dtype=dtype)
             fallback = fallback / fallback.norm(dim=-1, keepdim=True).clamp_min(1e-6)
             radius = (inner_radius + outer_radius) * 0.5
             fallback = fallback * radius
@@ -508,13 +519,13 @@ class NBVTrainer(LightningModule):
 
         render_step = self.global_step if backprop else getattr(self, "val_image_step", None)
         step_output_dir = None
-        if backprop:
-            step_output_dir = os.path.join(
-                self.log_dir,
-                "images",
-                f"step_{self.global_step:06d}",
-                f"rank_{self.rank:02d}",
-            )
+        # if backprop:
+        #     step_output_dir = os.path.join(
+        #         self.log_dir,
+        #         "images",
+        #         f"step_{self.global_step:06d}",
+        #         f"rank_{self.rank:02d}",
+        #     )
 
         policy_eval = self._evaluate_candidate_pose(
             pose=next_camera_pose,
@@ -652,7 +663,7 @@ class NBVTrainer(LightningModule):
         if self.is_main_process and isinstance(self.logger, TensorBoardLogger):
             self.tb_writer = self.logger.experiment
 
-        device = torch.device(self.device)
+        device = self.runtime_device
         self.vggt_wrapper.to(device)
         self.renderer.to(device)
         self.loss_fn.to(device)
@@ -678,9 +689,12 @@ class NBVTrainer(LightningModule):
     def transfer_batch_to_device(self, batch: Dict[str, torch.Tensor], device: torch.device, dataloader_idx: int):
         """递归迁移 inputs/targets 到设备，float 张量统一 float32。meta 保持在 CPU。"""
 
+        tensor_dtype = self.tensor_dtype
+
         def move_item(x):
             if isinstance(x, torch.Tensor):
-                return x.to(device).to(dtype=torch.float32) if x.is_floating_point() else x.to(device)
+                moved = x.to(device)
+                return moved.to(dtype=tensor_dtype) if moved.is_floating_point() else moved
             if isinstance(x, Meshes):
                 return x.to(device)
             return x

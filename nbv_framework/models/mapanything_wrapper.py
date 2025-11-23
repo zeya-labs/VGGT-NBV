@@ -26,7 +26,6 @@ if _MAP_ANYTHING_ROOT not in sys.path:
 
 try:  # noqa: SIM105
     from mapanything.models import MapAnything  # type: ignore
-    from mapanything.utils.inference import postprocess_model_outputs_for_inference  # type: ignore
     from uniception.models.info_sharing.base import MultiViewTransformerInput  # type: ignore
 except ModuleNotFoundError as exc:  # pragma: no cover - 运行时缺依赖由用户环境负责
     missing = "uniception" if "uniception" in str(exc) else "mapanything"
@@ -75,7 +74,7 @@ class MapAnythingWrapper(nn.Module):
         self._capture_gradients: bool = False
         self._grad_capture_keys: Tuple[str, ...] = tuple()
         self._captured_tensors: Dict[str, torch.Tensor] = {}
-        
+
         self._capture_input_grad: bool = False
         self._captured_input: Optional[torch.Tensor] = None
 
@@ -158,7 +157,7 @@ class MapAnythingWrapper(nn.Module):
             .unsqueeze(-1)
             .repeat(batch_size, 1, 1)
         )
-        
+
         # print("fused_features shape:", [i.shape for i in fused_features])
         # print("scale_token shape:", scale_token.shape)
         info_sharing_input = MultiViewTransformerInput(
@@ -212,11 +211,36 @@ class MapAnythingWrapper(nn.Module):
         finally:
             self._restore_geometric_inputs()
         # 列出 predictions 中的所有键
-        # print("predictions keys:", predictions[0].keys())
+        print("predictions keys:", predictions[0].keys())
         # predictions keys: dict_keys(['pts3d', 'pts3d_cam', 'ray_directions', 'depth_along_ray', 'cam_trans', 'cam_quats', 'metric_scaling_factor', 'conf', 'non_ambiguous_mask', 'non_ambiguous_mask_logits'])
         recon = self._stack_predictions(predictions)
         self._maybe_retain_grad_from_result(recon, normalized)
         return recon
+
+    def _stack_predictions(self, predictions: PredList) -> TensorDict:
+        stacked: Dict[str, List[torch.Tensor]] = {}
+        for view_pred in predictions:
+            for key, value in view_pred.items():
+                if not torch.is_tensor(value):
+                    continue
+                stacked.setdefault(key, []).append(value)
+
+        result: TensorDict = {}
+        for key, values in stacked.items():
+            tensor = torch.stack(values, dim=1)
+            result[key] = tensor
+
+        if "pts3d" in result:
+            pts3d = result["pts3d"]
+            result["world_points_from_depth"] = pts3d
+            result["world_points"] = pts3d
+        if "conf" in result:
+            conf = result["conf"]
+            result["depth_conf"] = conf
+            result["world_points_conf"] = conf
+        if "pts3d_cam" in result and "depth" not in result:
+            result["depth"] = result["pts3d_cam"][..., 2:3]
+        return result
 
     def forward(
         self,
@@ -288,31 +312,6 @@ class MapAnythingWrapper(nn.Module):
             processed.append(tokens)
 
         return torch.stack(processed, dim=1)
-
-    def _stack_predictions(self, predictions: PredList) -> TensorDict:
-        stacked: Dict[str, List[torch.Tensor]] = {}
-        for view_pred in predictions:
-            for key, value in view_pred.items():
-                if not torch.is_tensor(value):
-                    continue
-                stacked.setdefault(key, []).append(value)
-
-        result: TensorDict = {}
-        for key, values in stacked.items():
-            tensor = torch.stack(values, dim=1)
-            result[key] = tensor
-
-        if "pts3d" in result:
-            pts3d = result["pts3d"]
-            result["world_points_from_depth"] = pts3d
-            result["world_points"] = pts3d
-        if "conf" in result:
-            conf = result["conf"]
-            result["depth_conf"] = conf
-            result["world_points_conf"] = conf
-        if "pts3d_cam" in result and "depth" not in result:
-            result["depth"] = result["pts3d_cam"][..., 2:3]
-        return result
 
     def _maybe_retain_grad(self, scene_features: torch.Tensor, images: torch.Tensor) -> None:
         if not self._capture_gradients:

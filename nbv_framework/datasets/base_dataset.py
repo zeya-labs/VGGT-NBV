@@ -5,7 +5,7 @@
 
 import os
 from abc import ABC, abstractmethod
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Union
 import torch
 from torch.utils.data import Dataset
 
@@ -31,6 +31,8 @@ class BaseDataset(Dataset, ABC):
         num_samples: int = 10000,
         up_axis: str = "Y",
         seed: Optional[int] = None,
+        device: str = "cuda",
+        tensor_dtype: torch.dtype = torch.float32,
         **kwargs
     ):
         """
@@ -55,6 +57,8 @@ class BaseDataset(Dataset, ABC):
         self.num_samples = num_samples
         self.up_axis = up_axis.upper()  # 确保大写格式
         self._base_seed = seed
+        self.device = torch.device(device)
+        self.tensor_dtype = tensor_dtype
         self._epoch: int = 0
         
         # 验证数据根目录

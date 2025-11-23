@@ -91,15 +91,24 @@ python demo_nbv_framework.py --mode eval
 ### 自定义使用
 
 ```python
+import torch
 from nbv_framework import MapAnythingWrapper, NBVPolicyNetwork, DifferentiableRenderer, NBVTrainer
 
 # 设置模型
 vggt_wrapper = MapAnythingWrapper("facebook/map-anything")
 policy_network = NBVPolicyNetwork(scene_feature_dim=9, hidden_dim=256)
 renderer = DifferentiableRenderer(image_size=518)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # 创建训练器
-trainer = NBVTrainer(vggt_wrapper, policy_network, renderer, loss_fn)
+trainer = NBVTrainer(
+    vggt_wrapper,
+    policy_network,
+    renderer,
+    loss_fn,
+    device=str(device),
+    tensor_dtype=torch.float32,
+)
 
 # 训练
 trainer.train(train_loader, val_loader, max_epochs=100)

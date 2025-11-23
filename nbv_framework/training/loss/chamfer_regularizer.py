@@ -48,9 +48,10 @@ class ChamferRegularizer:
         writer,
         step,
         device: torch.device,
+        dtype: torch.dtype,
         point_cloud_dir: Optional[str] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        zero = torch.tensor(0.0, device=device)
+        zero = torch.zeros((), device=device, dtype=dtype)
         if self.weight <= 0 or "gt_points" not in gt_data:
             return zero, zero, None
 
@@ -66,12 +67,8 @@ class ChamferRegularizer:
                 "gt_mesh_data must contain 'gt_point_maps' and 'gt_valid_masks' for Chamfer loss."
             )
 
-        sample_tensor = self._first_tensor(recon_data)
-        if sample_tensor is None:
-            raise ValueError("recon_data must contain tensor values for device inference.")
-
-        target_device = sample_tensor.device
-        gt_point_maps = gt_point_maps.to(device=target_device, dtype=torch.float32)
+        target_device = device
+        gt_point_maps = gt_point_maps.to(device=target_device, dtype=dtype)
         gt_valid_masks = gt_valid_masks.to(device=target_device)
 
         pred_pointclouds, correspondence_mask = self.extractor(
@@ -82,8 +79,11 @@ class ChamferRegularizer:
             gt_valid_masks=gt_valid_masks,
         )
 
-        gt_points_batch = gt_data["gt_points"]
-        gt_pointclouds = Pointclouds(points=[p for p in gt_points_batch])
+        gt_points_batch = [
+            torch.as_tensor(points, device=target_device, dtype=dtype)
+            for points in gt_data["gt_points"]
+        ]
+        gt_pointclouds = Pointclouds(points=gt_points_batch)
 
         correspondence_points: List[torch.Tensor] = []
         for i in range(correspondence_mask.shape[0]):
@@ -113,13 +113,5 @@ class ChamferRegularizer:
 
         weighted_loss = self.weight * chamfer_loss_value
         return weighted_loss, chamfer_loss_value, correspondence_mask
-
-    @staticmethod
-    def _first_tensor(tensor_dict: Dict[str, torch.Tensor]) -> Optional[torch.Tensor]:
-        for value in tensor_dict.values():
-            if isinstance(value, torch.Tensor):
-                return value
-        return None
-
 
 __all__ = ["ChamferRegularizer"]

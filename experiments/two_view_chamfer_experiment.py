@@ -1261,7 +1261,13 @@ def main() -> None:
         mapanything.eval()
         mapanything.to(device_obj)
         renderer_ctx = DifferentiableRenderer(image_size=args.image_size, device=device_str)
-        loss_fn = ReconstructionLoss(renderer=renderer_ctx, save_point_clouds=False, log_tensorboard=False)
+        loss_fn = ReconstructionLoss(
+            renderer=renderer_ctx,
+            save_point_clouds=False,
+            log_tensorboard=False,
+            default_device=device_obj,
+            tensor_dtype=torch.float32,
+        )
         loss_fn.eval()
 
         mesh_device = mesh_cpu.to(device_obj)

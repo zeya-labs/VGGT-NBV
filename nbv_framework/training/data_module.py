@@ -11,6 +11,7 @@ from nbv_framework.datasets.data_loaders import create_train_loader, create_val_
 from nbv_framework.datasets.mixed_dataset import MixedDataset
 from nbv_framework.datasets.repeated_dataset import RepeatedDataset
 from nbv_framework.training.config import NBVExperimentConfig
+from nbv_framework.utils.device_utils import coerce_device, resolve_dtype
 from nbv_framework.utils.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
@@ -30,6 +31,9 @@ class NBVDataModule(pl.LightningDataModule):
     def __init__(self, cfg: NBVExperimentConfig) -> None:
         super().__init__()
         self.cfg = cfg
+        self.device = coerce_device(getattr(cfg, "device", None))
+        dtype = getattr(cfg, "tensor_dtype", None)
+        self.tensor_dtype = resolve_dtype(dtype)
         self.train_dataset: Optional[Dataset] = None
         self.val_dataset: Optional[Dataset] = None
 
@@ -107,4 +111,6 @@ class NBVDataModule(pl.LightningDataModule):
             "view_sampling_mode": getattr(self.cfg, "view_sampling_mode", "deterministic_per_call"),
             "view_sampling_seed": getattr(self.cfg, "view_sampling_seed", None),
             "process_rank": getattr(self.cfg, "rank", 0),
+            "device": str(self.device),
+            "tensor_dtype": self.tensor_dtype,
         }

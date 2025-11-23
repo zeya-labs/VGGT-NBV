@@ -325,17 +325,9 @@ class House3KDataset(BaseDataset):
                     "无法导入 DifferentiableRenderer，请确认 PyTorch3D 依赖已正确安装。"
                 ) from exc
 
-            if torch.cuda.is_available():
-                device_index = min(
-                    max(int(self.process_rank), 0),
-                    torch.cuda.device_count() - 1,
-                )
-                device = torch.device(f"cuda:{device_index}")
-            else:
-                device = torch.device("cpu")
             self._renderer = DifferentiableRenderer(
                 image_size=self.image_size,
-                device=device
+                device=self.device,
             )
 
         return self._renderer
@@ -420,7 +412,7 @@ class House3KDataset(BaseDataset):
         if value is None:
             return None
 
-        positions = torch.as_tensor(value, dtype=torch.float32, device=device)
+        positions = torch.as_tensor(value, dtype=self.tensor_dtype, device=device)
         if positions.ndim == 1:
             if positions.numel() != 3:
                 raise ValueError(
@@ -446,7 +438,7 @@ class House3KDataset(BaseDataset):
         if value is None:
             return None
 
-        look_at = torch.as_tensor(value, dtype=torch.float32, device=device)
+        look_at = torch.as_tensor(value, dtype=self.tensor_dtype, device=device)
         if look_at.ndim == 1:
             if look_at.numel() != 3:
                 raise ValueError(
@@ -491,7 +483,7 @@ class House3KDataset(BaseDataset):
         renderer = self._get_renderer()
         device = renderer.device
 
-        position_tensor = torch.as_tensor(position, dtype=torch.float32)
+        position_tensor = torch.as_tensor(position, dtype=self.tensor_dtype)
         if position_tensor.ndim == 1:
             if position_tensor.numel() != 3:
                 raise ValueError(
@@ -506,7 +498,7 @@ class House3KDataset(BaseDataset):
 
         look_at_tensor: Optional[torch.Tensor] = None
         if look_at is not None:
-            look_at_tensor = torch.as_tensor(look_at, dtype=torch.float32)
+            look_at_tensor = torch.as_tensor(look_at, dtype=self.tensor_dtype)
             if look_at_tensor.ndim == 1:
                 if look_at_tensor.numel() != 3:
                     raise ValueError(
@@ -633,7 +625,10 @@ class House3KDataset(BaseDataset):
 
                 selected_camera_poses = [camera_poses_list[i] for i in selected_indices]
                 camera_pose_rows = [
-                    torch.tensor(pose["position"] + pose["quaternion"], dtype=torch.float32)
+                    torch.tensor(
+                        pose["position"] + pose["quaternion"],
+                        dtype=self.tensor_dtype,
+                    )
                     for pose in selected_camera_poses
                 ]
                 camera_poses_tensor = torch.stack(camera_pose_rows, dim=0)
@@ -709,6 +704,8 @@ class House3KDataset(BaseDataset):
             renderer=renderer,
             mesh_batch=normalized_mesh,
             camera_poses=poses_with_batch,
+            device=self.device,
+            tensor_dtype=self.tensor_dtype,
             output_device=torch.device("cpu"),
         )
 
@@ -723,7 +720,7 @@ class House3KDataset(BaseDataset):
         depth_z_viz = normalize_depth_for_visualization(depth_z, valid_masks)
 
         return {
-            "gt_point_maps": point_maps.to(dtype=torch.float32),
+            "gt_point_maps": point_maps.to(dtype=self.tensor_dtype),
             "gt_valid_masks": valid_masks.to(dtype=torch.bool),
             "depth_z": depth_z,
             "depth_z_viz": depth_z_viz,
