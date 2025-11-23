@@ -49,10 +49,10 @@ class PoseEvaluationResult(NamedTuple):
 class NBVTrainer(LightningModule):
     """
     NBV策略训练器
-    
+
     实现完整的目标驱动策略学习训练流程。
     """
-    
+
     def __init__(self,
                  vggt_wrapper: MapAnythingWrapper,
                  policy_network: BaseNBVPolicy,
@@ -74,7 +74,7 @@ class NBVTrainer(LightningModule):
                  rank: int = 0):
         """
         初始化训练器
-        
+
         Args:
             vggt_wrapper: 冻结的 MapAnything 基础模型
             policy_network: 可训练的NBV策略网络
@@ -454,7 +454,7 @@ class NBVTrainer(LightningModule):
         self._last_initial_view_indices = selection.detach().cpu()
 
         return initial_images, camera_poses, depth_z, selection, num_views
-    
+
     def _process_batch(
         self,
         batch: Dict[str, torch.Tensor],
@@ -462,12 +462,12 @@ class NBVTrainer(LightningModule):
     ) -> Tuple[torch.Tensor, Dict[str, float], Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         单个训练步骤
-        
+
         Args:
             batch: 训练批次数据
                 - initial_images: 初始N个视图 [B, N, 3, H, W]
                 - gt_mesh_data: GT mesh数据
-                
+
         Returns:
             loss_dict: 损失字典
             new_images: 渲染的新视图
@@ -519,13 +519,13 @@ class NBVTrainer(LightningModule):
 
         render_step = self.global_step if backprop else getattr(self, "val_image_step", None)
         step_output_dir = None
-        # if backprop:
-        #     step_output_dir = os.path.join(
-        #         self.log_dir,
-        #         "images",
-        #         f"step_{self.global_step:06d}",
-        #         f"rank_{self.rank:02d}",
-        #     )
+        if backprop:
+            step_output_dir = os.path.join(
+                self.log_dir,
+                "images",
+                f"step_{self.global_step:06d}",
+                f"rank_{self.rank:02d}",
+            )
 
         policy_eval = self._evaluate_candidate_pose(
             pose=next_camera_pose,
@@ -585,7 +585,7 @@ class NBVTrainer(LightningModule):
             )
 
         return total_loss, loss_dict, new_images, initial_images
-    
+
     def _log_training_metrics(self, loss_dict: Dict[str, float], active_view_count: int) -> None:
         """Record scalar metrics for training."""
         step = self.global_step
@@ -634,7 +634,7 @@ class NBVTrainer(LightningModule):
         else:
             first_image = random_images_cpu
         self._add_image("Random_baseline/new_view", first_image, step)
-    
+
     def configure_optimizers(self):
         optimizer = optim.AdamW(
             self.policy_network.parameters(),
@@ -711,7 +711,7 @@ class NBVTrainer(LightningModule):
             else:
                 moved[key] = value
         return moved
-    
+
     def _add_scalar(self, tag: str, value: float, step: int) -> None:
         if not self.is_main_process:
             return
@@ -735,4 +735,4 @@ class NBVTrainer(LightningModule):
         if writer is None:
             return
         writer.add_image(tag, img_tensor, step)
-    
+

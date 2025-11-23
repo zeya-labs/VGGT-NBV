@@ -5,7 +5,7 @@ python -m experiments.two_view_chamfer_experiment \
  --camera_radius_variation 1 \
  --camera_radius_mode layered \
  --camera_radius_layers 5 \
- --output_dir outputs/my_mesh_1000 \
+ --output_dir experiments/outputs/my_mesh_1000 \
  --device_ids 1 \
  --skip_view_artifacts --skip_glb --skip_depth_png
 

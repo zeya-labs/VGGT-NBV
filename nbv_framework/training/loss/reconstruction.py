@@ -10,7 +10,7 @@ from .pose_penalty import PosePenalty
 from .viewpoint_regularizer import ViewpointRegularizer
 
 if TYPE_CHECKING:
-    from ..rendering import DifferentiableRenderer
+    from ...rendering import DifferentiableRenderer
 
 
 class ReconstructionLoss(nn.Module):
