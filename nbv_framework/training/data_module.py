@@ -86,8 +86,8 @@ class NBVDataModule(pl.LightningDataModule):
 
     def _house3k_config(self, split: str) -> dict:
         data_root = (
-            "/mnt/sdb/chenmohan/VGGT-NBV/models/test"
-            # "/mnt/sdb/chenmohan/VGGT-NBV/models/House3K_obj"
+            # "/mnt/sdb/chenmohan/VGGT-NBV/models/test"
+            "/mnt/sdb/chenmohan/VGGT-NBV/models/House3K_obj"
         )
         return {
             "name": "House3KDataset",

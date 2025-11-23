@@ -48,8 +48,8 @@ class NBVExperimentConfig:
     randomize_initial_views: bool = True
     image_size: int = 518
     up_axis: str = "Y"
-    max_meshes: int = 1
-    train_repeat_factor: int = 4
+    max_meshes: int = 16
+    train_repeat_factor: int = 1
     val_repeat_factor: int = 1
     # View sampling modes:
     # - "fixed": 每次都采样同一组视角（可通过 view_sampling_seed 控制全局随机性）
@@ -67,7 +67,7 @@ class NBVExperimentConfig:
     experiment_name: str = "dataset-house3k"
     timestamp: str = ""
 
-    output_dir: str = "./outputs" 
+    output_dir: str = "./outputs"
     save_dir: str = "${output_dir}/checkpoints"
     log_dir: str = "${output_dir}/logs"
 

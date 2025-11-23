@@ -140,5 +140,9 @@ def _build_components(
         quality="high",
         downsample_factor=2,
     )
-    loss_fn = ReconstructionLoss(renderer=renderer, pose_up_axis=cfg.up_axis)
+    loss_fn = ReconstructionLoss(
+        renderer=renderer,
+        pose_up_axis=cfg.up_axis,
+        default_device=torch.device(str(cfg.device)),
+    )
     return mapanything, policy, renderer, loss_fn

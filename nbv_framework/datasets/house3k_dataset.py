@@ -60,8 +60,8 @@ class House3KDataset(BaseDataset):
         split: str = "train",
         normalize_method: str = "quantile",
         num_samples: int = 10000,
-        train_ratio: float = 1,
-        val_ratio: float = 0,
+        train_ratio: float = 0.8,
+        val_ratio: float = 0.2,
         max_meshes: int = None,
         use_cache: bool = True,
         view_sampling_mode: str = "deterministic_per_call",
@@ -117,10 +117,19 @@ class House3KDataset(BaseDataset):
         self.view_sampling_mode = str(view_sampling_mode).lower()
         self.view_sampling_seed = view_sampling_seed
         self.process_rank = int(process_rank)
-        
-        # 验证分割比例
+
+        # 验证分割比例，允许浮点运算带来的微小负数
         if self.test_ratio < 0:
-            raise ValueError(f"Invalid split ratios: train={train_ratio}, val={val_ratio}")
+            if self.test_ratio < -1e-6:
+                raise ValueError(f"Invalid split ratios: train={train_ratio}, val={val_ratio}")
+            LOGGER.warning(
+                "Split ratios sum to ~1 within tolerance; clamping test ratio to 0 "
+                "(train=%s, val=%s, computed_test=%s)",
+                train_ratio,
+                val_ratio,
+                self.test_ratio,
+            )
+            self.test_ratio = 0.0
         
         # 初始化渲染器（延迟加载）
         self._renderer = None
@@ -316,7 +325,14 @@ class House3KDataset(BaseDataset):
                     "无法导入 DifferentiableRenderer，请确认 PyTorch3D 依赖已正确安装。"
                 ) from exc
 
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            if torch.cuda.is_available():
+                device_index = min(
+                    max(int(self.process_rank), 0),
+                    torch.cuda.device_count() - 1,
+                )
+                device = torch.device(f"cuda:{device_index}")
+            else:
+                device = torch.device("cpu")
             self._renderer = DifferentiableRenderer(
                 image_size=self.image_size,
                 device=device
