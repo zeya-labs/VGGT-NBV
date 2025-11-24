@@ -48,7 +48,7 @@ class NBVExperimentConfig:
     randomize_initial_views: bool = True
     image_size: int = 518
     up_axis: str = "Y"
-    max_meshes: int = 16
+    max_meshes: int = 20
     train_repeat_factor: int = 1
     val_repeat_factor: int = 1
     # View sampling modes:

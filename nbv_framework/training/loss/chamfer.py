@@ -16,6 +16,7 @@ from pytorch3d.ops import sample_farthest_points
 from nbv_framework.utils.logging_utils import get_logger
 
 from ...utils.tensorboard_mesh import log_point_clouds_to_tensorboard
+from mapanything.utils.geometry import apply_log_to_norm
 
 LOGGER = get_logger(__name__)
 
@@ -23,12 +24,18 @@ LOGGER = get_logger(__name__)
 class ChamferDistance(nn.Module):
     """Compute an aligned Chamfer distance with optional TensorBoard logging."""
 
-    def __init__(self, *, max_points_per_cloud: int = 4096) -> None:
+    def __init__(
+        self,
+        *,
+        max_points_per_cloud: int = 4096,
+        use_log_warp: bool = False,
+    ) -> None:
         super().__init__()
         self.max_points_per_cloud = max_points_per_cloud
         self.save_point_clouds: bool = False
         self.point_cloud_subdir: str = "point_clouds"
         self.log_tensorboard: bool = True
+        self.use_log_warp: bool = use_log_warp
 
     def configure_point_cloud_logging(
         self,
@@ -110,6 +117,12 @@ class ChamferDistance(nn.Module):
             return points
         return scale * (points @ rotation.transpose(0, 1)) + translation
 
+    @staticmethod
+    def _maybe_log_warp(points: torch.Tensor) -> torch.Tensor:
+        if points.numel() == 0:
+            return points
+        return apply_log_to_norm(points)
+
     def forward(
         self,
         p_pred: Pointclouds,
@@ -160,6 +173,10 @@ class ChamferDistance(nn.Module):
             padded_aligned, lengths=aligned_lengths, K=target_fps_points
         )
         fps_aligned_points_list = [sampled_points[i] for i in range(sampled_points.shape[0])]
+
+        if self.use_log_warp:
+            fps_aligned_points_list = [self._maybe_log_warp(pts) for pts in fps_aligned_points_list]
+            gt_list = [self._maybe_log_warp(pts) for pts in gt_list]
 
         p_pred_aligned = Pointclouds(points=fps_aligned_points_list)
 

@@ -24,6 +24,13 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from lightning_fabric.utilities.apply_func import apply_to_collection
 from pytorch3d.structures import Meshes
 
+from mapanything.utils.geometry import (
+    normalize_pose_translations,
+    quaternion_to_rotation_matrix,
+    rotation_matrix_to_quaternion,
+    transform_pose_using_quats_and_trans_2_to_1,
+)
+
 if TYPE_CHECKING:
     from ..models import MapAnythingWrapper, BaseNBVPolicy
 from ..rendering import DifferentiableRenderer
@@ -167,10 +174,58 @@ class NBVTrainer(LightningModule):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """根据策略输出计算绝对位姿及相关中间量。"""
         reference_position = camera_poses_batch[:, 0, :3]
-        predicted_relative_position = policy_output[:, :3]
+        # 使用 MapAnything 同步的位姿归一化尺度，将策略输出从归一化坐标恢复到原始尺度
+        scale_factor = self._compute_pose_scale_factor(camera_poses_batch).unsqueeze(-1)
+        predicted_relative_position = policy_output[:, :3] * scale_factor
         absolute_position = reference_position + predicted_relative_position
         next_camera_pose = position_to_pose_tensor(absolute_position)
         return next_camera_pose, predicted_relative_position, absolute_position
+
+    def _compute_pose_scale_factor(self, camera_poses_batch: torch.Tensor) -> torch.Tensor:
+        """模仿 MapAnything：将所有视角变换到 view0 坐标系后，按跨视角平均范数归一化平移，返回归一化因子。
+
+        输入 camera_poses_batch 采用本项目通用的 world->camera 约定 [x,y,z,qx,qy,qz,qw]，
+        先转换到 cam2world (OpenCV, scalar-last) 再复用 MapAnything 的相对位姿计算。
+        """
+        if camera_poses_batch.ndim != 3 or camera_poses_batch.shape[-1] != 7:
+            raise ValueError(
+                f"camera_poses_batch expected shape [B, S, 7], got {tuple(camera_poses_batch.shape)}"
+            )
+        positions_world = camera_poses_batch[..., :3]  # camera centers in world
+        quats_world_to_cam = camera_poses_batch[..., 3:]  # world->cam rotation, xyzw
+
+        B, S, _ = positions_world.shape
+        # world->cam rotation matrix
+        R_wc = quaternion_to_rotation_matrix(quats_world_to_cam.reshape(-1, 4)).view(B, S, 3, 3)
+        # cam2world rotation
+        R_cw = R_wc.transpose(-1, -2)
+        quats_cam2world = rotation_matrix_to_quaternion(R_cw.reshape(-1, 3, 3)).view(B, S, 4)
+        trans_cam2world = positions_world  # cam center in world frame
+
+        ref_quat = quats_cam2world[:, 0]  # [B, 4]
+        ref_trans = trans_cam2world[:, 0]  # [B, 3]
+
+        ref_quat_exp = ref_quat.unsqueeze(1).expand(-1, S, -1).reshape(-1, 4)
+        ref_trans_exp = ref_trans.unsqueeze(1).expand(-1, S, -1).reshape(-1, 3)
+        quats_flat = quats_cam2world.reshape(-1, 4)
+        trans_flat = trans_cam2world.reshape(-1, 3)
+
+        _, rel_trans_flat = transform_pose_using_quats_and_trans_2_to_1(
+            ref_quat_exp,
+            ref_trans_exp,
+            quats_flat,
+            trans_flat,
+        )
+        rel_trans = rel_trans_flat.view(B, S, 3)
+
+        _, norm_factor = normalize_pose_translations(rel_trans, return_norm_factor=True)
+        LOGGER.info(
+            "Pose scale factor stats — mean: %.4f, min: %.4f, max: %.4f",
+            norm_factor.mean().item(),
+            norm_factor.min().item(),
+            norm_factor.max().item(),
+        )
+        return norm_factor
 
     def _log_camera_pose_stats(
         self,

@@ -111,6 +111,6 @@ class NBVDataModule(pl.LightningDataModule):
             "view_sampling_mode": getattr(self.cfg, "view_sampling_mode", "deterministic_per_call"),
             "view_sampling_seed": getattr(self.cfg, "view_sampling_seed", None),
             "process_rank": getattr(self.cfg, "rank", 0),
-            "device": str(self.device),
+            "device": "cpu", # str(self.device),
             "tensor_dtype": self.tensor_dtype,
         }

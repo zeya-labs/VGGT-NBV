@@ -23,13 +23,17 @@ class ChamferRegularizer:
         save_point_clouds: bool = True,
         point_cloud_dir_name: str = "point_clouds",
         log_tensorboard: bool = False,
+        use_log_warp_for_chamfer: bool = False,
     ) -> None:
         self.weight = weight
         self.extractor = extractor
         self.point_source = point_source
         self.confidence_threshold = confidence_threshold
 
-        self.chamfer = ChamferDistance(max_points_per_cloud=max_points_per_cloud)
+        self.chamfer = ChamferDistance(
+            max_points_per_cloud=max_points_per_cloud,
+            use_log_warp=use_log_warp_for_chamfer,
+        )
         self.save_point_clouds = bool(save_point_clouds)
         self.point_cloud_dir_name = point_cloud_dir_name
         self.chamfer.configure_point_cloud_logging(

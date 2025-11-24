@@ -77,8 +77,8 @@ def normalize_mesh(mesh: Meshes, method: str = "quantile") -> Meshes:
     verts = new_mesh.verts_packed()
 
     # 中心化
-    # centroid = verts.mean(dim=0)
-    # verts = verts - centroid
+    centroid = verts.mean(dim=0)
+    verts = verts - centroid
 
     # 缩放
     scale = None

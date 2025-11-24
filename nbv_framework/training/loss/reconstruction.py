@@ -36,6 +36,7 @@ class ReconstructionLoss(nn.Module):
         pose_floor_margin: float = 1.0,
         default_device: Optional[torch.device] = None,
         tensor_dtype: torch.dtype = torch.float32,
+        use_log_warp_for_chamfer: bool = False,
     ) -> None:
         super().__init__()
 
@@ -56,6 +57,7 @@ class ReconstructionLoss(nn.Module):
             save_point_clouds=save_point_clouds,
             point_cloud_dir_name=point_cloud_dir_name,
             log_tensorboard=log_tensorboard,
+            use_log_warp_for_chamfer=use_log_warp_for_chamfer,
         )
         self.confidence_regularizer = ConfidenceRegularizer(weight=confidence_weight)
         self.viewpoint_regularizer = ViewpointRegularizer(weight=viewpoint_weight)
