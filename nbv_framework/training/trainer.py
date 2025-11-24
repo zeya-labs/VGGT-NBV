@@ -153,6 +153,25 @@ class NBVTrainer(LightningModule):
         else:
             self.policy_network.eval()
 
+    def configure_model(self):
+        """
+        在 Trainer setup 阶段调用，用于对模型进行 torch.compile 编译加速。
+        注意：不要编译 renderer，PyTorch3D 的渲染器通常不兼容 inductor 编译器。
+        """
+        if self.policy_network is not None:
+            LOGGER.info("Compiling Policy Network...")
+            # mode="reduce-overhead" 适合小网络（策略网络通常不大），可以减少 Python 调用开销
+            # 如果策略网络很大（如 ResNet50+），改用 mode="default"
+            self.policy_network = torch.compile(self.policy_network, mode="reduce-overhead")
+
+        # 可选：尝试编译 VGGT Wrapper
+        # MapAnything/VGGT 结构通常很复杂，编译可能会失败或导致启动极慢。
+        # 如果 vggt_wrapper 内部是标准的 Transformer/CNN，可以尝试取消下面的注释：
+        # if self.vggt_wrapper is not None:
+        #     LOGGER.info("Compiling VGGT Wrapper...")
+        #     # fullgraph=False 允许在无法完全捕获图时回退到 Python
+        #     self.vggt_wrapper = torch.compile(self.vggt_wrapper, mode="default", fullgraph=False)
+
     def _extract_scene_features(
         self,
         initial_images: torch.Tensor,

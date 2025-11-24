@@ -26,6 +26,7 @@ trainer:
   devices: auto
   strategy: auto
   precision: 16-mixed
+  profiler: advanced
   sync_batchnorm: true
   benchmark: true
   accumulate_grad_batches: 2
