@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING, NamedTuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING, NamedTuple, Union
 
 import torch
 import torch.nn as nn
@@ -231,6 +231,7 @@ class NBVTrainer(LightningModule):
         point_cloud_dir: Optional[str],
         log_to_tensorboard: bool,
         retain_gradients: bool,
+        mesh_paths: Optional[Sequence[Optional[str]]] = None,
     ) -> PoseEvaluationResult:
         """统一执行渲染、重建与损失计算，便于策略预测与随机基线共用。"""
         new_images = self.renderer(
@@ -313,6 +314,7 @@ class NBVTrainer(LightningModule):
             depth_z=updated_depth_z,
             is_metric_scale=False,
             view_save_dir=point_cloud_dir,
+            mesh_paths=mesh_paths,
         )
 
         total_loss, loss_components = self.loss_fn(
@@ -385,6 +387,7 @@ class NBVTrainer(LightningModule):
         gt_mesh_data: Dict[str, torch.Tensor],
         mesh_batch,
         render_step: Optional[int],
+        mesh_paths: Optional[Sequence[Optional[str]]] = None,
     ) -> Tuple[float, torch.Tensor, float]:
         """生成符合姿态约束的随机位姿并计算其 Chamfer 损失。"""
         device = initial_images.device
@@ -404,6 +407,7 @@ class NBVTrainer(LightningModule):
                 point_cloud_dir=None,
                 log_to_tensorboard=False,
                 retain_gradients=False,
+                mesh_paths=mesh_paths,
             )
 
         return (
@@ -478,6 +482,15 @@ class NBVTrainer(LightningModule):
         inputs = batch.get("inputs", {})
         targets = batch.get("targets", {})
         mesh_data = batch.get("mesh", {})
+        meta = batch.get("meta")
+        mesh_paths: Optional[List[Optional[str]]] = None
+        if isinstance(meta, list):
+            mesh_paths = []
+            for entry in meta:
+                if isinstance(entry, dict):
+                    mesh_paths.append(entry.get("mesh_path"))
+                else:
+                    mesh_paths.append(None)
 
         initial_images = inputs["images"]
         camera_poses_batch = inputs["camera_poses"]
@@ -490,6 +503,13 @@ class NBVTrainer(LightningModule):
             depth_z=depth_z_batch,
             randomize=backprop,
         )
+        if mesh_paths is not None and len(mesh_paths) != initial_images.shape[0]:
+            LOGGER.warning(
+                "mesh_paths length (%d) does not match batch size (%d); disable mesh logging for this batch.",
+                len(mesh_paths),
+                initial_images.shape[0],
+            )
+            mesh_paths = None
 
         trimmed_gt_mesh_data = self._trim_gt_mesh_data(gt_mesh_data, selection)
 
@@ -538,6 +558,7 @@ class NBVTrainer(LightningModule):
             point_cloud_dir=step_output_dir,
             log_to_tensorboard=backprop,
             retain_gradients=False,
+            mesh_paths=mesh_paths,
         )
 
         total_loss = policy_eval.total_loss
@@ -554,6 +575,7 @@ class NBVTrainer(LightningModule):
                 gt_mesh_data=trimmed_gt_mesh_data,
                 mesh_batch=mesh_batch,
                 render_step=render_step,
+                mesh_paths=mesh_paths,
             )
 
         logged_loss_keys = (
@@ -735,4 +757,3 @@ class NBVTrainer(LightningModule):
         if writer is None:
             return
         writer.add_image(tag, img_tensor, step)
-

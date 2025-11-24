@@ -36,7 +36,7 @@ class NBVExperimentConfig:
     learning_rate: float = 1e-5
     batch_size: int = 1
     max_epochs: int = 1000
-    normalize_method: str = "quantile"
+    normalize_method: str = "mean"
     num_samples: int = 100000
     weight_decay: float = 1e-5
     use_epoch_seed: bool = False

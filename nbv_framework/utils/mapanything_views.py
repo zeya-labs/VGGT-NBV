@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 import torchvision
@@ -105,6 +105,7 @@ def prepare_mapanything_views(
     is_metric_scale: bool = False,
     depth_z: Optional[torch.Tensor] = None,
     save_dir: Optional[str] = None,
+    mesh_paths: Optional[Sequence[Optional[str]]] = None,
 ) -> Tuple[List[Dict[str, Any]], torch.Tensor]:
     """验证输入并基于原始分辨率构建 MapAnything 视图描述。"""
     if images.dim() != 5 or images.shape[2] != 3:
@@ -195,10 +196,26 @@ def prepare_mapanything_views(
 
         batch_size, num_views, _, height, width = images_cpu.shape
         intrinsics = compute_pinhole_intrinsics(height, width, fov_degrees)
+        mesh_path_list: Optional[List[Optional[str]]] = None
+        if mesh_paths is not None:
+            mesh_path_list = list(mesh_paths)
+            if len(mesh_path_list) != batch_size:
+                logger.warning(
+                    "mesh_paths length (%d) does not match batch size (%d); skipping mesh annotations.",
+                    len(mesh_path_list),
+                    batch_size,
+                )
+                mesh_path_list = None
 
         for batch_idx in range(batch_size):
             batch_dir = os.path.join(save_dir, f"batch_{batch_idx:03d}")
             os.makedirs(batch_dir, exist_ok=True)
+
+            mesh_path_value: Optional[str] = None
+            if mesh_path_list is not None:
+                mesh_entry = mesh_path_list[batch_idx]
+                if mesh_entry is not None:
+                    mesh_path_value = str(mesh_entry)
 
             for view_idx in range(num_views):
                 raw_img = images_cpu[batch_idx, view_idx]
@@ -217,6 +234,8 @@ def prepare_mapanything_views(
                     "camera_poses": cam2world,
                     "is_metric_scale": torch.tensor([bool(is_metric_scale)], dtype=torch.bool),
                 }
+                if mesh_path_value is not None:
+                    view_payload["mesh_path"] = mesh_path_value
                 if depth_cpu is not None:
                     view_payload["depth_z"] = depth_cpu[batch_idx, view_idx].contiguous()
 

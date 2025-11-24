@@ -67,10 +67,6 @@ class ChamferRegularizer:
                 "gt_mesh_data must contain 'gt_point_maps' and 'gt_valid_masks' for Chamfer loss."
             )
 
-        target_device = device
-        gt_point_maps = gt_point_maps.to(device=target_device, dtype=dtype)
-        gt_valid_masks = gt_valid_masks.to(device=target_device)
-
         pred_pointclouds, correspondence_mask = self.extractor(
             recon_data=recon_data,
             combined_images_batch=combined_images_batch,
@@ -80,7 +76,7 @@ class ChamferRegularizer:
         )
 
         gt_points_batch = [
-            torch.as_tensor(points, device=target_device, dtype=dtype)
+            torch.as_tensor(points, device=device, dtype=dtype)
             for points in gt_data["gt_points"]
         ]
         gt_pointclouds = Pointclouds(points=gt_points_batch)
