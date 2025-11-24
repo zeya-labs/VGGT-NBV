@@ -20,10 +20,11 @@ def create_data_loader(
     drop_last: bool = True,
     collate_fn: Optional[Callable] = None,
     sampler: Optional[Sampler] = None,
+    prefetch_factor: Optional[int] = None,
 ) -> DataLoader:
     """
     创建数据加载器
-    
+
     Args:
         dataset: 数据集实例
         batch_size: 批次大小
@@ -34,7 +35,7 @@ def create_data_loader(
         drop_last: 是否丢弃最后不完整的批次
         collate_fn: 自定义的collate函数，如果为None则自动选择
         sampler: 可选采样器（如 DistributedSampler）
-        
+
     Returns:
         数据加载器
     """
@@ -46,15 +47,15 @@ def create_data_loader(
             dataset_type = "synthetic"
         else:
             dataset_type = "nbv"  # 默认类型
-        
+
         collate_fn = get_collate_fn(dataset_type)
 
     multiprocessing_context = None
     if num_workers > 0:
         multiprocessing_context = mp.get_context("spawn")
 
-    return DataLoader(
-        dataset,
+    loader_kwargs = dict(
+        dataset=dataset,
         batch_size=batch_size,
         shuffle=shuffle if sampler is None else False,
         num_workers=num_workers,
@@ -65,6 +66,11 @@ def create_data_loader(
         sampler=sampler,
         multiprocessing_context=multiprocessing_context,
     )
+    # prefetch_factor 仅在 num_workers > 0 时可用，否则 DataLoader 会报参数无效
+    if prefetch_factor is not None and num_workers > 0:
+        loader_kwargs["prefetch_factor"] = prefetch_factor
+
+    return DataLoader(**loader_kwargs)
 
 
 def create_train_loader(
@@ -76,14 +82,14 @@ def create_train_loader(
 ) -> DataLoader:
     """
     创建训练数据加载器
-    
+
     Args:
         dataset: 数据集实例
         batch_size: 批次大小
         num_workers: 工作进程数
         sampler: 采样器（分布式训练时使用）
         **kwargs: 其他参数
-        
+
     Returns:
         训练数据加载器
     """
@@ -109,14 +115,14 @@ def create_val_loader(
 ) -> DataLoader:
     """
     创建验证数据加载器
-    
+
     Args:
         dataset: 数据集实例
         batch_size: 批次大小
         num_workers: 工作进程数
         sampler: 采样器（分布式验证时使用）
         **kwargs: 其他参数
-        
+
     Returns:
         验证数据加载器
     """
@@ -142,14 +148,14 @@ def create_test_loader(
 ) -> DataLoader:
     """
     创建测试数据加载器
-    
+
     Args:
         dataset: 数据集实例
         batch_size: 批次大小（测试时通常为1）
         num_workers: 工作进程数
         sampler: 采样器
         **kwargs: 其他参数
-        
+
     Returns:
         测试数据加载器
     """

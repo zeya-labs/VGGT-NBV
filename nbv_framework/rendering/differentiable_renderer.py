@@ -427,19 +427,24 @@ class DifferentiableRenderer(nn.Module):
         """
         前向传播：渲染新视图
         """
-        # 1. 从位姿创建批次化的相机对象
-        cameras = self.create_cameras_from_poses(
-            camera_poses, 
-            pose_format, 
-            fov=fov
-        )
+        # 渲染器不支持半精度；禁用 autocast，强制 float32 以兼容 AMP 训练。
+        with torch.cuda.amp.autocast(enabled=False):
+            gt_mesh = gt_mesh.to(device=self.device)  # Meshes 不支持 dtype 参数
+            camera_poses = camera_poses.to(device=self.device, dtype=torch.float32)
 
-        # print("camera_poses:",camera_poses)
-        # 2. 调用纯粹的渲染函数
-        #    这里隐含了一个假设：len(gt_mesh) == len(camera_poses)
-        return self.render_views(
-            gt_mesh,
-            cameras,
-            lighting_type=lighting_type,
-            return_point_maps=return_point_maps
-        )
+            # 1. 从位姿创建批次化的相机对象
+            cameras = self.create_cameras_from_poses(
+                camera_poses,
+                pose_format,
+                fov=fov
+            )
+
+            # print("camera_poses:",camera_poses)
+            # 2. 调用纯粹的渲染函数
+            #    这里隐含了一个假设：len(gt_mesh) == len(camera_poses)
+            return self.render_views(
+                gt_mesh,
+                cameras,
+                lighting_type=lighting_type,
+                return_point_maps=return_point_maps
+            )
