@@ -19,8 +19,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torchvision
-from pytorch_lightning import LightningModule
-from pytorch_lightning.loggers import TensorBoardLogger
+from lightning.pytorch import LightningModule
+from lightning.pytorch.loggers import TensorBoardLogger
 from lightning_fabric.utilities.apply_func import apply_to_collection
 from pytorch3d.structures import Meshes
 
@@ -162,7 +162,7 @@ class NBVTrainer(LightningModule):
             LOGGER.info("Compiling Policy Network...")
             # mode="reduce-overhead" 适合小网络（策略网络通常不大），可以减少 Python 调用开销
             # 如果策略网络很大（如 ResNet50+），改用 mode="default"
-            self.policy_network = torch.compile(self.policy_network, mode="reduce-overhead")
+            self.policy_network = torch.compile(self.policy_network, mode="default")
 
         # 可选：尝试编译 VGGT Wrapper
         # MapAnything/VGGT 结构通常很复杂，编译可能会失败或导致启动极慢。

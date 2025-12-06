@@ -234,6 +234,7 @@ def prepare_mapanything_views(
                     "camera_poses": cam2world,
                     "is_metric_scale": torch.tensor([bool(is_metric_scale)], dtype=torch.bool),
                 }
+                print("mesh_path_value:", mesh_path_value)
                 if mesh_path_value is not None:
                     view_payload["mesh_path"] = mesh_path_value
                 if depth_cpu is not None:

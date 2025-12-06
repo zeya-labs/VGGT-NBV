@@ -9,10 +9,11 @@ from typing import Tuple
 import torch
 
 from omegaconf import OmegaConf
-from pytorch_lightning import Trainer
-from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
-from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning.utilities.rank_zero import rank_zero_only
+from lightning.pytorch import Trainer
+from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
+from lightning.pytorch.loggers import TensorBoardLogger
+from lightning.pytorch.utilities.rank_zero import rank_zero_only
+from lightning.pytorch.profilers import AdvancedProfiler
 
 from nbv_framework.models.mapanything_wrapper import MapAnythingWrapper
 from nbv_framework.models.nbv_policy_networks import AttentionNBVPolicy
@@ -61,7 +62,7 @@ def build_lightning_model(cfg: NBVExperimentConfig) -> NBVTrainer:
     )
 
 
-def build_trainer(cfg: NBVExperimentConfig) -> Trainer:
+def build_trainer(cfg: NBVExperimentConfig, profiler: AdvancedProfiler) -> Trainer:
     """Configure the PyTorch Lightning Trainer from Hydra config."""
     trainer_conf = OmegaConf.to_container(cfg.trainer, resolve=True)  # type: ignore[arg-type]
     callbacks = [
@@ -78,6 +79,7 @@ def build_trainer(cfg: NBVExperimentConfig) -> Trainer:
     logger = TensorBoardLogger(save_dir=cfg.log_dir, name="events")
     trainer_kwargs = {
         **trainer_conf,
+        "profiler": profiler,
         "default_root_dir": cfg.output_dir,
         "logger": logger,
         "callbacks": callbacks,

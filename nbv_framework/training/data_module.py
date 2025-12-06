@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-import pytorch_lightning as pl
+import lightning.pytorch as pl
 from torch.utils.data import DataLoader, Dataset
 
 from nbv_framework.datasets.data_loaders import create_train_loader, create_val_loader
