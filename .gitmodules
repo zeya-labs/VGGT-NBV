@@ -1,0 +1,6 @@
+[submodule "map-anything"]
+	path = map-anything
+	url = https://github.com/XyeaOvO/map-anything.git
+[submodule "vggt"]
+	path = vggt
+	url = https://github.com/XyeaOvO/vggt.git
