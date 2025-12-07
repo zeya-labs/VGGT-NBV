@@ -53,16 +53,13 @@ class PointCloudExtractor:
                 mask = flat_conf > 1e-5
 
             if combined_images_batch is not None:
-                # 假设 images 是 (B, S, C, H, W) 或 (B, C, H, W)，需要对齐
-                # 简单起见，假设调用方保证了形状对齐，直接 view
-                # 计算像素强度: mean over channels
-                intensity = combined_images_batch.flatten(start_dim=1).mean(dim=-1) # 这取决于 images 的具体布局
-                # 由于 image shape 比较多变，这里保留一个防御性 reshape，实际需根据 recon_data 调整
-                # 假设 conf_data 和 image 像素一一对应
-                if combined_images_batch.numel() // combined_images_batch.shape[-1] == flat_conf.numel():
-                     # 尝试对齐
-                     pixel_intensity = combined_images_batch.view(B, -1, combined_images_batch.shape[-1]).mean(dim=2)
-                     mask = mask & (pixel_intensity > self.black_threshold)
+                # 如果明确知道输入是 (B, S, C, H, W)
+                # 先在 Channel 维度 (dim=2) 求平均，得到 (B, S, H, W)
+                intensity_map = combined_images_batch.mean(dim=2)
+                # 再展平以匹配 flat_conf
+                pixel_intensity = intensity_map.view(B, -1)
+                # 然后进行掩码计算
+                mask = mask & (pixel_intensity > self.black_threshold)
 
             if gt_valid_masks is not None:
                 mask = mask & gt_valid_masks.view(B, -1)
