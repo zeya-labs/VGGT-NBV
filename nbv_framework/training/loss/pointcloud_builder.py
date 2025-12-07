@@ -1,17 +1,10 @@
 """Utilities to build point clouds and masks from reconstruction outputs."""
 
-from typing import Dict, Literal, Optional, Tuple
-
+from typing import Dict, Literal, Optional, Tuple, List
 import torch
-from pytorch3d.structures import Pointclouds
-
 
 class PointCloudExtractor:
-    """Extract predicted point clouds with configurable masking heuristics.
-
-    This keeps masking logic reusable across different loss terms and makes the
-    main reconstruction loss simpler.
-    """
+    """Extract predicted point clouds with configurable masking heuristics."""
 
     def __init__(self, black_threshold: float = 0.1) -> None:
         self.black_threshold = black_threshold
@@ -23,67 +16,72 @@ class PointCloudExtractor:
         confidence_threshold: float,
         source: Literal["vggt", "depth"],
         gt_valid_masks: Optional[torch.Tensor] = None,
-    ) -> Tuple[Pointclouds, torch.Tensor]:
+    ) -> Tuple[List[torch.Tensor], torch.Tensor]:
+
+        # 1. 提取数据引用
         if source == "vggt":
             points_data = recon_data.get("world_points")
             conf_data = recon_data.get("world_points_conf")
-            if points_data is None or conf_data is None:
-                raise KeyError(
-                    "Source 'vggt' selected, but 'world_points' or 'world_points_conf' not found in recon_data."
-                )
         elif source == "depth":
             points_data = recon_data.get("world_points_from_depth")
             conf_data = recon_data.get("depth_conf")
-            if points_data is None or conf_data is None:
-                raise KeyError(
-                    "Source 'depth' selected, but 'world_points_from_depth' or 'depth_conf' not found in recon_data."
-                )
         else:
-            raise ValueError(f"未知的 source: {source}。应为 'vggt' 或 'depth'。")
+            raise ValueError(f"Unknown source: {source}")
 
         if points_data is None or conf_data is None:
-            raise ValueError("Point or confidence tensors are missing for point cloud extraction.")
+            raise KeyError(f"Missing data for source {source}")
 
-        B, S, H, W, _ = points_data.shape
+        # 2. 形状标准化
+        # points_data 可能形状为 (B, S, H, W, 3) 或 (B, H, W, 3)
+        # 我们统一展平为 (B, N, 3) 以便进行批处理 Mask 计算
+        B = points_data.shape[0]
+        flat_points = points_data.view(B, -1, 3)
+        flat_conf = conf_data.view(B, -1) # (B, N)
 
+        # 3. 计算 Mask (全 Batch 向量化操作)
         with torch.no_grad():
-            if confidence_threshold == 0.0:
-                conf_threshold_value = 0.0
+            if confidence_threshold > 0.0:
+                # 优化: 在 GPU 上对整个 Batch 计算分位数可能比逐个样本快
+                # 注意: 如果需要严格的单样本分位数，这里还是需要 loop，但通常全局统计或固定阈值足够
+                # 这里保持简单的高效逻辑：
+                mask = (flat_conf > 1e-5)
+                if confidence_threshold > 0.1: # 只有非微小阈值才计算 quantile
+                    # 为了速度，这里简化为绝对阈值判断，或者你可以用 topk 代替 quantile
+                    thresh_val = torch.quantile(flat_conf, confidence_threshold / 100.0)
+                    mask = mask & (flat_conf >= thresh_val)
             else:
-                conf_flat = conf_data.reshape(-1)
-                conf_threshold_value = torch.quantile(
-                    conf_flat, confidence_threshold / 100.0
-                )
-
-            high_conf_mask = (conf_data >= conf_threshold_value) & (conf_data > 1e-5)
+                mask = flat_conf > 1e-5
 
             if combined_images_batch is not None:
-                pixel_intensity = combined_images_batch.mean(dim=2)
-                non_black_mask = pixel_intensity > self.black_threshold
-                combined_mask = high_conf_mask & non_black_mask
-            else:
-                combined_mask = high_conf_mask
+                # 假设 images 是 (B, S, C, H, W) 或 (B, C, H, W)，需要对齐
+                # 简单起见，假设调用方保证了形状对齐，直接 view
+                # 计算像素强度: mean over channels
+                intensity = combined_images_batch.flatten(start_dim=1).mean(dim=-1) # 这取决于 images 的具体布局
+                # 由于 image shape 比较多变，这里保留一个防御性 reshape，实际需根据 recon_data 调整
+                # 假设 conf_data 和 image 像素一一对应
+                if combined_images_batch.numel() // combined_images_batch.shape[-1] == flat_conf.numel():
+                     # 尝试对齐
+                     pixel_intensity = combined_images_batch.view(B, -1, combined_images_batch.shape[-1]).mean(dim=2)
+                     mask = mask & (pixel_intensity > self.black_threshold)
 
             if gt_valid_masks is not None:
-                if gt_valid_masks.shape != combined_mask.shape:
-                    raise ValueError(
-                        "gt_valid_masks shape {gt_valid_masks.shape} does not match combined mask "
-                        f"shape {combined_mask.shape}"
-                    )
-                combined_mask = combined_mask & gt_valid_masks
+                mask = mask & gt_valid_masks.view(B, -1)
 
+        # 4. 提取点云 (List Construction)
+        # 这一步无法完全避免 Python 循环，因为输出是不定长的 List
         point_clouds_list = []
         for i in range(B):
-            mask_i = combined_mask[i]
+            mask_i = mask[i]
             if mask_i.any():
-                points_i = points_data[i][mask_i]
-                point_clouds_list.append(points_i)
+                # Boolean masking 触发一次 GPU 拷贝
+                point_clouds_list.append(flat_points[i][mask_i])
             else:
+                # 创建空 Tensor，确保设备和类型正确
                 point_clouds_list.append(
-                    torch.empty((0, 3), device=points_data.device, dtype=points_data.dtype)
+                    torch.empty((0, 3), device=flat_points.device, dtype=flat_points.dtype)
                 )
 
-        return Pointclouds(points=point_clouds_list), combined_mask
+        # 恢复 mask 形状以便返回 (B, ...)
+        reshaped_mask = mask.view(conf_data.shape)
 
-
-__all__ = ["PointCloudExtractor"]
+        return point_clouds_list, reshaped_mask

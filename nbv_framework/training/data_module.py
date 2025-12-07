@@ -50,7 +50,7 @@ class NBVDataModule(pl.LightningDataModule):
         return create_train_loader(
             self.train_dataset,
             batch_size=self.cfg.batch_size,
-            num_workers=20,
+            num_workers=8,
         )
 
     def val_dataloader(self) -> Optional[DataLoader]:
@@ -59,7 +59,7 @@ class NBVDataModule(pl.LightningDataModule):
         return create_val_loader(
             self.val_dataset,
             batch_size=self.cfg.batch_size,
-            num_workers=20,
+            num_workers=8,
         )
 
     def _build_train_dataset(self) -> Dataset:
