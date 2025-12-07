@@ -6,7 +6,7 @@ import hydra
 from hydra.core.config_store import ConfigStore
 from nbv_framework.utils.logging_utils import get_logger
 from lightning.pytorch import seed_everything
-from lightning.pytorch.profilers import SimpleProfiler
+from lightning.pytorch.profilers import SimpleProfiler, AdvancedProfiler
 
 from nbv_framework.training.config import NBVExperimentConfig
 from nbv_framework.training.runtime import (
@@ -27,7 +27,7 @@ def main(cfg: NBVExperimentConfig) -> None:
     seed_everything(cfg.seed, workers=True)
     configure_run(cfg)
     maybe_create_synthetic_data(cfg)
-    profiler = SimpleProfiler(dirpath=".", filename="profile_report")
+    profiler = AdvancedProfiler(dirpath=".", filename="profile_report")
     model = build_lightning_model(cfg)
     datamodule = build_datamodule(cfg)
     trainer = build_trainer(cfg, profiler=profiler)
