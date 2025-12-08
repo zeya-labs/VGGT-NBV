@@ -40,7 +40,7 @@ from ..utils.camera_utils import (
     world_points_to_camera_depth,
 )
 from ..utils.render_utils import render_gt_point_maps
-from ..models import build_recon_from_point_maps
+from ..models.direct_reconstruction import build_recon_from_point_maps
 
 
 LOGGER = logging.getLogger(__name__)

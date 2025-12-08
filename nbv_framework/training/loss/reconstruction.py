@@ -26,7 +26,7 @@ class ReconstructionLoss(nn.Module):
         pose_up_axis: str = "Y",
         save_point_clouds: bool = True,
         point_cloud_dir_name: str = "point_clouds",
-        max_points_per_cloud: int = 4096,
+        max_points_per_cloud: int = 32768,
         log_tensorboard: bool = False,
         point_source: str = "vggt",
         confidence_threshold: float = 0.0,

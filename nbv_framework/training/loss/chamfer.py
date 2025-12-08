@@ -3,27 +3,21 @@
 from __future__ import annotations
 
 import os
-from typing import List, Optional, Tuple
-
-import numpy as np
+from typing import List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.utils.rnn as rnn_utils
 
 from pytorch3d.loss import chamfer_distance
-from pytorch3d.structures import Pointclouds
-from pytorch3d.ops import sample_farthest_points
-
-from ...utils.tensorboard_mesh import log_point_clouds_to_tensorboard
 from mapanything.utils.geometry import apply_log_to_norm
 
 class ChamferDistance(nn.Module):
-    """Compute an aligned Chamfer distance optimized for speed."""
+    """Compute Chamfer distance with optional downsampling."""
 
     def __init__(
         self,
         *,
-        max_points_per_cloud: int = 4096,
+        max_points_per_cloud: int = 32768,
         use_log_warp: bool = False,
     ) -> None:
         super().__init__()
@@ -50,136 +44,84 @@ class ChamferDistance(nn.Module):
         if log_to_tensorboard is not None:
             self.log_tensorboard = bool(log_to_tensorboard)
 
-    def _umeyama_alignment(
-        self, source: torch.Tensor, target: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # 极简版 Umeyama，去除了不必要的 check，假设调用方保证 shape
-        n_points = source.shape[0]
+    def _to_batched(
+        self, data: Union[List[torch.Tensor], torch.Tensor], *, downsample: bool
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        将输入统一为 (B, N, 3) 和长度张量。
+        若需要，按 max_points_per_cloud 下采样。
+        """
+        if torch.is_tensor(data):
+            if data.ndim == 2:
+                data = data.unsqueeze(0)
+            if data.ndim != 3:
+                raise ValueError(f"Expected tensor with shape [B, N, 3], got {tuple(data.shape)}")
+            lengths = torch.full(
+                (data.shape[0],),
+                data.shape[1],
+                device=data.device,
+                dtype=torch.long,
+            )
+            batched = data
+        else:
+            if len(data) == 0:
+                return torch.empty((0, 0, 3)), torch.zeros((), dtype=torch.long)
+            lengths = torch.tensor([p.shape[0] for p in data], device=data[0].device, dtype=torch.long)
+            batched = rnn_utils.pad_sequence(data, batch_first=True)
 
-        # 快速返回：点数太少无法计算 SVD
-        if n_points < 3 or target.shape[0] < 3:
-             device = source.device
-             dtype = source.dtype
-             return (torch.tensor(1.0, device=device, dtype=dtype),
-                     torch.eye(3, device=device, dtype=dtype),
-                     torch.zeros(3, device=device, dtype=dtype))
+        if downsample and self.max_points_per_cloud > 0 and lengths.numel() > 0:
+            new_pts: List[torch.Tensor] = []
+            new_lengths: List[int] = []
+            for i in range(batched.shape[0]):
+                pts = batched[i, : lengths[i]]
+                if pts.numel() == 0:
+                    new_pts.append(pts)
+                    new_lengths.append(0)
+                    continue
+                target = min(self.max_points_per_cloud, pts.shape[0])
+                if target < pts.shape[0]:
+                    idx = torch.randperm(pts.shape[0], device=pts.device)[:target]
+                    pts = pts.index_select(0, idx)
+                new_pts.append(pts)
+                new_lengths.append(pts.shape[0])
+            lengths = torch.tensor(new_lengths, device=batched.device, dtype=torch.long)
+            batched = rnn_utils.pad_sequence(new_pts, batch_first=True)
 
-        # 使用 float64 保证数值稳定性
-        source64 = source.to(dtype=torch.float64)
-        target64 = target.to(dtype=torch.float64)
-
-        mu_x = source64.mean(dim=0)
-        mu_y = target64.mean(dim=0)
-        X = source64 - mu_x
-        Y = target64 - mu_y
-
-        # Covariance
-        cov = (Y.T @ X) / n_points
-        U, S, Vh = torch.linalg.svd(cov)
-
-        d = torch.ones(3, device=source.device, dtype=torch.float64)
-        if torch.det(U @ Vh) < 0:
-            d[-1] = -1
-
-        D = torch.diag(d)
-        rotation = U @ D @ Vh
-
-        var_x = torch.clamp((X ** 2).sum() / n_points, min=1e-8)
-        scale = torch.sum(S * d) / var_x
-        translation = mu_y - scale * (rotation @ mu_x)
-
-        return (
-            scale.to(dtype=source.dtype),
-            rotation.to(dtype=source.dtype),
-            translation.to(dtype=source.dtype),
-        )
+        return batched, lengths
 
     def forward(
         self,
-        pred_list: List[torch.Tensor],
-        gt_list: List[torch.Tensor],
-        correspondence_points: Optional[List[torch.Tensor]] = None,
+        pred: Union[List[torch.Tensor], torch.Tensor],
+        gt: Union[List[torch.Tensor], torch.Tensor],
         writer=None,
         step=None,
         point_cloud_dir: Optional[str] = None,
     ) -> torch.Tensor:
-        if correspondence_points is None:
-            raise ValueError("correspondence_points must be provided.")
+        pred_batched, pred_lengths = self._to_batched(pred, downsample=True)
+        gt_batched, gt_lengths = self._to_batched(gt, downsample=False)
 
-        aligned_points_list: List[torch.Tensor] = []
+        if pred_lengths.numel() == 0 or gt_lengths.numel() == 0:
+            device = pred_batched.device if torch.is_tensor(pred_batched) else torch.device("cpu")
+            return torch.tensor(0.0, device=device, requires_grad=True)
 
-        # 1. 对齐 (Alignment)
-        # 这个循环仍然在 Python 中，因为每个样本点数不同。
-        # Umeyama 计算量很小，主要是 SVD (3x3)，通常不是瓶颈。
-        for pred_points, corr_points in zip(pred_list, correspondence_points):
-            if corr_points.shape[0] >= 3 and pred_points.shape[0] >= 3:
-                scale, rotation, translation = self._umeyama_alignment(pred_points, corr_points)
-                aligned = scale * (pred_points @ rotation.transpose(0, 1)) + translation
-            else:
-                aligned = pred_points
-            aligned_points_list.append(aligned)
+        if pred_batched.shape[0] != gt_batched.shape[0]:
+            raise ValueError(
+                f"Batch size mismatch in Chamfer loss: Pred {pred_batched.shape[0]} vs GT {gt_batched.shape[0]}."
+            )
 
-        # 2. 最远点采样 (FPS)
-        # 构造 Padded Tensor，一次性调用 FPS Kernel
-        aligned_lengths = torch.tensor([p.shape[0] for p in aligned_points_list], device=pred_list[0].device, dtype=torch.long)
-
-        if aligned_lengths.sum() == 0:
-            return torch.tensor(0.0, device=pred_list[0].device, requires_grad=True)
-
-        padded_aligned = rnn_utils.pad_sequence(aligned_points_list, batch_first=True)
-
-        # 确定 FPS 目标点数
-        target_fps = 32768
-        min_pts = aligned_lengths.min().item()
-        if min_pts > 0:
-            target_fps = min(target_fps, int(min_pts))
-        else:
-            # 异常处理：如果有空点云，FPS 会报错，需要处理
-            # 简单起见，如果有空点云，我们可能无法做有效的 batch FPS，或者需要 fill dummy data
-            # 这里假设至少有几个点
-            target_fps = max(1, target_fps)
-
-        sampled_points, _ = sample_farthest_points(
-            padded_aligned, lengths=aligned_lengths, K=target_fps
-        )
-
-        # 3. Log Warp (可选)
         if self.use_log_warp:
-            sampled_points = apply_log_to_norm(sampled_points)
-            gt_list_processed = [apply_log_to_norm(p) for p in gt_list]
-        else:
-            gt_list_processed = gt_list
-
-        # 4. 计算 Chamfer Distance
-        # GT 也需要 Pad，因为 Chamfer Loss 的 C++ 实现支持 (B, N, 3) 和 lengths
-        gt_lengths = torch.tensor([p.shape[0] for p in gt_list_processed], device=sampled_points.device, dtype=torch.long)
-        padded_gt = rnn_utils.pad_sequence(gt_list_processed, batch_first=True)
-
+            pred_batched = apply_log_to_norm(pred_batched)
+            gt_batched = apply_log_to_norm(gt_batched)
+        print("pred_batched shape:", pred_batched.shape)
+        print("gt_batched shape:", gt_batched.shape)
         loss, _ = chamfer_distance(
-            sampled_points,
-            padded_gt,
-            x_lengths=None, # sampled_points 是定长的 (K)
-            y_lengths=gt_lengths
+            pred_batched,
+            gt_batched,
+            x_lengths=pred_lengths,
+            y_lengths=gt_lengths,
         )
-
-        # 5. 可视化 (低频路径，可以慢一点)
-        should_log_tb = self.log_tensorboard and writer is not None and step is not None
-        save_directory = self._resolve_point_cloud_directory(point_cloud_dir)
-
-        if should_log_tb or save_directory is not None:
-             # 只在这里引入 Pointclouds 对象的开销
-             fps_list = [sampled_points[i] for i in range(sampled_points.shape[0])]
-             self._log_visualization(
-                 pred_list, gt_list, fps_list, correspondence_points,
-                 writer, step, save_directory
-             )
 
         return loss
-
-    def _log_visualization(self, pred, gt, aligned, corr, writer, step, save_dir):
-        # ... (可视化代码保持不变，只在需要时创建对象) ...
-        # 注意: 这里的 Pointclouds 创建是安全的，因为它只偶尔发生
-        pass # 此处省略详细实现，复用原有逻辑即可
 
     def _resolve_point_cloud_directory(self, base_dir: Optional[str]) -> Optional[str]:
         if not self.save_point_clouds or base_dir is None:

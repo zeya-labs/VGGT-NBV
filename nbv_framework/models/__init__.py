@@ -17,11 +17,11 @@ from .direct_reconstruction import build_recon_from_point_maps
 __all__ = [
     "MapAnythingWrapper",
     "build_recon_from_point_maps",
-    "BaseNBVPolicy", 
-    "BasicNBVPolicy", 
+    "BaseNBVPolicy",
+    "BasicNBVPolicy",
     "AttentionNBVPolicy",
     "IterativeNBVPolicy",
     "MultiScaleNBVPolicy",
-    "HybridNBVPolicy", 
+    "HybridNBVPolicy",
     "GeometryAwareNBVPolicy",
 ]
