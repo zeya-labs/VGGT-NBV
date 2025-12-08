@@ -40,6 +40,7 @@ from ..utils.camera_utils import (
     world_points_to_camera_depth,
 )
 from ..utils.render_utils import render_gt_point_maps
+from ..models import build_recon_from_point_maps
 
 
 LOGGER = logging.getLogger(__name__)
@@ -382,13 +383,11 @@ class NBVTrainer(LightningModule):
         combined_images_batch = torch.cat([initial_images, new_images.unsqueeze(1)], dim=1)
         combined_camera_poses = torch.cat([base_camera_poses, pose.unsqueeze(1)], dim=1)
 
-        recon_data = self.vggt_wrapper.reconstruct_and_evaluate(
-            combined_images_batch,
-            combined_camera_poses,
+        recon_data = build_recon_from_point_maps(
+            point_maps=updated_point_maps,
+            camera_poses=combined_camera_poses,
+            valid_masks=updated_valid_masks,
             depth_z=updated_depth_z,
-            is_metric_scale=False,
-            view_save_dir=point_cloud_dir,
-            mesh_paths=mesh_paths,
         )
 
         total_loss, loss_components = self.loss_fn(
