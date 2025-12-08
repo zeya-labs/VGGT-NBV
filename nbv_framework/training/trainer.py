@@ -77,7 +77,6 @@ class NBVTrainer(LightningModule):
                  tensor_dtype: torch.dtype = torch.float32,
                  use_epoch_seed: bool = False,
                  enable_random_baseline: bool = True,
-                 distributed: bool = False,
                  world_size: int = 1,
                  rank: int = 0):
         """

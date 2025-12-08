@@ -23,7 +23,7 @@ hydra:
 
 trainer:
   accelerator: auto
-  devices: [0]
+  devices: auto
   strategy: auto
   precision: 16-mixed
   sync_batchnorm: true

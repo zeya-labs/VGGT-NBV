@@ -55,8 +55,7 @@ def build_lightning_model(cfg: NBVExperimentConfig) -> NBVTrainer:
         device=str(runtime_device),
         tensor_dtype=runtime_dtype,
         use_epoch_seed=cfg.use_epoch_seed,
-        enable_random_baseline=False,
-        distributed=False,
+        enable_random_baseline=True,
         world_size=cfg.world_size,
         rank=cfg.rank,
     )
