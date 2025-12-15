@@ -18,10 +18,10 @@ class ReconstructionLoss(nn.Module):
 
     def __init__(
         self,
-        chamfer_weight: float = 1.0,
+        chamfer_weight: float = 10.0,
         confidence_weight: float = 0.0,
         viewpoint_weight: float = 0.0,
-        pose_penalty_weight: float = 0.02,
+        pose_penalty_weight: float = 1.0,
         renderer: Optional["DifferentiableRenderer"] = None,
         pose_up_axis: str = "Y",
         save_point_clouds: bool = True,
@@ -31,8 +31,8 @@ class ReconstructionLoss(nn.Module):
         point_source: str = "vggt",
         confidence_threshold: float = 0.0,
         black_pixel_threshold: float = 0.1,
-        pose_outer_radius: float = 4.0,
-        pose_inner_radius: float = 2.0,
+        pose_outer_radius: float = 3.5,
+        pose_inner_radius: float = 2.5,
         pose_floor_margin: float = 1.0,
         default_device: Optional[torch.device] = None,
         tensor_dtype: torch.dtype = torch.float32,

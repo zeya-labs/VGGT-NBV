@@ -308,7 +308,7 @@ class AttentionNBVPolicy(BaseNBVPolicy):
             d_model=hidden_dim,
             nhead=num_heads,
             dim_feedforward=hidden_dim * 4,
-            dropout=0.1,
+            dropout=0.0,
             batch_first=True
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers)
@@ -326,7 +326,7 @@ class AttentionNBVPolicy(BaseNBVPolicy):
             nn.LayerNorm(hidden_dim),
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Dropout(0.0),
             nn.Linear(hidden_dim // 2, self.target_dim)
         )
         

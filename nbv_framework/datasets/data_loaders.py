@@ -20,7 +20,7 @@ def create_data_loader(
     drop_last: bool = True,
     collate_fn: Optional[Callable] = None,
     sampler: Optional[Sampler] = None,
-    prefetch_factor: Optional[int] = 4,
+    prefetch_factor: Optional[int] = 8,
 ) -> DataLoader:
     """
     创建数据加载器

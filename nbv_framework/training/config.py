@@ -38,7 +38,7 @@ class NBVExperimentConfig:
     max_epochs: int = 1000
     normalize_method: str = "mean"
     num_samples: int = 100000
-    weight_decay: float = 1e-5
+    weight_decay: float = 0
     use_epoch_seed: bool = False
 
     # Dataset / camera knobs

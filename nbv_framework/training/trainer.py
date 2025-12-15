@@ -147,7 +147,7 @@ class NBVTrainer(LightningModule):
         # 初始化TensorBoard Writer（仅主进程写入）
         self.val_image_step = 0
         self.tb_writer = None
-        self._depth_backproject_xy_signs: Optional[Tuple[int, int]] = None
+        self._depth_backproject_xy_signs: Optional[Tuple[int, int]] = (-1,-1)
 
     def _configure_policy_mode(self, backprop: bool) -> None:
         """根据是否反向传播设置策略网络模式。"""
@@ -197,8 +197,8 @@ class NBVTrainer(LightningModule):
         """根据策略输出计算绝对位姿及相关中间量。"""
         reference_position = camera_poses_batch[:, 0, :3]
         # 使用 MapAnything 同步的位姿归一化尺度，将策略输出从归一化坐标恢复到原始尺度
-        scale_factor = self._compute_pose_scale_factor(camera_poses_batch).unsqueeze(-1)
-        predicted_relative_position = policy_output[:, :3] * scale_factor
+        # scale_factor = self._compute_pose_scale_factor(camera_poses_batch).unsqueeze(-1)
+        predicted_relative_position = policy_output[:, :3]
         absolute_position = reference_position + predicted_relative_position
         next_camera_pose = position_to_pose_tensor(absolute_position)
         return next_camera_pose, predicted_relative_position, absolute_position
@@ -368,19 +368,19 @@ class NBVTrainer(LightningModule):
 
         # 2) 用 detach 的 depth_z + 可微 pose + 固定内参反投影得到 new world point maps
         fov_degrees = float(getattr(self.renderer, "default_fov_degrees", 60.0))
-        if self._depth_backproject_xy_signs is None:
-            self._depth_backproject_xy_signs = infer_depth_backprojection_xy_signs(
-                depth_z=new_depth_z,
-                camera_poses=pose.unsqueeze(1).detach(),
-                reference_world_points=new_point_maps_render,
-                fov_degrees=fov_degrees,
-                valid_masks=new_valid_masks,
-            )
-            LOGGER.info(
-                "Inferred depth backprojection xy_signs=%s (fov=%.2f)",
-                self._depth_backproject_xy_signs,
-                fov_degrees,
-            )
+        # if self._depth_backproject_xy_signs is None:
+        #     self._depth_backproject_xy_signs = infer_depth_backprojection_xy_signs(
+        #         depth_z=new_depth_z,
+        #         camera_poses=pose.unsqueeze(1).detach(),
+        #         reference_world_points=new_point_maps_render,
+        #         fov_degrees=fov_degrees,
+        #         valid_masks=new_valid_masks,
+        #     )
+        #     LOGGER.info(
+        #         "Inferred depth backprojection xy_signs=%s (fov=%.2f)",
+        #         self._depth_backproject_xy_signs,
+        #         fov_degrees,
+        #     )
 
         new_point_maps = camera_depth_z_to_world_points(
             depth_z=new_depth_z,
@@ -769,7 +769,7 @@ class NBVTrainer(LightningModule):
         self._add_image("Random_baseline/new_view", first_image, step)
 
     def configure_optimizers(self):
-        optimizer = optim.AdamW(
+        optimizer = optim.Adam(
             self.policy_network.parameters(),
             lr=self.learning_rate,
             weight_decay=self.weight_decay,
@@ -780,8 +780,7 @@ class NBVTrainer(LightningModule):
         self.optimizer = optimizer
         self.scheduler = scheduler
         return {
-            "optimizer": optimizer,
-            "lr_scheduler": {"scheduler": scheduler, "interval": "epoch", "frequency": 1},
+            "optimizer": optimizer
         }
 
     def on_fit_start(self) -> None:
