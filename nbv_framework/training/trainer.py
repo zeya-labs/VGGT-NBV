@@ -390,6 +390,14 @@ class NBVTrainer(LightningModule):
             xy_signs=self._depth_backproject_xy_signs,
         )
 
+        if tb_writer is not None and step_arg is not None:
+            with torch.no_grad():
+                diff_l2 = (new_point_maps - new_point_maps_render).norm(dim=-1)  # [B, S, H, W]
+                if new_valid_masks.any():
+                    diff_valid = diff_l2[new_valid_masks]
+                    tb_writer.add_scalar("Backprojection/new_view_l2_mean", diff_valid.mean(), step_arg)
+                    tb_writer.add_scalar("Backprojection/new_view_l2_max", diff_valid.max(), step_arg)
+
         updated_point_maps = torch.cat([gt_point_maps, new_point_maps], dim=1).contiguous()
         updated_valid_masks = torch.cat([gt_valid_masks, new_valid_masks], dim=1).contiguous().to(dtype=torch.bool)
 

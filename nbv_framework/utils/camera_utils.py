@@ -398,11 +398,10 @@ def world_points_to_camera_depth(
         dim=-1,
     )
     
-    # --- 3. 计算旋转矩阵 (CRITICAL FIX) ---
-    # quaternion_to_matrix 返回的是 R (列向量旋转矩阵)
-    # 对于行向量点云 P, 公式为: P_cam = (P_world - T) @ R.T
-    R_col = quaternion_to_matrix(quaternion_wxyz)  # [N, 3, 3]
-    R_row = R_col.transpose(1, 2)                  # [N, 3, 3] 转置用于行向量乘法
+    # --- 3. 计算旋转矩阵 ---
+    # PyTorch3D 的旋转变换采用行向量约定：p_rot = p @ R
+    # 其中 quaternion_to_matrix 返回的就是该行向量形式的 world->camera 旋转矩阵 R_w2c_row。
+    R_w2c_row = quaternion_to_matrix(quaternion_wxyz)  # [N, 3, 3]
 
     # --- 4. 坐标变换 ---
     points_vec = points_flat.view(points_flat.shape[0], -1, 3) # [N, H*W, 3]
@@ -411,8 +410,8 @@ def world_points_to_camera_depth(
     # positions.unsqueeze(1) -> [N, 1, 3], 广播相减
     relative = points_vec - positions.unsqueeze(1) 
     
-    # 旋转: (P - T) @ R.T
-    camera_points = torch.bmm(relative, R_row)
+    # 旋转: (P - C) @ R_w2c_row
+    camera_points = torch.bmm(relative, R_w2c_row)
 
     # 提取 Z 深度
     depth = camera_points[..., 2:3].view(points_flat.shape[0], height, width, 1)
@@ -466,10 +465,9 @@ def camera_depth_z_to_world_points(
     - 前者: p_cam = (p_world - C) @ R_w2c
     - 本函数: p_world = p_cam @ R_w2c^T + C
 
-    其中本项目实现里 ``quaternion_to_matrix`` 先给出列向量旋转矩阵 ``R_col``，
-    再通过转置得到行向量版本 ``R_row = R_col^T``。因此：
-    - world->cam: p_cam = (p_world - C) @ R_row = (p_world - C) @ R_col^T
-    - cam->world: p_world = p_cam @ R_row^T + C = p_cam @ R_col + C
+    本项目遵循 PyTorch3D 的行向量约定：
+    - world->cam: p_cam = (p_world - C) @ R_w2c_row
+    - cam->world: p_world = p_cam @ R_w2c_row^T + C
 
     其中 (C, R_w2c) 来自 camera_poses: position xyz + quaternion qx,qy,qz,qw (world->camera)。
 
@@ -543,13 +541,12 @@ def camera_depth_z_to_world_points(
         (quaternions[:, 3], quaternions[:, 0], quaternions[:, 1], quaternions[:, 2]),
         dim=-1,
     )
-    # quaternion_to_matrix 返回列向量旋转矩阵 R_col (world->cam)
-    rotation_w2c_col = quaternion_to_matrix(quaternion_wxyz)  # [N, 3, 3]
+    # quaternion_to_matrix 返回行向量旋转矩阵 R_w2c_row (world->cam)
+    rotation_w2c_row = quaternion_to_matrix(quaternion_wxyz)  # [N, 3, 3]
+    rotation_c2w_row = rotation_w2c_row.transpose(1, 2)
 
     cam_points_vec = cam_points.view(cam_points.shape[0], -1, 3)
-    # 由于 p_cam = (p_world - C) @ R_col^T，因此反变换为:
-    # p_world = p_cam @ R_col + C
-    world_points_vec = torch.bmm(cam_points_vec, rotation_w2c_col) + positions.unsqueeze(1)
+    world_points_vec = torch.bmm(cam_points_vec, rotation_c2w_row) + positions.unsqueeze(1)
     world_points = world_points_vec.view(cam_points.shape[0], height, width, 3)
 
     if masks_flat is not None:
@@ -641,10 +638,11 @@ def infer_depth_backprojection_xy_signs(
             (quaternions[:, 3], quaternions[:, 0], quaternions[:, 1], quaternions[:, 2]),
             dim=-1,
         )
-        rotation_w2c_col = quaternion_to_matrix(quaternion_wxyz)  # [N, 3, 3]
+        rotation_w2c_row = quaternion_to_matrix(quaternion_wxyz)  # [N, 3, 3]
+        rotation_c2w_row = rotation_w2c_row.transpose(1, 2)
 
         positions_s = positions.index_select(0, valid_n)
-        rotation_s = rotation_w2c_col.index_select(0, valid_n)
+        rotation_s = rotation_c2w_row.index_select(0, valid_n)
         ref_s = ref_flat[valid_n, valid_idx]
 
         best = (1, 1)
