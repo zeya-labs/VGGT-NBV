@@ -7,7 +7,7 @@ import json
 import math
 import numpy as np
 import torch
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from pytorch3d.renderer import look_at_view_transform
 
 try:
@@ -345,82 +345,100 @@ def world_points_to_camera_depth(
 ) -> torch.Tensor:
     """
     将世界坐标系点云转换为相机坐标系 Z 深度。
-    此版本完全遵循 PyTorch3D 的行向量约定，避免了不必要的转置。
 
     Args:
-        point_maps: [..., 3] 世界坐标点，支持 [S, H, W, 3] 或 [B, S, H, W, 3]
-        camera_poses: [..., 7] 相机位姿 (position xyz + quaternion qx,qy,qz,qw，一致为 W2C 旋转)
-        valid_masks: 与 point_maps 前几维一致的有效像素掩码，缺省表示全部有效
-
-    Returns:
-        depth_z: 与 point_maps 同维度的深度张量，最后一维为 1
+        point_maps: [..., 3] 世界坐标点，支持 [B, H, W, 3] 或 [B, S, H, W, 3]
+        camera_poses: [..., 7] 相机位姿 (position xyz + quaternion qx,qy,qz,qw)
+        valid_masks: 有效掩码
     """
     if point_maps.shape[-1] != 3:
         raise ValueError(f"point_maps last dim must be 3, got {point_maps.shape}")
     if camera_poses.shape[-1] != 7:
         raise ValueError(f"camera_poses last dim must be 7, got {camera_poses.shape}")
 
-    is_batched = point_maps.ndim == 5 and camera_poses.ndim == 3
+    # --- 1. 形状归一化处理 (Shape Handling) ---
+    # 逻辑是正确的：将 [B, S, ...] 或 [B, ...] 统一展平为 [N, ...] 处理
+    is_batched_sequence = (point_maps.ndim == 5) and (camera_poses.ndim == 3)
+    
     if point_maps.ndim == 4 and camera_poses.ndim == 2:
-        batch_views = 1
-        views = point_maps.shape[0]
+        # Case: [B, H, W, 3] -> 单视图 Batch
+        batch_size = point_maps.shape[0]
+        s_dim = 1
         height, width = point_maps.shape[1:3]
-        points_flat = point_maps
-        poses_flat = camera_poses
-        masks_flat = valid_masks if valid_masks is not None else None
-    elif is_batched:
-        batch_views = point_maps.shape[0]
-        views = point_maps.shape[1]
+        
+        points_flat = point_maps.reshape(-1, height, width, 3) # [N, H, W, 3]
+        poses_flat = camera_poses.reshape(-1, 7)               # [N, 7]
+        masks_flat = valid_masks.reshape(-1, height, width) if valid_masks is not None else None
+        
+    elif is_batched_sequence:
+        # Case: [B, S, H, W, 3] -> 多视图序列 Batch
+        batch_size = point_maps.shape[0]
+        s_dim = point_maps.shape[1]
         height, width = point_maps.shape[2:4]
-        points_flat = point_maps.reshape(batch_views * views, height, width, 3)
-        poses_flat = camera_poses.reshape(batch_views * views, 7)
-        if valid_masks is not None:
-            masks_flat = valid_masks.reshape(batch_views * views, height, width)
-        else:
-            masks_flat = None
+        
+        points_flat = point_maps.reshape(-1, height, width, 3) # [B*S, H, W, 3]
+        poses_flat = camera_poses.reshape(-1, 7)               # [B*S, 7]
+        masks_flat = valid_masks.reshape(-1, height, width) if valid_masks is not None else None
     else:
         raise ValueError(
-            f"Unsupported shapes for point_maps {point_maps.shape} and camera_poses {camera_poses.shape}."
+            f"Unsupported shapes: point_maps {point_maps.shape}, camera_poses {camera_poses.shape}"
         )
 
     device = points_flat.device
     dtype = points_flat.dtype
 
+    # --- 2. 提取位姿参数 ---
+    # 假设输入是 [x, y, z, qx, qy, qz, qw]
     positions = poses_flat[:, :3].to(device=device, dtype=dtype)
     quaternions = poses_flat[:, 3:].to(device=device, dtype=dtype)
+    
+    # PyTorch3D / 内部函数通常需要 (w, x, y, z) 顺序
     quaternion_wxyz = torch.stack(
         (quaternions[:, 3], quaternions[:, 0], quaternions[:, 1], quaternions[:, 2]),
         dim=-1,
     )
-    # quaternion_to_matrix 返回的是为行向量设计的矩阵，我们直接使用它
-    rotation_w2c_row = quaternion_to_matrix(quaternion_wxyz)  # [N, 3, 3]
+    
+    # --- 3. 计算旋转矩阵 (CRITICAL FIX) ---
+    # quaternion_to_matrix 返回的是 R (列向量旋转矩阵)
+    # 对于行向量点云 P, 公式为: P_cam = (P_world - T) @ R.T
+    R_col = quaternion_to_matrix(quaternion_wxyz)  # [N, 3, 3]
+    R_row = R_col.transpose(1, 2)                  # [N, 3, 3] 转置用于行向量乘法
 
+    # --- 4. 坐标变换 ---
     points_vec = points_flat.view(points_flat.shape[0], -1, 3) # [N, H*W, 3]
-    relative = points_vec - positions.unsqueeze(1) # [N, H*W, 3], 这就是一批行向量
+    
+    # 平移: (P - T)
+    # positions.unsqueeze(1) -> [N, 1, 3], 广播相减
+    relative = points_vec - positions.unsqueeze(1) 
+    
+    # 旋转: (P - T) @ R.T
+    camera_points = torch.bmm(relative, R_row)
 
-    camera_points = torch.bmm(relative, rotation_w2c_row)
-
+    # 提取 Z 深度
     depth = camera_points[..., 2:3].view(points_flat.shape[0], height, width, 1)
 
-    # --- 掩码和恢复形状部分，完全正确，无需修改 ---
+    # --- 5. 掩码处理 ---
     if masks_flat is not None:
         mask = masks_flat.to(device=device).unsqueeze(-1)
         depth = depth.masked_fill(~mask, 0.0)
 
     depth = depth.to(dtype=torch.float32)
 
-    if point_maps.ndim == 4:
-        depth_out = depth
-        masks_out = masks_flat
-        depth_for_log = depth_out
-        masks_for_log = masks_out
-    else:
-        depth_out = depth.view(batch_views, views, height, width, 1)
+    # --- 6. 恢复原始形状 ---
+    if is_batched_sequence:
+        depth_out = depth.view(batch_size, s_dim, height, width, 1)
         masks_out = valid_masks
-        depth_for_log = depth_out.view(-1, height, width, 1)
-        masks_for_log = None if masks_out is None else masks_out.view(-1, height, width)
+    else:
+        # [B, H, W, 1]
+        depth_out = depth
+        masks_out = valid_masks
 
+    # --- 7. Logging ---
     if writer is not None and step is not None and train_flag:
+        # Log 时统一展平，方便 add_image
+        depth_for_log = depth_out.reshape(-1, height, width, 1)
+        masks_for_log = masks_out.reshape(-1, height, width) if masks_out is not None else None
+        
         _log_depth_maps(
             writer=writer,
             step=step,
@@ -431,6 +449,217 @@ def world_points_to_camera_depth(
         )
 
     return depth_out
+
+
+def camera_depth_z_to_world_points(
+    depth_z: torch.Tensor,
+    camera_poses: torch.Tensor,
+    *,
+    fov_degrees: float = 60.0,
+    valid_masks: Optional[torch.Tensor] = None,
+    xy_signs: Tuple[int, int] = (1, 1),
+) -> torch.Tensor:
+    """
+    将相机坐标系下的 Z 深度图反投影为世界坐标点云(point maps)。
+
+    该函数与 :func:`world_points_to_camera_depth` 互为“近似逆”：
+    - 前者: p_cam = (p_world - C) @ R_w2c
+    - 本函数: p_world = p_cam @ R_w2c^T + C
+
+    其中本项目实现里 ``quaternion_to_matrix`` 先给出列向量旋转矩阵 ``R_col``，
+    再通过转置得到行向量版本 ``R_row = R_col^T``。因此：
+    - world->cam: p_cam = (p_world - C) @ R_row = (p_world - C) @ R_col^T
+    - cam->world: p_world = p_cam @ R_row^T + C = p_cam @ R_col + C
+
+    其中 (C, R_w2c) 来自 camera_poses: position xyz + quaternion qx,qy,qz,qw (world->camera)。
+
+    注意：仅依赖深度、位姿和固定 pinhole 内参（由 fov+分辨率确定）。
+
+    Args:
+        depth_z: [..., H, W] 或 [..., H, W, 1]，相机坐标系下的 Z 分量。
+        camera_poses: [..., 7]，与 depth_z 的前置维度对齐。
+        fov_degrees: 与渲染器一致的视场角，用于构建 pinhole 内参。
+        valid_masks: 可选 [..., H, W] 的有效像素掩码；无效像素输出为 0。
+        xy_signs: (sx, sy) 两个符号，用于处理图像坐标到相机坐标的轴向约定差异。
+
+    Returns:
+        world_points: [..., H, W, 3] 世界坐标点云。
+    """
+    if depth_z.ndim < 2:
+        raise ValueError(f"depth_z must have at least 2 dims, got {tuple(depth_z.shape)}")
+    if camera_poses.shape[-1] != 7:
+        raise ValueError(f"camera_poses last dim must be 7, got {tuple(camera_poses.shape)}")
+
+    if depth_z.shape[-1] == 1:
+        depth_z = depth_z.squeeze(-1)
+
+    height, width = int(depth_z.shape[-2]), int(depth_z.shape[-1])
+    leading_shape = tuple(depth_z.shape[:-2])
+
+    depth_flat = depth_z.reshape(-1, height, width)
+    poses_flat = camera_poses.reshape(-1, 7)
+    if poses_flat.shape[0] != depth_flat.shape[0]:
+        raise ValueError(
+            "Leading dimensions of depth_z and camera_poses must match. "
+            f"Got depth_z={tuple(depth_z.shape)} vs camera_poses={tuple(camera_poses.shape)}."
+        )
+
+    masks_flat: Optional[torch.Tensor]
+    if valid_masks is None:
+        masks_flat = None
+    else:
+        if valid_masks.shape[-2:] != (height, width):
+            raise ValueError(
+                "valid_masks spatial dims must match depth_z. "
+                f"Got valid_masks={tuple(valid_masks.shape)} vs depth_z={tuple(depth_z.shape)}."
+            )
+        masks_flat = valid_masks.reshape(-1, height, width).to(device=depth_flat.device)
+
+    device = depth_flat.device
+    dtype = depth_flat.dtype
+
+    fov_radians = math.radians(float(fov_degrees))
+    fy = 0.5 * float(height) / math.tan(fov_radians / 2.0)
+    fx = 0.5 * float(width) / math.tan(fov_radians / 2.0)
+    cx = (float(width) - 1.0) / 2.0
+    cy = (float(height) - 1.0) / 2.0
+
+    u = torch.arange(width, device=device, dtype=dtype)
+    v = torch.arange(height, device=device, dtype=dtype)
+    try:
+        v_grid, u_grid = torch.meshgrid(v, u, indexing="ij")
+    except TypeError:  # pragma: no cover - older torch
+        v_grid, u_grid = torch.meshgrid(v, u)
+
+    sx, sy = int(xy_signs[0]), int(xy_signs[1])
+    x_cam = (u_grid - cx) / fx * depth_flat * float(sx)
+    y_cam = (v_grid - cy) / fy * depth_flat * float(sy)
+    z_cam = depth_flat
+    cam_points = torch.stack((x_cam, y_cam, z_cam), dim=-1)  # [N, H, W, 3]
+
+    positions = poses_flat[:, :3].to(device=device, dtype=dtype)
+    quaternions = poses_flat[:, 3:].to(device=device, dtype=dtype)
+    quaternion_wxyz = torch.stack(
+        (quaternions[:, 3], quaternions[:, 0], quaternions[:, 1], quaternions[:, 2]),
+        dim=-1,
+    )
+    # quaternion_to_matrix 返回列向量旋转矩阵 R_col (world->cam)
+    rotation_w2c_col = quaternion_to_matrix(quaternion_wxyz)  # [N, 3, 3]
+
+    cam_points_vec = cam_points.view(cam_points.shape[0], -1, 3)
+    # 由于 p_cam = (p_world - C) @ R_col^T，因此反变换为:
+    # p_world = p_cam @ R_col + C
+    world_points_vec = torch.bmm(cam_points_vec, rotation_w2c_col) + positions.unsqueeze(1)
+    world_points = world_points_vec.view(cam_points.shape[0], height, width, 3)
+
+    if masks_flat is not None:
+        world_points = world_points.masked_fill(~masks_flat.unsqueeze(-1), 0.0)
+
+    return world_points.reshape(*leading_shape, height, width, 3)
+
+
+def infer_depth_backprojection_xy_signs(
+    depth_z: torch.Tensor,
+    camera_poses: torch.Tensor,
+    reference_world_points: torch.Tensor,
+    *,
+    fov_degrees: float = 60.0,
+    valid_masks: Optional[torch.Tensor] = None,
+    max_samples: int = 4096,
+) -> Tuple[int, int]:
+    """
+    基于渲染得到的 reference_world_points 自动推断反投影 (sx, sy) 约定。
+
+    在不同渲染/相机坐标约定下，像素坐标到相机坐标 (x,y) 的符号可能不同，
+    该函数通过最小化反投影点与 reference_world_points 的误差来选择符号组合。
+
+    Returns:
+        (sx, sy) ∈ {+1, -1}^2
+    """
+    with torch.no_grad():
+        if depth_z.shape[-1] == 1:
+            depth_z = depth_z.squeeze(-1)
+
+        height, width = int(depth_z.shape[-2]), int(depth_z.shape[-1])
+        leading_shape = tuple(depth_z.shape[:-2])
+        depth_flat = depth_z.reshape(-1, height * width)
+
+        ref = reference_world_points
+        if ref.ndim < 3 or ref.shape[-1] != 3:
+            raise ValueError(
+                "reference_world_points must have shape [..., H, W, 3], "
+                f"but got {tuple(reference_world_points.shape)}"
+            )
+        if tuple(ref.shape[:-3]) != leading_shape or tuple(ref.shape[-3:-1]) != (height, width):
+            raise ValueError(
+                "reference_world_points must align with depth_z leading/spatial dims. "
+                f"Got depth_z={tuple(depth_z.shape)} vs reference_world_points={tuple(reference_world_points.shape)}."
+            )
+        ref_flat = ref.reshape(-1, height * width, 3)
+
+        poses_flat = camera_poses.reshape(-1, 7)
+        if poses_flat.shape[0] != depth_flat.shape[0]:
+            raise ValueError(
+                "Leading dimensions of depth_z and camera_poses must match. "
+                f"Got depth_z={tuple(depth_z.shape)} vs camera_poses={tuple(camera_poses.shape)}."
+            )
+
+        if valid_masks is None:
+            mask_flat = depth_flat != 0
+        else:
+            if valid_masks.shape[-2:] != (height, width):
+                raise ValueError(
+                    "valid_masks spatial dims must match depth_z. "
+                    f"Got valid_masks={tuple(valid_masks.shape)} vs depth_z={tuple(depth_z.shape)}."
+                )
+            mask_flat = valid_masks.reshape(-1, height * width).to(device=depth_flat.device)
+
+        valid_n, valid_idx = mask_flat.nonzero(as_tuple=True)
+        if valid_idx.numel() == 0:
+            return (1, 1)
+
+        if valid_idx.numel() > max_samples:
+            valid_n = valid_n[:max_samples]
+            valid_idx = valid_idx[:max_samples]
+
+        device = depth_flat.device
+        dtype = depth_flat.dtype
+
+        fov_radians = math.radians(float(fov_degrees))
+        fy = 0.5 * float(height) / math.tan(fov_radians / 2.0)
+        fx = 0.5 * float(width) / math.tan(fov_radians / 2.0)
+        cx = (float(width) - 1.0) / 2.0
+        cy = (float(height) - 1.0) / 2.0
+
+        u = (valid_idx % width).to(device=device, dtype=dtype)
+        v = (valid_idx // width).to(device=device, dtype=dtype)
+        z = depth_flat[valid_n, valid_idx]
+
+        positions = poses_flat[:, :3].to(device=device, dtype=dtype)
+        quaternions = poses_flat[:, 3:].to(device=device, dtype=dtype)
+        quaternion_wxyz = torch.stack(
+            (quaternions[:, 3], quaternions[:, 0], quaternions[:, 1], quaternions[:, 2]),
+            dim=-1,
+        )
+        rotation_w2c_col = quaternion_to_matrix(quaternion_wxyz)  # [N, 3, 3]
+
+        positions_s = positions.index_select(0, valid_n)
+        rotation_s = rotation_w2c_col.index_select(0, valid_n)
+        ref_s = ref_flat[valid_n, valid_idx]
+
+        best = (1, 1)
+        best_err = None
+        for sx, sy in ((1, 1), (-1, 1), (1, -1), (-1, -1)):
+            x = (u - cx) / fx * z * float(sx)
+            y = (v - cy) / fy * z * float(sy)
+            cam = torch.stack((x, y, z), dim=-1)
+            world = torch.bmm(cam.unsqueeze(1), rotation_s).squeeze(1) + positions_s
+            err = (world - ref_s).pow(2).mean()
+            if best_err is None or err < best_err:
+                best_err = err
+                best = (sx, sy)
+
+        return best
 
 def normalize_depth_for_visualization(
     depth_z: torch.Tensor,

@@ -38,6 +38,8 @@ from .loss import ReconstructionLoss, ChamferDistance
 from ..utils.camera_utils import (
     position_to_pose_tensor,
     world_points_to_camera_depth,
+    camera_depth_z_to_world_points,
+    infer_depth_backprojection_xy_signs,
 )
 from ..utils.render_utils import render_gt_point_maps
 from ..models.direct_reconstruction import build_recon_from_point_maps
@@ -145,6 +147,7 @@ class NBVTrainer(LightningModule):
         # 初始化TensorBoard Writer（仅主进程写入）
         self.val_image_step = 0
         self.tb_writer = None
+        self._depth_backproject_xy_signs: Optional[Tuple[int, int]] = None
 
     def _configure_policy_mode(self, backprop: bool) -> None:
         """根据是否反向传播设置策略网络模式。"""
@@ -340,7 +343,7 @@ class NBVTrainer(LightningModule):
         tb_writer = self.tb_writer if log_to_tensorboard and hasattr(self, "tb_writer") else None
         step_arg = render_step if log_to_tensorboard else None
 
-        new_point_maps, new_valid_masks = render_gt_point_maps(
+        new_point_maps_render, new_valid_masks = render_gt_point_maps(
             renderer=self.renderer,
             mesh_batch=mesh_batch,
             camera_poses=pose,
@@ -352,26 +355,54 @@ class NBVTrainer(LightningModule):
             tensor_dtype=self.tensor_dtype,
         )
 
+        # 1) 使用 PyTorch3D 渲染的 point maps 仅用于生成 depth_z / valid_mask（不走梯度）
+        new_depth_z = world_points_to_camera_depth(
+            new_point_maps_render,
+            pose.unsqueeze(1),
+            valid_masks=new_valid_masks,
+            writer=tb_writer,
+            step=step_arg,
+            log_prefix="DepthZ/NewView",
+            train_flag=train_flag,
+        ).detach()
+
+        # 2) 用 detach 的 depth_z + 可微 pose + 固定内参反投影得到 new world point maps
+        fov_degrees = float(getattr(self.renderer, "default_fov_degrees", 60.0))
+        if self._depth_backproject_xy_signs is None:
+            self._depth_backproject_xy_signs = infer_depth_backprojection_xy_signs(
+                depth_z=new_depth_z,
+                camera_poses=pose.unsqueeze(1).detach(),
+                reference_world_points=new_point_maps_render,
+                fov_degrees=fov_degrees,
+                valid_masks=new_valid_masks,
+            )
+            LOGGER.info(
+                "Inferred depth backprojection xy_signs=%s (fov=%.2f)",
+                self._depth_backproject_xy_signs,
+                fov_degrees,
+            )
+
+        new_point_maps = camera_depth_z_to_world_points(
+            depth_z=new_depth_z,
+            camera_poses=pose.unsqueeze(1),
+            fov_degrees=fov_degrees,
+            valid_masks=new_valid_masks,
+            xy_signs=self._depth_backproject_xy_signs,
+        )
+
         updated_point_maps = torch.cat([gt_point_maps, new_point_maps], dim=1).contiguous()
         updated_valid_masks = torch.cat([gt_valid_masks, new_valid_masks], dim=1).contiguous().to(dtype=torch.bool)
 
         updated_gt_mesh_data = dict(gt_mesh_data)
-        updated_gt_mesh_data["gt_point_maps"] = updated_point_maps
+        updated_gt_mesh_data["gt_point_maps"] = torch.cat(
+            [gt_point_maps, new_point_maps_render], dim=1
+        ).contiguous()
         updated_gt_mesh_data["gt_valid_masks"] = updated_valid_masks
 
         depth_z_batch = gt_mesh_data.get("depth_z")
         updated_depth_z = None
         if depth_z_batch is not None:
             depth_z_batch_local = depth_z_batch.to(device, dtype=self.tensor_dtype)
-            new_depth_z = world_points_to_camera_depth(
-                new_point_maps,
-                pose.unsqueeze(1),
-                valid_masks=new_valid_masks,
-                writer=tb_writer,
-                step=step_arg,
-                log_prefix="DepthZ/NewView",
-                train_flag=train_flag,
-            ).detach()
             if depth_z_batch_local.device != new_depth_z.device:
                 depth_z_batch_local = depth_z_batch_local.to(new_depth_z.device)
             if depth_z_batch_local.dtype != new_depth_z.dtype:

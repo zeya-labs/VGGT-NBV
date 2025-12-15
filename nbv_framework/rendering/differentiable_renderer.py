@@ -70,6 +70,7 @@ class DifferentiableRenderer(nn.Module):
         self.device = torch.device(device)
         self.quality = quality
         self.downsample_factor = downsample_factor
+        self.default_fov_degrees: float = 60.0
         
         # 设置混合参数
         self.blend_params = BlendParams(background_color=(0.0, 0.0, 0.0))
