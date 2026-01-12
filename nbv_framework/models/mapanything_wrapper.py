@@ -61,7 +61,7 @@ class MapAnythingWrapper(nn.Module):
         self.memory_efficient_inference = memory_efficient_inference
 
         LOGGER.info("Loading MapAnything model: %s", model_name)
-        self.base_model: MapAnything = MapAnything.from_pretrained(model_name).to(self.device)
+        self.base_model: MapAnything = MapAnything.from_pretrained(model_name, revision='6f3a25bfbb8fcc799176bb01e9d07dfb49d5416a').to(self.device)
         self.base_model.eval()
         for param in self.base_model.parameters():
             param.requires_grad = False
