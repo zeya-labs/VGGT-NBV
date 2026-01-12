@@ -25,7 +25,14 @@ _DEFAULT_STD = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32)
 logger = logging.getLogger(__name__)
 
 
-def compute_pinhole_intrinsics(height: int, width: int, fov_degrees: float) -> torch.Tensor:
+def compute_pinhole_intrinsics(
+    height: int,
+    width: int,
+    fov_degrees: float,
+    *,
+    device: Optional[torch.device] = None,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
     """Construct a simple pinhole camera intrinsic matrix."""
     fov_radians = math.radians(float(fov_degrees))
     fy = 0.5 * height / math.tan(fov_radians / 2.0)
@@ -38,7 +45,8 @@ def compute_pinhole_intrinsics(height: int, width: int, fov_degrees: float) -> t
             [0.0, fy, cy],
             [0.0, 0.0, 1.0],
         ],
-        dtype=torch.float32,
+        dtype=dtype,
+        device=device,
     )
     return intrinsics
 
@@ -56,11 +64,16 @@ def pose7d_to_opencv_cam2world_with_official_func(
     else:
         raise ValueError(f"Expected pose tensor with shape (7,) or (N, 7), got {pose.shape}.")
 
-    pose_float = pose.to(dtype=torch.float32)
-    device = pose_float.device
+    if not pose.is_floating_point():
+        raise TypeError("pose must be a floating point tensor.")
 
-    position_c2w = pose_float[..., :3]  # (N, 3)
-    quaternion_xyzw = pose_float[..., 3:]  # (N, 4)
+    output_dtype = pose.dtype
+    compute_dtype = output_dtype if output_dtype in {torch.float32, torch.float64} else torch.float32
+    pose_compute = pose.to(dtype=compute_dtype)
+    device = pose_compute.device
+
+    position_c2w = pose_compute[..., :3]  # (N, 3)
+    quaternion_xyzw = pose_compute[..., 3:]  # (N, 4)
     quaternion_wxyz = quaternion_xyzw[..., [3, 0, 1, 2]]
 
     rotation_w2c = quaternion_to_matrix(quaternion_wxyz)  # (N, 3, 3)
@@ -72,7 +85,7 @@ def pose7d_to_opencv_cam2world_with_official_func(
         device=device,
     )
 
-    image_size_tensor = torch.as_tensor(image_size, device=device, dtype=pose_float.dtype).view(1, 2)
+    image_size_tensor = torch.as_tensor(image_size, device=device, dtype=pose_compute.dtype).view(1, 2)
     image_size_tensor = image_size_tensor.expand(pose.shape[0], -1)
 
     rotation_w2c_opencv, translation_w2c_opencv, _ = opencv_from_cameras_projection(
@@ -86,14 +99,14 @@ def pose7d_to_opencv_cam2world_with_official_func(
         translation_w2c_opencv.unsqueeze(-1),
     ).squeeze(-1)
 
-    cam2world = torch.eye(4, dtype=pose_float.dtype, device=device).unsqueeze(0).repeat(pose.shape[0], 1, 1)
+    cam2world = torch.eye(4, dtype=pose_compute.dtype, device=device).unsqueeze(0).repeat(pose.shape[0], 1, 1)
     cam2world[:, :3, :3] = rotation_c2w_opencv
     cam2world[:, :3, 3] = position_c2w_opencv
 
     if squeeze_batch_dim:
         cam2world = cam2world.squeeze(0)
 
-    return cam2world
+    return cam2world.to(dtype=output_dtype)
 
 def prepare_mapanything_views(
     images: torch.Tensor,
@@ -119,7 +132,7 @@ def prepare_mapanything_views(
         )
 
     images = images.clamp(0.0, 1.0).to(device)
-    camera_poses = camera_poses.to(device=device, dtype=torch.float32)
+    camera_poses = camera_poses.to(device=device)
     if depth_z is not None:
         if depth_z.dim() == 5 and depth_z.shape[-1] == 1:
             depth_z = depth_z.squeeze(-1)
@@ -127,7 +140,7 @@ def prepare_mapanything_views(
             raise ValueError(
                 f"depth_z expected shape [B, S, H, W] or [B, S, H, W, 1], got {tuple(depth_z.shape)}"
             )
-        depth_z = depth_z.to(device=device, dtype=torch.float32)
+        depth_z = depth_z.to(device=device)
 
     batch_size, num_views, num_channels, _, _ = images.shape
     if num_channels != 3:
@@ -165,14 +178,20 @@ def prepare_mapanything_views(
         normalized = (view_tensor - mean_tensor) / std_tensor
         normalized_views.append(normalized)
 
-        base_intrinsics = compute_pinhole_intrinsics(height, width, fov_degrees).to(device=device)
+        base_intrinsics = compute_pinhole_intrinsics(
+            height,
+            width,
+            fov_degrees,
+            device=device,
+            dtype=camera_poses.dtype,
+        )
         intrinsics_batched = base_intrinsics.unsqueeze(0).repeat(batch_size, 1, 1)
 
         pose_vectors = camera_poses[:, view_idx]
         camera_pose_tensor = pose7d_to_opencv_cam2world_with_official_func(
             pose_vectors,
             image_size=(height, width),
-        ).to(device=device)
+        )
 
         view_dict: Dict[str, Any] = {
             "img": normalized,

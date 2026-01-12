@@ -1,4 +1,4 @@
-"""Utilities for logging point clouds as TensorBoard meshes and GLB exports."""
+"""Utilities for logging point clouds to Weights & Biases and exporting GLB."""
 
 from __future__ import annotations
 
@@ -200,17 +200,21 @@ def _write_point_clouds_glb(
             f.write(buffer_data)
 
 
-def log_point_clouds_to_tensorboard(
-    writer,
+def log_point_clouds_to_wandb(
     *,
     tag: str,
     point_cloud_specs: Sequence[PointCloudSpec],
-    step: int,
+    step: Optional[int] = None,
     batch_index: int = 0,
     max_points_per_cloud: Optional[int] = None,
     glb_output_path: Optional[str] = None,
 ) -> None:
-    """Write point clouds to TensorBoard and optionally export a colored GLB."""
+    """Log point clouds to Wandb and optionally export a colored GLB.
+
+    Notes:
+        - Expects an active ``wandb.init(...)`` run (e.g. via Lightning ``WandbLogger``).
+        - Logs each point cloud under ``{tag}/{name}`` as a ``wandb.Object3D``.
+    """
     payload = build_mesh_from_point_clouds(
         point_cloud_specs,
         batch_index=batch_index,
@@ -218,15 +222,35 @@ def log_point_clouds_to_tensorboard(
     )
     if payload is None:
         return
-    vertices, colors, sampled_clouds = payload
+    _, _, sampled_clouds = payload
     if glb_output_path is not None:
         os.makedirs(os.path.dirname(glb_output_path), exist_ok=True)
         _write_point_clouds_glb(glb_output_path, sampled_clouds)
-    if writer is not None:
-        writer.add_mesh(tag, vertices=vertices, colors=colors, global_step=step)
+
+    try:
+        import wandb  # type: ignore
+    except ModuleNotFoundError:
+        return
+    if getattr(wandb, "run", None) is None:
+        return
+
+    log_payload = {}
+    for name, positions, colors in sampled_clouds:
+        if positions.size == 0 or colors.size == 0:
+            continue
+        obj = np.concatenate([positions, colors.astype(np.float32)], axis=1)
+        log_payload[f"{tag}/{name}"] = wandb.Object3D(obj)
+
+    if not log_payload:
+        return
+
+    if step is None:
+        wandb.log(log_payload)
+    else:
+        wandb.log(log_payload, step=int(step))
 
 
 __all__ = [
     "build_mesh_from_point_clouds",
-    "log_point_clouds_to_tensorboard",
+    "log_point_clouds_to_wandb",
 ]

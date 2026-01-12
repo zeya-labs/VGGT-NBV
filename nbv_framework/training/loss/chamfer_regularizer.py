@@ -19,7 +19,6 @@ class ChamferRegularizer:
         max_points_per_cloud: int = 32768,
         save_point_clouds: bool = True,
         point_cloud_dir_name: str = "point_clouds",
-        log_tensorboard: bool = False,
         use_log_warp_for_chamfer: bool = False,
     ) -> None:
         self.weight = weight
@@ -37,7 +36,6 @@ class ChamferRegularizer:
             enable_save=self.save_point_clouds,
             subdir_name=self.point_cloud_dir_name,
             max_points_per_cloud=max_points_per_cloud,
-            log_to_tensorboard=log_tensorboard,
         )
 
     def _prepare_gt_points(self, raw_gt_points: Any, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
@@ -59,8 +57,6 @@ class ChamferRegularizer:
         gt_data: Dict[str, torch.Tensor],
         combined_images_batch: Optional[torch.Tensor],
         combined_camera_poses: Optional[torch.Tensor],
-        writer,
-        step,
         device: torch.device,
         dtype: torch.dtype,
         point_cloud_dir: Optional[str] = None,
@@ -95,8 +91,6 @@ class ChamferRegularizer:
         chamfer_loss_value = self.chamfer(
             pred_points_list,
             gt_points_list,
-            writer=writer,
-            step=step,
             point_cloud_dir=point_cloud_dir,
         )
 

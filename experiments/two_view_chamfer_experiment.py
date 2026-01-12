@@ -1264,7 +1264,6 @@ def main() -> None:
         loss_fn = ReconstructionLoss(
             renderer=renderer_ctx,
             save_point_clouds=False,
-            log_tensorboard=False,
             default_device=device_obj,
             tensor_dtype=torch.float32,
         )

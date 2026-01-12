@@ -15,6 +15,9 @@ import trimesh
 class ChamferDistance(nn.Module):
     """Compute Chamfer distance with optional downsampling."""
 
+    _pytorch3d_bf16_knn_cuda_supported: Optional[bool] = None
+    _pytorch3d_bf16_knn_cpu_supported: Optional[bool] = None
+
     def __init__(
         self,
         *,
@@ -25,7 +28,6 @@ class ChamferDistance(nn.Module):
         self.max_points_per_cloud = max_points_per_cloud
         self.save_point_clouds: bool = True
         self.point_cloud_subdir: str = "point_clouds"
-        self.log_tensorboard: bool = True
         self.use_log_warp: bool = use_log_warp
 
     def configure_point_cloud_logging(
@@ -34,7 +36,6 @@ class ChamferDistance(nn.Module):
         max_points_per_cloud: Optional[int] = None,
         enable_save: Optional[bool] = None,
         subdir_name: Optional[str] = None,
-        log_to_tensorboard: Optional[bool] = None,
     ) -> None:
         if max_points_per_cloud is not None:
             self.max_points_per_cloud = max_points_per_cloud
@@ -42,8 +43,6 @@ class ChamferDistance(nn.Module):
             self.save_point_clouds = bool(enable_save)
         if subdir_name is not None:
             self.point_cloud_subdir = subdir_name
-        if log_to_tensorboard is not None:
-            self.log_tensorboard = bool(log_to_tensorboard)
 
     def _to_batched(
         self, data: Union[List[torch.Tensor], torch.Tensor], *, downsample: bool
@@ -94,8 +93,6 @@ class ChamferDistance(nn.Module):
         self,
         pred: Union[List[torch.Tensor], torch.Tensor],
         gt: Union[List[torch.Tensor], torch.Tensor],
-        writer=None,
-        step=None,
         point_cloud_dir: Optional[str] = None,
     ) -> torch.Tensor:
         pred_batched, pred_lengths = self._to_batched(pred, downsample=True)
@@ -109,6 +106,18 @@ class ChamferDistance(nn.Module):
             raise ValueError(
                 f"Batch size mismatch in Chamfer loss: Pred {pred_batched.shape[0]} vs GT {gt_batched.shape[0]}."
             )
+
+        # PyTorch3D's KNN/Chamfer kernels require both inputs to share the same dtype.
+        # Keep the configured dtype when possible; fall back to fp32 only when the
+        # underlying PyTorch3D KNN implementation does not support bf16.
+        compute_dtype = torch.result_type(pred_batched, gt_batched)
+        if compute_dtype == torch.bfloat16 and not self._supports_bf16_knn(pred_batched.device):
+            compute_dtype = torch.float32
+        if compute_dtype not in {torch.float16, torch.float32, torch.float64}:
+            compute_dtype = torch.float32
+
+        pred_batched = pred_batched.to(dtype=compute_dtype)
+        gt_batched = gt_batched.to(dtype=compute_dtype)
 
         pred_for_save = pred_batched.detach()
         gt_for_save = gt_batched.detach()
@@ -134,6 +143,33 @@ class ChamferDistance(nn.Module):
             )
 
         return loss
+
+    def _supports_bf16_knn(self, device: torch.device) -> bool:
+        """Best-effort probe for whether PyTorch3D's KNN supports bf16 on the given device."""
+        if device.type == "cuda":
+            cached = self.__class__._pytorch3d_bf16_knn_cuda_supported
+        else:
+            cached = self.__class__._pytorch3d_bf16_knn_cpu_supported
+
+        if cached is not None:
+            return bool(cached)
+
+        supported = True
+        try:
+            with torch.no_grad():
+                x = torch.randn((1, 8, 3), device=device, dtype=torch.bfloat16)
+                y = torch.randn((1, 8, 3), device=device, dtype=torch.bfloat16)
+                lengths = torch.full((1,), 8, device=device, dtype=torch.long)
+                chamfer_distance(x, y, x_lengths=lengths, y_lengths=lengths)
+        except RuntimeError:
+            supported = False
+
+        if device.type == "cuda":
+            self.__class__._pytorch3d_bf16_knn_cuda_supported = supported
+        else:
+            self.__class__._pytorch3d_bf16_knn_cpu_supported = supported
+
+        return supported
 
     def _resolve_point_cloud_directory(self, base_dir: Optional[str]) -> Optional[str]:
         if not self.save_point_clouds or base_dir is None:

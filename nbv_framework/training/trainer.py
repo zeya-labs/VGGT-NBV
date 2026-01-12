@@ -20,7 +20,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torchvision
 from lightning.pytorch import LightningModule
-from lightning.pytorch.loggers import TensorBoardLogger
+from lightning.pytorch.loggers import WandbLogger
 from lightning_fabric.utilities.apply_func import apply_to_collection
 from pytorch3d.structures import Meshes
 
@@ -94,7 +94,7 @@ class NBVTrainer(LightningModule):
             randomize_initial_views: 是否在训练步骤中随机采样初始视图数量
             learning_rate: 学习率
             weight_decay: 权重衰减
-            log_dir: TensorBoard日志目录
+            log_dir: 训练日志/可视化输出目录
             device: 计算设备
             tensor_dtype: 浮点张量默认dtype
             enable_random_baseline: 是否计算随机基线视角的 Chamfer 统计
@@ -136,17 +136,7 @@ class NBVTrainer(LightningModule):
         self._last_initial_view_count = 0
         self._last_initial_view_indices: Optional[torch.Tensor] = None
 
-        # 启用VGGT梯度捕获，便于调试NBV梯度链路
-        self._vggt_grad_keys = ("world_points", "world_points_conf")
-        self.vggt_wrapper.configure_gradient_capture(
-            enable=True,
-            keys=self._vggt_grad_keys,
-            capture_input=False
-        )
-
-        # 初始化TensorBoard Writer（仅主进程写入）
-        self.val_image_step = 0
-        self.tb_writer = None
+        # 深度反投影坐标轴符号约定（与渲染器一致）
         self._depth_backproject_xy_signs: Optional[Tuple[int, int]] = (-1,-1)
 
     def _configure_policy_mode(self, backprop: bool) -> None:
@@ -263,18 +253,53 @@ class NBVTrainer(LightningModule):
         quaternions = next_camera_pose[:, 3:]
 
         position_norms = torch.norm(positions, dim=1)
-        self._add_scalar('Camera_pose/position_norm_mean', position_norms.mean(), step_index)
+        self.log(
+            "Camera_pose/position_norm_mean",
+            position_norms.mean(),
+            on_step=True,
+            on_epoch=False,
+            prog_bar=False,
+            sync_dist=self.world_size > 1,
+        )
         if position_norms.numel() > 1:
-            self._add_scalar('Camera_pose/position_norm_std', position_norms.std(), step_index)
+            self.log(
+                "Camera_pose/position_norm_std",
+                position_norms.std(),
+                on_step=True,
+                on_epoch=False,
+                prog_bar=False,
+                sync_dist=self.world_size > 1,
+            )
 
-        quaternion_norms = torch.norm(quaternions, dim=1)
-        if quaternion_norms.numel() > 1:
-            self._add_scalar('Camera_pose/quaternion_norm_std', quaternion_norms.std(), step_index)
+        # quaternion_norms = torch.norm(quaternions, dim=1)
+        # if quaternion_norms.numel() > 1:
+        #     self.log(
+        #         "Camera_pose/quaternion_norm_std",
+        #         quaternion_norms.std(),
+        #         on_step=True,
+        #         on_epoch=False,
+        #         prog_bar=False,
+        #         sync_dist=self.world_size > 1,
+        #     )
 
         relative_position_norms = torch.norm(predicted_relative_position, dim=1)
-        self._add_scalar('Camera_pose/relative_position_norm_mean', relative_position_norms.mean(), step_index)
+        self.log(
+            "Camera_pose/relative_position_norm_mean",
+            relative_position_norms.mean(),
+            on_step=True,
+            on_epoch=False,
+            prog_bar=False,
+            sync_dist=self.world_size > 1,
+        )
         if relative_position_norms.numel() > 1:
-            self._add_scalar('Camera_pose/relative_position_norm_std', relative_position_norms.std(), step_index)
+            self.log(
+                "Camera_pose/relative_position_norm_std",
+                relative_position_norms.std(),
+                on_step=True,
+                on_epoch=False,
+                prog_bar=False,
+                sync_dist=self.world_size > 1,
+            )
 
     def _trim_gt_mesh_data(
         self,
@@ -303,11 +328,7 @@ class NBVTrainer(LightningModule):
         camera_poses_batch: torch.Tensor,
         gt_mesh_data: Dict[str, torch.Tensor],
         mesh_batch,
-        render_step: Optional[int],
-        train_flag: bool,
         point_cloud_dir: Optional[str],
-        log_to_tensorboard: bool,
-        retain_gradients: bool,
         mesh_paths: Optional[Sequence[Optional[str]]] = None,
     ) -> PoseEvaluationResult:
         """统一执行渲染、重建与损失计算，便于策略预测与随机基线共用。"""
@@ -318,11 +339,7 @@ class NBVTrainer(LightningModule):
         device = self.runtime_device
         if new_images.device != device:
             new_images = new_images.to(device)
-        if retain_gradients:
-            if new_images.requires_grad:
-                new_images.retain_grad()
-        else:
-            new_images = new_images.detach()
+        new_images = new_images.detach()
 
         gt_point_maps = gt_mesh_data.get("gt_point_maps")
         gt_valid_masks = gt_mesh_data.get("gt_valid_masks")
@@ -340,17 +357,11 @@ class NBVTrainer(LightningModule):
         else:
             base_camera_poses = camera_poses_batch
 
-        tb_writer = self.tb_writer if log_to_tensorboard and hasattr(self, "tb_writer") else None
-        step_arg = render_step if log_to_tensorboard else None
-
         new_point_maps_render, new_valid_masks = render_gt_point_maps(
             renderer=self.renderer,
             mesh_batch=mesh_batch,
             camera_poses=pose,
             output_device=device,
-            writer=tb_writer,
-            step=step_arg,
-            train_flag=train_flag,
             device=device,
             tensor_dtype=self.tensor_dtype,
         )
@@ -360,10 +371,6 @@ class NBVTrainer(LightningModule):
             new_point_maps_render,
             pose.unsqueeze(1),
             valid_masks=new_valid_masks,
-            writer=tb_writer,
-            step=step_arg,
-            log_prefix="DepthZ/NewView",
-            train_flag=train_flag,
         ).detach()
 
         # 2) 用 detach 的 depth_z + 可微 pose + 固定内参反投影得到 new world point maps
@@ -390,13 +397,27 @@ class NBVTrainer(LightningModule):
             xy_signs=self._depth_backproject_xy_signs,
         )
 
-        if tb_writer is not None and step_arg is not None:
+        if self.training and self.is_main_process:
             with torch.no_grad():
                 diff_l2 = (new_point_maps - new_point_maps_render).norm(dim=-1)  # [B, S, H, W]
                 if new_valid_masks.any():
                     diff_valid = diff_l2[new_valid_masks]
-                    tb_writer.add_scalar("Backprojection/new_view_l2_mean", diff_valid.mean(), step_arg)
-                    tb_writer.add_scalar("Backprojection/new_view_l2_max", diff_valid.max(), step_arg)
+                    self.log(
+                        "Backprojection/new_view_l2_mean",
+                        diff_valid.mean(),
+                        on_step=True,
+                        on_epoch=False,
+                        prog_bar=False,
+                        sync_dist=False,
+                    )
+                    self.log(
+                        "Backprojection/new_view_l2_max",
+                        diff_valid.max(),
+                        on_step=True,
+                        on_epoch=False,
+                        prog_bar=False,
+                        sync_dist=False,
+                    )
 
         updated_point_maps = torch.cat([gt_point_maps, new_point_maps], dim=1).contiguous()
         updated_valid_masks = torch.cat([gt_valid_masks, new_valid_masks], dim=1).contiguous().to(dtype=torch.bool)
@@ -434,9 +455,6 @@ class NBVTrainer(LightningModule):
             combined_images_batch,
             combined_camera_poses,
             return_components=True,
-            writer=tb_writer,
-            step=step_arg,
-            train_flag=train_flag,
             point_cloud_dir=point_cloud_dir,
         )
 
@@ -497,7 +515,6 @@ class NBVTrainer(LightningModule):
         camera_poses_batch: torch.Tensor,
         gt_mesh_data: Dict[str, torch.Tensor],
         mesh_batch,
-        render_step: Optional[int],
         mesh_paths: Optional[Sequence[Optional[str]]] = None,
     ) -> Tuple[float, torch.Tensor, float]:
         """生成符合姿态约束的随机位姿并计算其 Chamfer 损失。"""
@@ -513,11 +530,7 @@ class NBVTrainer(LightningModule):
                 camera_poses_batch=camera_poses_batch,
                 gt_mesh_data=gt_mesh_data,
                 mesh_batch=mesh_batch,
-                render_step=render_step,
-                train_flag=False,
                 point_cloud_dir=None,
-                log_to_tensorboard=False,
-                retain_gradients=False,
                 mesh_paths=mesh_paths,
             )
 
@@ -642,13 +655,9 @@ class NBVTrainer(LightningModule):
             camera_poses_batch,
         )
 
-        if backprop and next_camera_pose.requires_grad:
-            next_camera_pose.retain_grad()
-
         pose_log_step = self.global_step if backprop else None
         self._log_camera_pose_stats(next_camera_pose, predicted_relative_position, pose_log_step)
 
-        render_step = self.global_step if backprop else getattr(self, "val_image_step", None)
         step_output_dir = None
         if backprop:
             step_output_dir = os.path.join(
@@ -664,17 +673,20 @@ class NBVTrainer(LightningModule):
             camera_poses_batch=camera_poses_batch,
             gt_mesh_data=trimmed_gt_mesh_data,
             mesh_batch=mesh_batch,
-            render_step=render_step,
-            train_flag=backprop,
             point_cloud_dir=step_output_dir,
-            log_to_tensorboard=backprop,
-            retain_gradients=False,
             mesh_paths=mesh_paths,
         )
 
         total_loss = policy_eval.total_loss
         loss_components = policy_eval.loss_components
         new_images = policy_eval.new_images
+
+        if backprop and step_output_dir is not None:
+            self._save_pre_images_grid(
+                initial_images=initial_images,
+                new_images=new_images,
+                step_output_dir=step_output_dir,
+            )
 
         random_chamfer: Optional[float] = None
         random_images = None
@@ -685,7 +697,6 @@ class NBVTrainer(LightningModule):
                 camera_poses_batch=camera_poses_batch,
                 gt_mesh_data=trimmed_gt_mesh_data,
                 mesh_batch=mesh_batch,
-                render_step=render_step,
                 mesh_paths=mesh_paths,
             )
 
@@ -721,14 +732,20 @@ class NBVTrainer(LightningModule):
 
     def _log_training_metrics(self, loss_dict: Dict[str, float], active_view_count: int) -> None:
         """Record scalar metrics for training."""
-        step = self.global_step
-        self._add_scalar("Train_losses/total_loss", loss_dict["total_loss"], step)
-        self._add_scalar("Train/num_initial_views", active_view_count, step)
-
+        metrics: Dict[str, float] = {
+            "train/num_initial_views": float(active_view_count),
+        }
         if "chamfer_loss" in loss_dict:
-            self._add_scalar("Train_losses/chamfer_loss", loss_dict["chamfer_loss"], step)
+            metrics["train/chamfer_loss"] = loss_dict["chamfer_loss"]
         if "pose_penalty_loss" in loss_dict:
-            self._add_scalar("Train_losses/pose_penalty_loss", loss_dict["pose_penalty_loss"], step)
+            metrics["train/pose_penalty_loss"] = loss_dict["pose_penalty_loss"]
+        self.log_dict(
+            metrics,
+            on_step=True,
+            on_epoch=False,
+            prog_bar=False,
+            sync_dist=self.world_size > 1,
+        )
 
     def _log_random_baseline(
         self,
@@ -742,16 +759,24 @@ class NBVTrainer(LightningModule):
         if random_chamfer is None:
             return
 
-        step = self.global_step
-        if "chamfer_loss" in loss_dict:
-            self._add_scalars(
-                "Train_losses/chamfer_loss",
-                {"policy": loss_dict["chamfer_loss"], "random": random_chamfer},
-                step,
-            )
-        self._add_scalar("Random_baseline/random_chamfer_loss", random_chamfer, step)
+        step = int(self.global_step)
+        self.log(
+            "train/random_baseline_chamfer_loss",
+            float(random_chamfer),
+            on_step=True,
+            on_epoch=False,
+            prog_bar=False,
+            sync_dist=self.world_size > 1,
+        )
         if random_position_norm_mean is not None:
-            self._add_scalar("Random_baseline/position_norm_mean", random_position_norm_mean, step)
+            self.log(
+                "train/random_baseline_position_norm_mean",
+                float(random_position_norm_mean),
+                on_step=True,
+                on_epoch=False,
+                prog_bar=False,
+                sync_dist=self.world_size > 1,
+            )
         if not self.is_main_process:
             return
         if random_images is None or step_output_dir is None:
@@ -766,7 +791,73 @@ class NBVTrainer(LightningModule):
             first_image = random_images_cpu[0]
         else:
             first_image = random_images_cpu
-        self._add_image("Random_baseline/new_view", first_image, step)
+        # self._log_image("train/random_baseline_new_view", first_image, step)
+
+    def _save_pre_images_grid(
+        self,
+        *,
+        initial_images: torch.Tensor,
+        new_images: torch.Tensor,
+        step_output_dir: str,
+    ) -> None:
+        """Save a stitched grid of initial views + NBV view into step_output_dir/pre_images/pre_images.png.
+
+        Layout:
+            - Rows: samples in the batch (B)
+            - Cols: N initial views, then the generated (N+1)-th NBV view
+        """
+        if not self.is_main_process:
+            return
+        if step_output_dir is None:
+            return
+        if initial_images.ndim != 5:
+            LOGGER.warning(
+                "Skip pre_images grid: initial_images expected [B, N, C, H, W], got %s",
+                tuple(initial_images.shape),
+            )
+            return
+        if new_images.ndim != 4:
+            LOGGER.warning(
+                "Skip pre_images grid: new_images expected [B, C, H, W], got %s",
+                tuple(new_images.shape),
+            )
+            return
+
+        batch_size, num_views, channels, height, width = initial_images.shape
+        if new_images.shape[0] != batch_size:
+            LOGGER.warning(
+                "Skip pre_images grid: batch size mismatch initial_images=%d vs new_images=%d",
+                batch_size,
+                new_images.shape[0],
+            )
+            return
+        if tuple(new_images.shape[1:]) != (channels, height, width):
+            LOGGER.warning(
+                "Skip pre_images grid: new_images shape %s does not match expected %s",
+                tuple(new_images.shape),
+                (batch_size, channels, height, width),
+            )
+            return
+
+        initial_cpu = initial_images.detach().float().cpu()
+        new_cpu = new_images.detach().float().cpu()
+        images_for_grid = []
+        for sample_idx in range(batch_size):
+            for view_idx in range(num_views):
+                images_for_grid.append(initial_cpu[sample_idx, view_idx])
+            images_for_grid.append(new_cpu[sample_idx])
+
+        grid_tensor = torch.stack(images_for_grid, dim=0)
+        grid = torchvision.utils.make_grid(
+            grid_tensor,
+            nrow=num_views + 1,
+            padding=2,
+        )
+
+        pre_images_dir = os.path.join(step_output_dir, "pre_images")
+        os.makedirs(pre_images_dir, exist_ok=True)
+        save_path = os.path.join(pre_images_dir, "pre_images.png")
+        torchvision.utils.save_image(grid, save_path)
 
     def configure_optimizers(self):
         optimizer = optim.Adam(
@@ -780,7 +871,8 @@ class NBVTrainer(LightningModule):
         self.optimizer = optimizer
         self.scheduler = scheduler
         return {
-            "optimizer": optimizer
+            "optimizer": optimizer,
+            "lr_scheduler": {"scheduler": scheduler, "interval": "epoch", "frequency": 1}
         }
 
     def on_fit_start(self) -> None:
@@ -791,9 +883,6 @@ class NBVTrainer(LightningModule):
                 world_size = max(1, getattr(self.trainer, "num_devices", 1))
             self.world_size = max(1, int(world_size))
             self.is_main_process = bool(getattr(self.trainer, "is_global_zero", True))
-
-        if self.is_main_process and isinstance(self.logger, TensorBoardLogger):
-            self.tb_writer = self.logger.experiment
 
         device = self.runtime_device
         self.vggt_wrapper.to(device)
@@ -806,16 +895,37 @@ class NBVTrainer(LightningModule):
 
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
         loss, loss_dict, _, _ = self._process_batch(batch, backprop=True)
-        for key, value in loss_dict.items():
-            prog = key == "total_loss"
-            self.log(f"train/{key}", value, on_step=True, on_epoch=False, prog_bar=prog, sync_dist=True)
+        self.log(
+            "train/total_loss",
+            loss,
+            on_step=True,
+            on_epoch=False,
+            prog_bar=True,
+            sync_dist=self.world_size > 1,
+        )
         return loss
 
     def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
         loss, loss_dict, _, _ = self._process_batch(batch, backprop=False)
+        self.log(
+            "val/total_loss",
+            loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=self.world_size > 1,
+        )
         for key, value in loss_dict.items():
-            prog = key == "total_loss"
-            self.log(f"val/{key}", value, on_step=False, on_epoch=True, prog_bar=prog, sync_dist=True)
+            if key == "total_loss":
+                continue
+            self.log(
+                f"val/{key}",
+                float(value),
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                sync_dist=self.world_size > 1,
+            )
         return loss
 
     def transfer_batch_to_device(self, batch: Dict[str, torch.Tensor], device: torch.device, dataloader_idx: int):
@@ -844,26 +954,27 @@ class NBVTrainer(LightningModule):
                 moved[key] = value
         return moved
 
-    def _add_scalar(self, tag: str, value: float, step: int) -> None:
+    def _log_image(self, tag: str, img_tensor: torch.Tensor, step: int) -> None:
         if not self.is_main_process:
             return
-        writer = getattr(self, "tb_writer", None)
-        if writer is None:
+        if not isinstance(self.logger, WandbLogger):
             return
-        writer.add_scalar(tag, value, step)
+        try:
+            import wandb  # type: ignore
+        except ModuleNotFoundError:
+            return
 
-    def _add_scalars(self, tag: str, scalar_dict: Dict[str, float], step: int) -> None:
-        if not self.is_main_process:
+        image_cpu = img_tensor.detach().float().cpu()
+        if image_cpu.ndim == 3 and image_cpu.shape[0] in (1, 3):
+            image_cpu = image_cpu.permute(1, 2, 0).contiguous()
+        elif image_cpu.ndim != 2 and image_cpu.ndim != 3:
             return
-        writer = getattr(self, "tb_writer", None)
-        if writer is None:
-            return
-        writer.add_scalars(tag, scalar_dict, step)
 
-    def _add_image(self, tag: str, img_tensor: torch.Tensor, step: int) -> None:
-        if not self.is_main_process:
+        run = self.logger.experiment
+        current_step = getattr(run, "step", None)
+        if current_step is None:
+            run.log({tag: wandb.Image(image_cpu.numpy())})
             return
-        writer = getattr(self, "tb_writer", None)
-        if writer is None:
-            return
-        writer.add_image(tag, img_tensor, step)
+
+        safe_step = max(int(step), int(current_step))
+        run.log({tag: wandb.Image(image_cpu.numpy())}, step=safe_step)

@@ -429,7 +429,7 @@ class DifferentiableRenderer(nn.Module):
         前向传播：渲染新视图
         """
         # 渲染器不支持半精度；禁用 autocast，强制 float32 以兼容 AMP 训练。
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast(device_type=self.device.type, enabled=False):
             gt_mesh = gt_mesh.to(device=self.device)  # Meshes 不支持 dtype 参数
             camera_poses = camera_poses.to(device=self.device, dtype=torch.float32)
 

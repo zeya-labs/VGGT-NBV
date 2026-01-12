@@ -26,7 +26,7 @@ LOGGER = get_logger(__name__)
 def main(cfg: NBVExperimentConfig) -> None:
     seed_everything(cfg.seed, workers=True)
     configure_run(cfg)
-    maybe_create_synthetic_data(cfg)
+    # maybe_create_synthetic_data(cfg)
     profiler = AdvancedProfiler(dirpath=".", filename="profile_report")
     model = build_lightning_model(cfg)
     datamodule = build_datamodule(cfg)

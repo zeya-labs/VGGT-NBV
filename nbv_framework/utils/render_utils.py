@@ -11,10 +11,6 @@ def render_gt_point_maps(
     mesh_batch: Meshes,
     camera_poses: torch.Tensor,
     *,
-    writer=None,
-    step: Optional[int] = None,
-    log_prefix: str = "GTPointMaps",
-    train_flag: bool = False,
     output_device: Optional[torch.device] = None,
     device: Optional[torch.device] = None,
     tensor_dtype: torch.dtype = torch.float32,
@@ -25,10 +21,6 @@ def render_gt_point_maps(
         renderer: Differentiable renderer instance with ``device`` attribute.
         mesh_batch: Batched mesh data (length equals batch size).
         camera_poses: Camera poses ``[B, S, 7]`` or ``[B, 7]`` or ``[S, 7]`` tensors.
-        writer: Optional TensorBoard writer for debugging visualisations.
-        step: Optional global step for logging.
-        log_prefix: Prefix for TensorBoard image tags.
-        train_flag: Whether we are in training mode (controls logging).
         output_device: Target device for the returned tensors. Defaults to CPU.
 
     Returns:
@@ -89,16 +81,6 @@ def render_gt_point_maps(
 
             _, point_maps, valid_masks = render_out
 
-            if writer is not None and step is not None and train_flag:
-                _log_gt_point_map_tensors(
-                    writer=writer,
-                    step=step,
-                    batch_index=mesh_idx,
-                    point_maps=point_maps,
-                    valid_masks=valid_masks,
-                    prefix=log_prefix,
-                )
-
             point_maps = point_maps.permute(0, 2, 3, 1).contiguous()  # [S, H, W, 3]
             valid_masks = valid_masks.squeeze(1).contiguous()  # [S, H, W]
 
@@ -108,43 +90,3 @@ def render_gt_point_maps(
     point_maps_batch = torch.stack(point_maps_list, dim=0).to(output_device)
     valid_masks_batch = torch.stack(valid_masks_list, dim=0).to(output_device)
     return point_maps_batch, valid_masks_batch
-
-
-def _log_gt_point_map_tensors(
-    *,
-    writer,
-    step: int,
-    batch_index: int,
-    point_maps: torch.Tensor,
-    valid_masks: torch.Tensor,
-    prefix: str,
-) -> None:
-    if point_maps.ndim != 4 or valid_masks.ndim != 4:
-        return
-
-    point_maps_cpu = point_maps.detach().float().cpu()
-    valid_masks_cpu = valid_masks.detach().float().cpu()
-
-    num_views = point_maps_cpu.shape[0]
-
-    for view_idx in range(num_views):
-        pm = point_maps_cpu[view_idx]
-        mask = valid_masks_cpu[view_idx]
-
-        pm_flat = pm.view(3, -1)
-        coord_min = pm_flat.min(dim=1).values.view(3, 1, 1)
-        coord_max = pm_flat.max(dim=1).values.view(3, 1, 1)
-        denom = (coord_max - coord_min).clamp_min(1e-6)
-        pm_norm = (pm - coord_min) / denom
-
-        writer.add_image(
-            f"{prefix}/point_map_batch{batch_index}_view{view_idx}",
-            pm_norm,
-            global_step=step,
-        )
-
-        writer.add_image(
-            f"{prefix}/valid_mask_batch{batch_index}_view{view_idx}",
-            mask,
-            global_step=step,
-        )

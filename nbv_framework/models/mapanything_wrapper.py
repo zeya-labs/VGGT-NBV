@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 import torch
 import torch.nn as nn
@@ -71,50 +71,9 @@ class MapAnythingWrapper(nn.Module):
 
         self.default_fov_degrees: float = 60.0
 
-        self._capture_gradients: bool = False
-        self._grad_capture_keys: Tuple[str, ...] = tuple()
-        self._captured_tensors: Dict[str, torch.Tensor] = {}
-
-        self._capture_input_grad: bool = False
-        self._captured_input: Optional[torch.Tensor] = None
-
     # ------------------------------------------------------------------
     # 公共接口
     # ------------------------------------------------------------------
-    def configure_gradient_capture(
-        self,
-        enable: bool = True,
-        keys: Optional[Sequence[str]] = None,
-        capture_input: bool = True,
-    ) -> None:
-        """保留接口以兼容原训练器, 当前实现仅记录配置状态."""
-        self._capture_gradients = enable
-        self._capture_input_grad = capture_input
-        if keys is not None:
-            self._grad_capture_keys = tuple(keys)
-        if not enable:
-            self._captured_tensors.clear()
-            self._captured_input = None
-
-    def collect_gradient_stats(self) -> Dict[str, float]:
-        """返回最近一次记录的梯度统计. 当前 MapAnything 仅作为冻结特征提取器, 直接返回空字典."""
-        if not self._capture_gradients:
-            return {}
-        grad_stats: Dict[str, float] = {}
-        if self._capture_input_grad and self._captured_input is not None:
-            grad = self._captured_input.grad
-            if grad is not None:
-                grad_stats["input/grad_norm"] = grad.norm().detach().item()
-                grad_stats["input/grad_mean_abs"] = grad.abs().mean().detach().item()
-        for key, tensor in list(self._captured_tensors.items()):
-            grad = tensor.grad
-            if grad is None:
-                continue
-            grad_stats[f"{key}/grad_norm"] = grad.norm().detach().item()
-            grad_stats[f"{key}/grad_mean_abs"] = grad.abs().mean().detach().item()
-        self._captured_tensors.clear()
-        self._captured_input = None
-        return grad_stats
 
     def extract_scene_features(
         self,
@@ -172,7 +131,6 @@ class MapAnythingWrapper(nn.Module):
         # print("info_sharing features shape:", [i.shape for i in final_feat.features])
         # [Slist][B,C,Hf,Wf]
         scene_features = self._gather_tokens(final_feat.features) # [B, S, P=Hf*Wf, C]
-        self._maybe_retain_grad(scene_features, normalized)
         # print("scene_features shape:", scene_features.shape)
         return scene_features
 
@@ -218,7 +176,6 @@ class MapAnythingWrapper(nn.Module):
         # print("predictions keys:", predictions[0].keys())
         # predictions keys: dict_keys(['pts3d', 'pts3d_cam', 'ray_directions', 'depth_along_ray', 'cam_trans', 'cam_quats', 'metric_scaling_factor', 'conf', 'non_ambiguous_mask', 'non_ambiguous_mask_logits'])
         recon = self._stack_predictions(predictions)
-        self._maybe_retain_grad_from_result(recon, normalized)
         return recon
 
     def _stack_predictions(self, predictions: PredList) -> TensorDict:
@@ -319,37 +276,5 @@ class MapAnythingWrapper(nn.Module):
             processed.append(tokens)
 
         return torch.stack(processed, dim=1)
-
-    def _maybe_retain_grad(self, scene_features: torch.Tensor, images: torch.Tensor) -> None:
-        if not self._capture_gradients:
-            return
-        for key in self._grad_capture_keys:
-            if key == "scene_features":
-                target = scene_features
-            else:
-                continue
-            if target.requires_grad:
-                target.retain_grad()
-                self._captured_tensors[key] = target
-        if self._capture_input_grad and images.requires_grad:
-            images.retain_grad()
-            self._captured_input = images
-
-    def _maybe_retain_grad_from_result(
-        self, result: TensorDict, images: torch.Tensor
-    ) -> None:
-        if not self._capture_gradients:
-            return
-        for key in self._grad_capture_keys:
-            tensor = result.get(key)
-            if tensor is None or not torch.is_tensor(tensor):
-                continue
-            if tensor.requires_grad:
-                tensor.retain_grad()
-                self._captured_tensors[key] = tensor
-        if self._capture_input_grad and images.requires_grad:
-            images.retain_grad()
-            self._captured_input = images
-
 
 __all__ = ["MapAnythingWrapper"]

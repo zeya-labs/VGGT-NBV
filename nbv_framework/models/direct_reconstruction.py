@@ -83,7 +83,7 @@ def build_recon_from_point_maps(
                 "depth_z must align with point_maps spatial dimensions "
                 f"({depth.shape} vs {(batch_size, num_views, height, width)})"
             )
-        depth = depth.to(device=device, dtype=torch.float32)
+        depth = depth.to(device=device, dtype=dtype)
 
     conf = masks.to(device=device, dtype=point_maps.dtype)
 

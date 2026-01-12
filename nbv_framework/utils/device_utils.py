@@ -46,7 +46,7 @@ def resolve_dtype(value: Union[str, torch.dtype, None]) -> torch.dtype:
     if isinstance(value, torch.dtype):
         return value
     if isinstance(value, str) and value:
-        key = value.lower()
+        key = value.lower().split("-")[0]
         if key.startswith("torch."):
             key = key.split(".", 1)[1]
         dtype = _DTYPE_ALIASES.get(key)

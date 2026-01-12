@@ -5,15 +5,11 @@
 
 import json
 import math
+from typing import Dict, List, Optional, Tuple, Union
+
 import numpy as np
 import torch
-from typing import Dict, List, Optional, Tuple
 from pytorch3d.renderer import look_at_view_transform
-
-try:
-    import matplotlib.cm as mpl_cm
-except ImportError:  # pragma: no cover
-    mpl_cm = None
 
 from pytorch3d.transforms import matrix_to_quaternion, quaternion_to_matrix
 
@@ -204,13 +200,18 @@ class CameraPoseGenerator:
             return json.load(f)
 
 
-def pose_dict_to_tensor(pose_dict: Dict[str, List[float]], device: str = "cuda") -> torch.Tensor:
+def pose_dict_to_tensor(
+    pose_dict: Dict[str, List[float]],
+    device: Union[str, torch.device] = "cuda",
+    dtype: Optional[torch.dtype] = None,
+) -> torch.Tensor:
     """
     将相机位姿字典转换为张量格式
 
     Args:
         pose_dict: 包含position和quaternion的字典
         device: 计算设备
+        dtype: 输出张量 dtype（默认使用 torch.get_default_dtype()）
 
     Returns:
         pose_tensor: 相机位姿张量 [1, 7] (x, y, z, qx, qy, qz, qw)
@@ -218,9 +219,10 @@ def pose_dict_to_tensor(pose_dict: Dict[str, List[float]], device: str = "cuda")
     position = pose_dict["position"]
     quaternion = pose_dict["quaternion"]
 
-    pose_tensor = torch.tensor([
-        position + quaternion
-    ], dtype=torch.float32, device=device)
+    if dtype is None:
+        dtype = torch.get_default_dtype()
+
+    pose_tensor = torch.as_tensor([position + quaternion], dtype=dtype, device=device)
 
     return pose_tensor
 
@@ -260,9 +262,7 @@ def position_to_pose_tensor(
         pose_tensor: 相机位姿张量 [B, 7] (x, y, z, qx, qy, qz, qw)
     """
     if not torch.is_tensor(positions):
-        positions = torch.tensor(positions, dtype=torch.float32)
-    else:
-        positions = positions.to(dtype=torch.float32)
+        positions = torch.as_tensor(positions)
 
     if positions.ndim == 1:
         if positions.numel() != 3:
@@ -275,22 +275,23 @@ def position_to_pose_tensor(
             f"positions must have shape [B, 3], but received {tuple(positions.shape)}"
         )
 
+    if not positions.is_floating_point():
+        raise TypeError("positions must be a floating point tensor.")
+
+    output_dtype = positions.dtype
+    compute_dtype = output_dtype if output_dtype in {torch.float32, torch.float64} else torch.float32
+
     batch_size = positions.shape[0]
     device = positions.device
 
     # 获取up向量
     up_vector = get_up_vector(up_axis)
-    up = (
-        torch.tensor(up_vector, dtype=torch.float32, device=device)
-        .unsqueeze(0)
-        .expand(batch_size, -1)
-        .contiguous()
-    )
+    up = torch.as_tensor(up_vector, dtype=compute_dtype, device=device).unsqueeze(0).expand(batch_size, -1).contiguous()
 
     if look_at is None:
-        at = torch.zeros(batch_size, 3, dtype=torch.float32, device=device)
+        at = torch.zeros(batch_size, 3, dtype=compute_dtype, device=device)
     else:
-        look_at_tensor = torch.as_tensor(look_at, dtype=torch.float32, device=device)
+        look_at_tensor = torch.as_tensor(look_at, dtype=compute_dtype, device=device)
         if look_at_tensor.ndim == 1:
             if look_at_tensor.numel() != 3:
                 raise ValueError(
@@ -311,7 +312,8 @@ def position_to_pose_tensor(
         at = look_at_tensor
 
     # 使用PyTorch3D的look_at_view_transform生成旋转矩阵
-    R, T = look_at_view_transform(eye=positions, at=at, up=up)
+    positions_compute = positions.to(dtype=compute_dtype)
+    R, T = look_at_view_transform(eye=positions_compute, at=at, up=up)
 
     # 确保旋转矩阵在正确的设备上
     R = R.to(device)
@@ -327,9 +329,12 @@ def position_to_pose_tensor(
     ], dim=1)
 
     # 拼接位置和四元数
-    pose_tensor = torch.cat([positions, quaternions_xyzw], dim=1)
+    pose_tensor = torch.cat(
+        [positions_compute.to(dtype=output_dtype), quaternions_xyzw.to(dtype=output_dtype)],
+        dim=1,
+    )
 
-    return pose_tensor
+    return pose_tensor.to(device=device)
 
 
 def world_points_to_camera_depth(
@@ -337,11 +342,6 @@ def world_points_to_camera_depth(
     camera_poses: torch.Tensor,
     *,
     valid_masks: Optional[torch.Tensor] = None,
-    writer=None,
-    step: Optional[int] = None,
-    log_prefix: str = "DepthZ",
-    train_flag: bool = False,
-    depth_cmap: str = "viridis",
 ) -> torch.Tensor:
     """
     将世界坐标系点云转换为相机坐标系 Z 深度。
@@ -421,8 +421,6 @@ def world_points_to_camera_depth(
         mask = masks_flat.to(device=device).unsqueeze(-1)
         depth = depth.masked_fill(~mask, 0.0)
 
-    depth = depth.to(dtype=torch.float32)
-
     # --- 6. 恢复原始形状 ---
     if is_batched_sequence:
         depth_out = depth.view(batch_size, s_dim, height, width, 1)
@@ -431,21 +429,6 @@ def world_points_to_camera_depth(
         # [B, H, W, 1]
         depth_out = depth
         masks_out = valid_masks
-
-    # --- 7. Logging ---
-    if writer is not None and step is not None and train_flag:
-        # Log 时统一展平，方便 add_image
-        depth_for_log = depth_out.reshape(-1, height, width, 1)
-        masks_for_log = masks_out.reshape(-1, height, width) if masks_out is not None else None
-        
-        _log_depth_maps(
-            writer=writer,
-            step=step,
-            log_prefix=log_prefix,
-            depth=depth_for_log,
-            valid_masks=masks_for_log,
-            cmap_name=depth_cmap,
-        )
 
     return depth_out
 
@@ -721,55 +704,3 @@ def normalize_depth_for_visualization(
     if is_batched:
         return depth_viz_flat.view(batch_size, num_views, height, width)
     return depth_viz_flat
-
-
-def _log_depth_maps(
-    *,
-    writer,
-    step: int,
-    log_prefix: str,
-    depth: torch.Tensor,
-    valid_masks: Optional[torch.Tensor],
-    cmap_name: str = "viridis",
-) -> None:
-    if depth.numel() == 0:
-        return
-
-    if depth.dim() == 3:
-        depth = depth.unsqueeze(-1)
-
-    depth_viz = normalize_depth_for_visualization(depth, valid_masks)
-    depth_viz_cpu = depth_viz.detach().float().cpu().contiguous()
-    color_images = _depth_to_colormap(depth_viz_cpu, cmap_name=cmap_name)
-    max_log = min(color_images.shape[0], 4)
-
-    masks_cpu = None
-    if valid_masks is not None:
-        masks_cpu = valid_masks.detach().float().cpu().contiguous()
-        if masks_cpu.dim() == 4:
-            masks_cpu = masks_cpu.view(-1, masks_cpu.shape[-2], masks_cpu.shape[-1])
-    for idx in range(max_log):
-        writer.add_image(
-            f"{log_prefix}/depth_view{idx}",
-            color_images[idx],
-            global_step=step,
-        )
-        if masks_cpu is not None and idx < masks_cpu.shape[0]:
-            writer.add_image(
-                f"{log_prefix}/mask_view{idx}",
-                masks_cpu[idx].unsqueeze(0),
-                global_step=step,
-            )
-
-
-def _depth_to_colormap(depth_viz: torch.Tensor, cmap_name: str = "viridis") -> torch.Tensor:
-    """将归一化深度转换为伪彩色图像 (N, 3, H, W)。"""
-    if mpl_cm is None:
-        # 如果未安装 matplotlib，退化为重复灰度图
-        return depth_viz.unsqueeze(1).repeat(1, 3, 1, 1).clamp(0.0, 1.0)
-
-    cmap = mpl_cm.get_cmap(cmap_name)
-    depth_np = depth_viz.numpy()  # depth_viz 应已在 CPU 上
-    colored_np = cmap(depth_np)[..., :3]
-    colored = torch.from_numpy(colored_np).permute(0, 3, 1, 2).contiguous()
-    return colored.clamp(0.0, 1.0).to(dtype=torch.float32)

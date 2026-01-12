@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import os
 from typing import Tuple
 
@@ -11,7 +10,7 @@ import torch
 from omegaconf import OmegaConf
 from lightning.pytorch import Trainer
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
-from lightning.pytorch.loggers import TensorBoardLogger
+from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.utilities.rank_zero import rank_zero_only
 from lightning.pytorch.profilers import AdvancedProfiler
 
@@ -65,17 +64,34 @@ def build_trainer(cfg: NBVExperimentConfig, profiler: AdvancedProfiler) -> Train
     """Configure the PyTorch Lightning Trainer from Hydra config."""
     trainer_conf = OmegaConf.to_container(cfg.trainer, resolve=True)  # type: ignore[arg-type]
     callbacks = [
-        ModelCheckpoint(
-            dirpath=cfg.save_dir,
-            filename="nbv-{epoch:04d}-{val/total_loss:.4f}",
-            save_top_k=1,
-            monitor="val/total_loss",
-            mode="min",
-            save_last=True,
-        ),
+        # TODO: 在开启val之后开启模型保存回调
+        # ModelCheckpoint(
+        #     dirpath=cfg.save_dir,
+        #     filename="nbv-{epoch:04d}-{val/total_loss:.4f}",
+        #     save_top_k=1,
+        #     monitor="val/total_loss",
+        #     mode="min",
+        #     save_last=True,
+        # ),
         LearningRateMonitor(logging_interval="epoch"),
     ]
-    logger = TensorBoardLogger(save_dir=cfg.log_dir, name="events")
+    logger = None
+    if cfg.wandb.enabled and str(cfg.wandb.mode).lower() != "disabled":
+        wandb_mode = str(cfg.wandb.mode).lower()
+        if wandb_mode not in {"online", "offline", "disabled"}:
+            raise ValueError(f"Unsupported wandb.mode={cfg.wandb.mode!r}")
+        os.environ["WANDB_MODE"] = wandb_mode
+        os.environ.setdefault("WANDB_DIR", os.path.abspath(cfg.log_dir))
+        logger = WandbLogger(
+            project=cfg.wandb.project,
+            name=cfg.wandb.name,
+            save_dir=cfg.log_dir,
+            entity=cfg.wandb.entity,
+            group=cfg.wandb.group,
+            tags=cfg.wandb.tags,
+            notes=cfg.wandb.notes,
+            log_model=cfg.wandb.log_model,
+        )
     trainer_kwargs = {
         **trainer_conf,
         "profiler": profiler,
@@ -111,22 +127,22 @@ def configure_run(cfg: NBVExperimentConfig) -> None:
     LOGGER.info(f"RANK: {rank}, LOCAL_RANK: {local_rank}")
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
 
-    resolved_device = resolve_device(getattr(cfg, "device", None), local_rank)
-    resolved_dtype = resolve_dtype(getattr(cfg, "tensor_dtype", None))
+    resolved_device = resolve_device(None, local_rank)
+    resolved_dtype = resolve_dtype(cfg.trainer.precision)
     cfg.device = str(resolved_device)
     cfg.tensor_dtype = dtype_to_string(resolved_dtype)
 
     cfg.rank = local_rank
     cfg.world_size = world_size
     cfg.distributed = world_size > 1
-    cfg.is_main_process = rank == 0
+    cfg.is_main_process = local_rank == 0
 
     LOGGER.info(
         "NBV Lightning run: mode=%s, device=%s, dtype=%s, rank=%d/%d",
         cfg.mode,
         resolved_device,
         resolved_dtype,
-        rank,
+        local_rank,
         world_size,
     )
 

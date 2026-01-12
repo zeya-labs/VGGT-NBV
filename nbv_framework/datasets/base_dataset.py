@@ -164,7 +164,7 @@ class BaseDataset(Dataset, ABC):
                         all_poses = self._parse_matrix_format(poses_data)
                 # 格式2: [[x, y, z, qx, qy, qz, qw], ...]
                 elif len(poses_data) > 0 and isinstance(poses_data[0], list) and len(poses_data[0]) == 7:
-                    all_poses = torch.tensor(poses_data, dtype=torch.float32)
+                    all_poses = torch.tensor(poses_data, dtype=self.tensor_dtype)
             
             if all_poses is None:
                 LOGGER.warning("Unsupported camera poses format in %s", camera_poses_path)
@@ -201,7 +201,7 @@ class BaseDataset(Dataset, ABC):
             # 合并position和quaternion: [x, y, z, qx, qy, qz, qw]
             poses.append(position + quaternion)
         
-        return torch.tensor(poses, dtype=torch.float32)
+        return torch.tensor(poses, dtype=self.tensor_dtype)
     
     def _parse_matrix_format(self, poses_data: List[Dict]) -> torch.Tensor:
         """
@@ -223,7 +223,7 @@ class BaseDataset(Dataset, ABC):
                 continue
             poses.append(matrix)
         
-        return torch.tensor(poses, dtype=torch.float32)
+        return torch.tensor(poses, dtype=self.tensor_dtype)
     
     def _parse_cameras_format(self, cameras_data: List[Dict]) -> torch.Tensor:
         """
@@ -239,11 +239,11 @@ class BaseDataset(Dataset, ABC):
         for camera in cameras_data:
             if "R" in camera and "t" in camera:
                 # 构建4x4变换矩阵
-                R = torch.tensor(camera["R"], dtype=torch.float32)
-                t = torch.tensor(camera["t"], dtype=torch.float32)
+                R = torch.tensor(camera["R"], dtype=self.tensor_dtype)
+                t = torch.tensor(camera["t"], dtype=self.tensor_dtype)
                 
                 # 构建变换矩阵
-                transform = torch.eye(4)
+                transform = torch.eye(4, dtype=self.tensor_dtype)
                 transform[:3, :3] = R
                 transform[:3, 3] = t
                 poses.append(transform)

@@ -34,7 +34,7 @@ class ViewpointLoss(nn.Module):
 
     def compute_black_screen_penalty(self, images: torch.Tensor) -> torch.Tensor:
         gray_images = 0.299 * images[:, 0] + 0.587 * images[:, 1] + 0.114 * images[:, 2]
-        black_pixels = (gray_images < 0.1).float()
+        black_pixels = (gray_images < 0.1).to(dtype=gray_images.dtype)
         black_ratio = black_pixels.mean(dim=[1, 2])
         penalty = F.relu(black_ratio - self.black_screen_threshold)
         return penalty.mean()
@@ -57,7 +57,7 @@ class ViewpointLoss(nn.Module):
 
         edge_magnitude = torch.sqrt(grad_x**2 + grad_y**2)
 
-        strong_edges = (edge_magnitude > 0.1).float()
+        strong_edges = (edge_magnitude > 0.1).to(dtype=edge_magnitude.dtype)
         edge_density = strong_edges.mean(dim=[1, 2, 3])
 
         penalty = torch.where(

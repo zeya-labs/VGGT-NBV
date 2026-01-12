@@ -27,7 +27,6 @@ class ReconstructionLoss(nn.Module):
         save_point_clouds: bool = True,
         point_cloud_dir_name: str = "point_clouds",
         max_points_per_cloud: int = 32768,
-        log_tensorboard: bool = False,
         point_source: str = "vggt",
         confidence_threshold: float = 0.0,
         black_pixel_threshold: float = 0.1,
@@ -56,7 +55,6 @@ class ReconstructionLoss(nn.Module):
             max_points_per_cloud=max_points_per_cloud,
             save_point_clouds=save_point_clouds,
             point_cloud_dir_name=point_cloud_dir_name,
-            log_tensorboard=log_tensorboard,
             use_log_warp_for_chamfer=use_log_warp_for_chamfer,
         )
         self.confidence_regularizer = ConfidenceRegularizer(weight=confidence_weight)
@@ -101,13 +99,8 @@ class ReconstructionLoss(nn.Module):
         combined_images_batch: Optional[torch.Tensor],
         combined_camera_poses: Optional[torch.Tensor],
         return_components: bool = False,
-        writer=None,
-        step=None,
-        train_flag: bool = False,  # kept for backwards compatibility
         point_cloud_dir: Optional[str] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, float]]]:
-
-        _ = train_flag  # silence "unused" warnings
 
         device = self.default_device
         dtype = self.tensor_dtype
@@ -121,8 +114,6 @@ class ReconstructionLoss(nn.Module):
             gt_data,
             combined_images_batch,
             combined_camera_poses,
-            writer,
-            step,
             device,
             dtype,
             point_cloud_dir=point_cloud_dir,

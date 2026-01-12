@@ -7,6 +7,21 @@ from typing import Any, Dict, List, Optional
 
 
 @dataclass
+class WandbConfig:
+    """Weights & Biases logging configuration."""
+
+    enabled: bool = True
+    project: str = "nbv-framework"
+    entity: Optional[str] = None
+    name: Optional[str] = None
+    group: Optional[str] = None
+    tags: List[str] = field(default_factory=list)
+    notes: Optional[str] = None
+    mode: str = "online"  # online | offline | disabled
+    log_model: bool = False
+
+
+@dataclass
 class NBVExperimentConfig:
     """Typed representation of the Hydra configuration."""
 
@@ -16,7 +31,6 @@ class NBVExperimentConfig:
     resume_checkpoint: Optional[str] = None
     auto_resume: bool = True
     seed: int = 42
-    dist_backend: str = "nccl"
 
     # Distributed runtime metadata
     distributed: bool = False
@@ -70,6 +84,7 @@ class NBVExperimentConfig:
     output_dir: str = "./outputs"
     save_dir: str = "${output_dir}/checkpoints"
     log_dir: str = "${output_dir}/logs"
+    wandb: WandbConfig = field(default_factory=WandbConfig)
 
     # Device / dtype get resolved at runtime
     device: Optional[str] = None
