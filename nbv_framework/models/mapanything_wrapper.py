@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -51,17 +51,15 @@ class MapAnythingWrapper(nn.Module):
     def __init__(
         self,
         model_name: str = "facebook/map-anything",
-        device: str = "cuda",
         data_norm_type: str = "dinov2",
         memory_efficient_inference: bool = False,
     ) -> None:
         super().__init__()
-        self.device = torch.device(device)
         self.data_norm_type = data_norm_type
         self.memory_efficient_inference = memory_efficient_inference
 
         LOGGER.info("Loading MapAnything model: %s", model_name)
-        self.base_model: MapAnything = MapAnything.from_pretrained(model_name, revision='6f3a25bfbb8fcc799176bb01e9d07dfb49d5416a').to(self.device)
+        self.base_model: MapAnything = MapAnything.from_pretrained(model_name, revision='6f3a25bfbb8fcc799176bb01e9d07dfb49d5416a')
         self.base_model.eval()
         for param in self.base_model.parameters():
             param.requires_grad = False
@@ -85,14 +83,13 @@ class MapAnythingWrapper(nn.Module):
         fov_degrees: Optional[float] = None,
         view_save_dir: Optional[str] = None,
         mesh_paths: Optional[Sequence[Optional[str]]] = None,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, List[Dict[str, Any]]]:
         """提取多视角场景特征, 返回形状 [B, S, P, D]."""
         effective_fov = self.default_fov_degrees if fov_degrees is None else fov_degrees
         views, normalized = prepare_mapanything_views(
             images,
             camera_poses,
             data_norm_type=self.data_norm_type,
-            device=self.device,
             fov_degrees=effective_fov,
             is_metric_scale=is_metric_scale,
             depth_z=depth_z,
@@ -132,7 +129,7 @@ class MapAnythingWrapper(nn.Module):
         # [Slist][B,C,Hf,Wf]
         scene_features = self._gather_tokens(final_feat.features) # [B, S, P=Hf*Wf, C]
         # print("scene_features shape:", scene_features.shape)
-        return scene_features
+        return scene_features, views
 
     def reconstruct_and_evaluate(
         self,
@@ -151,7 +148,6 @@ class MapAnythingWrapper(nn.Module):
             images,
             camera_poses,
             data_norm_type=self.data_norm_type,
-            device=self.device,
             fov_degrees=effective_fov,
             is_metric_scale=is_metric_scale,
             depth_z=depth_z,

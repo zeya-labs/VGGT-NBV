@@ -33,8 +33,6 @@ class NBVExperimentConfig:
     seed: int = 42
 
     # Distributed runtime metadata
-    distributed: bool = False
-    world_size: int = 1
     rank: int = 0
     local_rank: int = 0
     is_main_process: bool = True
@@ -49,6 +47,7 @@ class NBVExperimentConfig:
     # Optimizer & trainer controls
     learning_rate: float = 1e-5
     batch_size: int = 1
+    num_workers: int = 8
     max_epochs: int = 1000
     normalize_method: str = "mean"
     num_samples: int = 100000

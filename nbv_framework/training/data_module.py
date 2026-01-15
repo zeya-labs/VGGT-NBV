@@ -36,6 +36,27 @@ class NBVDataModule(pl.LightningDataModule):
         self.tensor_dtype = resolve_dtype(dtype)
         self.train_dataset: Optional[Dataset] = None
         self.val_dataset: Optional[Dataset] = None
+        self._warned_num_workers_cuda: bool = False
+
+    def _effective_num_workers(self) -> int:
+        requested = int(getattr(self.cfg, "num_workers", 8))
+        if requested < 0:
+            raise ValueError(f"num_workers must be >= 0, got {requested}")
+
+        if self.device.type != "cuda":
+            return requested
+
+        if requested > 0:
+            if not self._warned_num_workers_cuda:
+                LOGGER.warning(
+                    "Dataset uses CUDA (%s) while num_workers=%d would spawn worker processes that each "
+                    "allocate their own renderer on the GPU; forcing num_workers=0 to avoid CUDA OOM.",
+                    self.device,
+                    requested,
+                )
+                self._warned_num_workers_cuda = True
+            return 0
+        return requested
 
     def setup(self, stage: Optional[str] = None) -> None:
         if stage not in (None, "fit"):
@@ -47,19 +68,21 @@ class NBVDataModule(pl.LightningDataModule):
     def train_dataloader(self) -> DataLoader:
         if self.train_dataset is None:
             raise RuntimeError("train_dataset not initialized; did you call setup()?")
+        num_workers = self._effective_num_workers()
         return create_train_loader(
             self.train_dataset,
             batch_size=self.cfg.batch_size,
-            num_workers=8,
+            num_workers=num_workers,
         )
 
     def val_dataloader(self) -> Optional[DataLoader]:
         if self.val_dataset is None:
             return None
+        num_workers = self._effective_num_workers()
         return create_val_loader(
             self.val_dataset,
             batch_size=self.cfg.batch_size,
-            num_workers=8,
+            num_workers=num_workers,
         )
 
     def _build_train_dataset(self) -> Dataset:

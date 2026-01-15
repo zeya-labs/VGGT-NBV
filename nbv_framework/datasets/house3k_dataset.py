@@ -351,39 +351,35 @@ class House3KDataset(BaseDataset):
         """
         renderer = self._get_renderer()
 
-        try:
-            # 使用已经归一化的网格
-            mesh = gt_mesh_data['normalized_mesh']
+        # 使用已经归一化的网格
+        mesh = gt_mesh_data['normalized_mesh']
 
-            # 选择对应的相机位姿
-            selected_poses = [camera_poses[i] for i in selected_indices]
+        # 选择对应的相机位姿
+        selected_poses = [camera_poses[i] for i in selected_indices]
 
-            # 为每个相机位姿复制网格
-            device = renderer.device
+        # 为每个相机位姿复制网格
+        device = renderer.device
 
-            # 转换位姿格式
-            pose_tensors = [pose_dict_to_tensor(pose, device=device) for pose in selected_poses]
-            camera_poses_tensor = torch.cat(pose_tensors, dim=0)
-            mesh = mesh.to(device)
+        # 转换位姿格式
+        pose_tensors = [pose_dict_to_tensor(pose, device=device) for pose in selected_poses]
+        camera_poses_tensor = torch.cat(pose_tensors, dim=0)
+        mesh = mesh.to(device)
 
-            # 创建批次化的网格，每个相机位姿对应一个网格副本
-            num_views = len(selected_poses)
-            meshes_batch = mesh.extend(num_views)
+        # 创建批次化的网格，每个相机位姿对应一个网格副本
+        num_views = len(selected_poses)
+        meshes_batch = mesh.extend(num_views)
 
-            # 渲染图像
-            with torch.no_grad():
-                rendered_images = renderer.forward(
-                    gt_mesh=meshes_batch,
-                    camera_poses=camera_poses_tensor,
-                    pose_format="cartesian",
-                    fov=60.0
-                )
+        # 渲染图像
+        with torch.no_grad():
+            rendered_images = renderer.forward(
+                gt_mesh=meshes_batch,
+                camera_poses=camera_poses_tensor,
+                pose_format="cartesian",
+                fov=60.0
+            )['rgb']  # [N, 3, H, W]
 
-            # 确保返回CPU张量，避免pin_memory问题
-            return rendered_images.cpu()
-
-        except Exception as exc:
-            raise RuntimeError("渲染 House3K 样本失败，请检查网格或相机位姿数据。") from exc
+        # 确保返回CPU张量，避免pin_memory问题
+        return rendered_images.cpu()
     
     def _resolve_manual_config(self, config, idx: int, data_item: Dict):
         if config is None:
@@ -705,7 +701,6 @@ class House3KDataset(BaseDataset):
             mesh_batch=normalized_mesh,
             camera_poses=poses_with_batch,
             device=self.device,
-            tensor_dtype=self.tensor_dtype,
             output_device=torch.device("cpu"),
         )
 

@@ -107,6 +107,21 @@ class ChamferDistance(nn.Module):
                 f"Batch size mismatch in Chamfer loss: Pred {pred_batched.shape[0]} vs GT {gt_batched.shape[0]}."
             )
 
+        # PyTorch3D's chamfer_distance does not guarantee stable behavior when a batch item
+        # contains 0 points (x_lengths==0). Filter them out to avoid NaNs/inf gradients.
+        valid_batch = (pred_lengths > 0) & (gt_lengths > 0)
+        save_requested = point_cloud_dir is not None
+        if not bool(valid_batch.all()):
+            if not bool(valid_batch.any()):
+                return torch.tensor(0.0, device=pred_batched.device, requires_grad=True)
+            pred_batched = pred_batched[valid_batch]
+            pred_lengths = pred_lengths[valid_batch]
+            gt_batched = gt_batched[valid_batch]
+            gt_lengths = gt_lengths[valid_batch]
+            # Avoid confusing batch indices when saving debug point clouds.
+            if save_requested:
+                point_cloud_dir = None
+
         # PyTorch3D's KNN/Chamfer kernels require both inputs to share the same dtype.
         # Keep the configured dtype when possible; fall back to fp32 only when the
         # underlying PyTorch3D KNN implementation does not support bf16.
@@ -126,10 +141,11 @@ class ChamferDistance(nn.Module):
             pred_batched = apply_log_to_norm(pred_batched)
             gt_batched = apply_log_to_norm(gt_batched)
         loss, _ = chamfer_distance(
-            pred_batched,
             gt_batched,
-            x_lengths=pred_lengths,
-            y_lengths=gt_lengths,
+            pred_batched,
+            x_lengths=gt_lengths,
+            y_lengths=pred_lengths,
+            single_directional = True,
         )
 
         save_dir = self._resolve_point_cloud_directory(point_cloud_dir)

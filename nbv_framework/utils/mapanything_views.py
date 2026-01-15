@@ -14,6 +14,9 @@ from mapanything.utils.inference import (
     preprocess_input_views_for_inference,
     validate_input_views_for_inference,
 )
+from mapanything.utils.geometry import (
+    transform_pose_using_quats_and_trans_2_to_1,
+)
 from pytorch3d.renderer.cameras import PerspectiveCameras
 from pytorch3d.transforms import quaternion_to_matrix
 from pytorch3d.utils.camera_conversions import opencv_from_cameras_projection
@@ -53,7 +56,7 @@ def compute_pinhole_intrinsics(
 
 def pose7d_to_opencv_cam2world_with_official_func(
     pose: torch.Tensor,
-    image_size: Tuple[int, int] = (224, 224),
+    image_size: Tuple[int, int] = (518, 518),
 ) -> torch.Tensor:
     """Convert one or more 7D cam2world poses into OpenCV cam2world matrices."""
     if pose.dim() == 1:
@@ -68,8 +71,7 @@ def pose7d_to_opencv_cam2world_with_official_func(
         raise TypeError("pose must be a floating point tensor.")
 
     output_dtype = pose.dtype
-    compute_dtype = output_dtype if output_dtype in {torch.float32, torch.float64} else torch.float32
-    pose_compute = pose.to(dtype=compute_dtype)
+    pose_compute = pose.to(dtype=output_dtype)
     device = pose_compute.device
 
     position_c2w = pose_compute[..., :3]  # (N, 3)
@@ -108,12 +110,120 @@ def pose7d_to_opencv_cam2world_with_official_func(
 
     return cam2world.to(dtype=output_dtype)
 
+def _compute_pose_quats_and_trans_for_across_views_in_ref_view(
+    views,
+    num_views,
+    device,
+    dtype,
+    batch_size_per_view,
+    per_sample_cam_input_mask,
+):
+    """
+    Compute the pose quats and trans for all the views in the frame of the reference view 0.
+    Returns identity pose for views where the camera input mask is False or the pose is not provided.
+
+    Args:
+        views (List[dict]): List of dictionaries containing the input views' images and instance information.
+        num_views (int): Number of views.
+        device (torch.device): Device to use for the computation.
+        dtype (torch.dtype): Data type to use for the computation.
+        per_sample_cam_input_mask (torch.Tensor): Tensor containing the per sample camera input mask.
+
+    Returns:
+        torch.Tensor: A tensor containing the pose quats for all the views in the frame of the reference view 0. (batch_size_per_view * view, 4)
+        torch.Tensor: A tensor containing the pose trans for all the views in the frame of the reference view 0. (batch_size_per_view * view, 3)
+        torch.Tensor: A tensor containing the per sample camera input mask.
+    """
+    # Compute the pose quats and trans for all the non-reference views in the frame of the reference view 0
+    pose_quats_non_ref_views = []
+    pose_trans_non_ref_views = []
+    pose_quats_ref_view_0 = []
+    pose_trans_ref_view_0 = []
+    for view_idx in range(num_views):
+        per_sample_cam_input_mask_for_curr_view = per_sample_cam_input_mask[
+            view_idx * batch_size_per_view : (view_idx + 1) * batch_size_per_view
+        ]
+        if (
+            "camera_pose_quats" in views[view_idx]
+            and "camera_pose_trans" in views[view_idx]
+            and per_sample_cam_input_mask_for_curr_view.any()
+        ):
+            # Get the camera pose quats and trans for the current view
+            cam_pose_quats = views[view_idx]["camera_pose_quats"][
+                per_sample_cam_input_mask_for_curr_view
+            ]
+            cam_pose_trans = views[view_idx]["camera_pose_trans"][
+                per_sample_cam_input_mask_for_curr_view
+            ]
+            cam_pose_quats = cam_pose_quats.to(dtype=dtype)
+            cam_pose_trans = cam_pose_trans.to(dtype=dtype)
+            # Append to the list
+            pose_quats_non_ref_views.append(cam_pose_quats)
+            pose_trans_non_ref_views.append(cam_pose_trans)
+            # Get the camera pose quats and trans for the reference view 0
+            cam_pose_quats = views[0]["camera_pose_quats"][
+                per_sample_cam_input_mask_for_curr_view
+            ]
+            cam_pose_trans = views[0]["camera_pose_trans"][
+                per_sample_cam_input_mask_for_curr_view
+            ]
+            cam_pose_quats = cam_pose_quats.to(dtype=dtype)
+            cam_pose_trans = cam_pose_trans.to(dtype=dtype)
+            # Append to the list
+            pose_quats_ref_view_0.append(cam_pose_quats)
+            pose_trans_ref_view_0.append(cam_pose_trans)
+        else:
+            per_sample_cam_input_mask[
+                view_idx * batch_size_per_view : (view_idx + 1)
+                * batch_size_per_view
+            ] = False
+
+    # Initialize the pose quats and trans for all views as identity
+    pose_quats_across_views = torch.tensor(
+        [0.0, 0.0, 0.0, 1.0], dtype=dtype, device=device
+    ).repeat(batch_size_per_view * num_views, 1)  # (q_x, q_y, q_z, q_w)
+    pose_trans_across_views = torch.zeros(
+        (batch_size_per_view * num_views, 3), dtype=dtype, device=device
+    )
+
+    # Compute the pose quats and trans for all the non-reference views in the frame of the reference view 0
+    if len(pose_quats_non_ref_views) > 0:
+        # Stack the pose quats and trans for all the non-reference views and reference view 0
+        pose_quats_non_ref_views = torch.cat(pose_quats_non_ref_views, dim=0)
+        pose_trans_non_ref_views = torch.cat(pose_trans_non_ref_views, dim=0)
+        pose_quats_ref_view_0 = torch.cat(pose_quats_ref_view_0, dim=0)
+        pose_trans_ref_view_0 = torch.cat(pose_trans_ref_view_0, dim=0)
+
+        # Compute the pose quats and trans for all the non-reference views in the frame of the reference view 0
+        (
+            pose_quats_non_ref_views_in_ref_view_0,
+            pose_trans_non_ref_views_in_ref_view_0,
+        ) = transform_pose_using_quats_and_trans_2_to_1(
+            pose_quats_ref_view_0,
+            pose_trans_ref_view_0,
+            pose_quats_non_ref_views,
+            pose_trans_non_ref_views,
+        )
+
+        # Update the pose quats and trans for all the non-reference views
+        pose_quats_across_views[per_sample_cam_input_mask] = (
+            pose_quats_non_ref_views_in_ref_view_0.to(dtype=dtype)
+        )
+        pose_trans_across_views[per_sample_cam_input_mask] = (
+            pose_trans_non_ref_views_in_ref_view_0.to(dtype=dtype)
+        )
+
+    return (
+        pose_quats_across_views,
+        pose_trans_across_views,
+        per_sample_cam_input_mask,
+    )
+
 def prepare_mapanything_views(
     images: torch.Tensor,
     camera_poses: torch.Tensor,
     *,
     data_norm_type: str,
-    device: torch.device,
     fov_degrees: float = 60.0,
     is_metric_scale: bool = False,
     depth_z: Optional[torch.Tensor] = None,
@@ -123,16 +233,16 @@ def prepare_mapanything_views(
     """验证输入并基于原始分辨率构建 MapAnything 视图描述。"""
     if images.dim() != 5 or images.shape[2] != 3:
         raise ValueError(
-            f"images 期望形状 [B, S, 3, H, W] 或 [S, 3, H, W]，实际 {tuple(images.shape)}"
+            f"images 期望形状 [B, S, 3, H, W]，实际 {tuple(images.shape)}"
         )
 
     if camera_poses.dim() != 3 or camera_poses.shape[-1] != 7:
         raise ValueError(
-            f"camera_poses 期望形状 [B, S, 7] 或 [B, 7]，实际 {tuple(camera_poses.shape)}"
+            f"camera_poses 期望形状 [B, S, 7]，实际 {tuple(camera_poses.shape)}"
         )
 
-    images = images.clamp(0.0, 1.0).to(device)
-    camera_poses = camera_poses.to(device=device)
+    device = images.device
+
     if depth_z is not None:
         if depth_z.dim() == 5 and depth_z.shape[-1] == 1:
             depth_z = depth_z.squeeze(-1)
@@ -140,7 +250,6 @@ def prepare_mapanything_views(
             raise ValueError(
                 f"depth_z expected shape [B, S, H, W] or [B, S, H, W, 1], got {tuple(depth_z.shape)}"
             )
-        depth_z = depth_z.to(device=device)
 
     batch_size, num_views, num_channels, _, _ = images.shape
     if num_channels != 3:

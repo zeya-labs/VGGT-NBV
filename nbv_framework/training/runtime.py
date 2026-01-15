@@ -12,7 +12,7 @@ from lightning.pytorch import Trainer
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.utilities.rank_zero import rank_zero_only
-from lightning.pytorch.profilers import AdvancedProfiler
+from lightning.pytorch.profilers.profiler import Profiler
 
 from nbv_framework.models.mapanything_wrapper import MapAnythingWrapper
 from nbv_framework.models.nbv_policy_networks import AttentionNBVPolicy
@@ -54,13 +54,12 @@ def build_lightning_model(cfg: NBVExperimentConfig) -> NBVTrainer:
         device=str(runtime_device),
         tensor_dtype=runtime_dtype,
         use_epoch_seed=cfg.use_epoch_seed,
-        enable_random_baseline=True,
-        world_size=cfg.world_size,
+        enable_random_baseline=False,
         rank=cfg.rank,
     )
 
 
-def build_trainer(cfg: NBVExperimentConfig, profiler: AdvancedProfiler) -> Trainer:
+def build_trainer(cfg: NBVExperimentConfig, profiler: Profiler) -> Trainer:
     """Configure the PyTorch Lightning Trainer from Hydra config."""
     trainer_conf = OmegaConf.to_container(cfg.trainer, resolve=True)  # type: ignore[arg-type]
     callbacks = [
@@ -125,7 +124,6 @@ def configure_run(cfg: NBVExperimentConfig) -> None:
     rank = int(os.environ.get("RANK", "0"))
     local_rank = int(os.environ.get("LOCAL_RANK", str(rank)))
     LOGGER.info(f"RANK: {rank}, LOCAL_RANK: {local_rank}")
-    world_size = int(os.environ.get("WORLD_SIZE", "1"))
 
     resolved_device = resolve_device(None, local_rank)
     resolved_dtype = resolve_dtype(cfg.trainer.precision)
@@ -133,17 +131,14 @@ def configure_run(cfg: NBVExperimentConfig) -> None:
     cfg.tensor_dtype = dtype_to_string(resolved_dtype)
 
     cfg.rank = local_rank
-    cfg.world_size = world_size
-    cfg.distributed = world_size > 1
     cfg.is_main_process = local_rank == 0
 
     LOGGER.info(
-        "NBV Lightning run: mode=%s, device=%s, dtype=%s, rank=%d/%d",
+        "NBV Lightning run: mode=%s, device=%s, dtype=%s, rank=%d",
         cfg.mode,
         resolved_device,
         resolved_dtype,
         local_rank,
-        world_size,
     )
 
 
@@ -155,7 +150,6 @@ def _build_components(
     LOGGER.info("Setting up models on device: %s", runtime_device)
     mapanything = MapAnythingWrapper(
         model_name="facebook/map-anything",
-        device=str(runtime_device),
     )
     policy = AttentionNBVPolicy(
         scene_feature_dim=cfg.scene_feature_dim,
@@ -167,8 +161,6 @@ def _build_components(
     renderer = DifferentiableRenderer(
         image_size=cfg.image_size,
         device=str(runtime_device),
-        quality="high",
-        downsample_factor=2,
     )
     loss_fn = ReconstructionLoss(
         renderer=renderer,

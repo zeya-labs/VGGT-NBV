@@ -10,7 +10,7 @@ class PosePenalty:
 
     def __init__(
         self,
-        weight: float = 0.02,
+        weight: float = 1.0,
         up_axis: str = "Y",
         outer_radius: float = 4.0,
         inner_radius: float = 2.0,

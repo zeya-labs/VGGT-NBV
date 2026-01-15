@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import lovely_tensors as lt
+lt.monkey_patch()
+
 import hydra
 from hydra.core.config_store import ConfigStore
 from nbv_framework.utils.logging_utils import get_logger
@@ -36,6 +39,10 @@ def main(cfg: NBVExperimentConfig) -> None:
         LOGGER.info("Mode %s requested; skipping trainer.fit()", cfg.mode)
         return
 
+    # from lightning.pytorch.loggers import WandbLogger
+    # if isinstance(trainer.logger, WandbLogger):
+    #     print("Watching model parameters and gradients with WandbLogger")
+    #     trainer.logger.watch(model, log="all", log_freq=1)
     trainer.fit(model=model, datamodule=datamodule, ckpt_path=cfg.resume_checkpoint or None)
 
 

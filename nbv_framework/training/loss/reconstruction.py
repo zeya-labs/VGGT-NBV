@@ -21,14 +21,14 @@ class ReconstructionLoss(nn.Module):
         chamfer_weight: float = 10.0,
         confidence_weight: float = 0.0,
         viewpoint_weight: float = 0.0,
-        pose_penalty_weight: float = 1.0,
+        pose_penalty_weight: float = 0.0,
         renderer: Optional["DifferentiableRenderer"] = None,
         pose_up_axis: str = "Y",
         save_point_clouds: bool = True,
         point_cloud_dir_name: str = "point_clouds",
         max_points_per_cloud: int = 32768,
         point_source: str = "vggt",
-        confidence_threshold: float = 0.0,
+        confidence_threshold: float = 0.0, # 百分之
         black_pixel_threshold: float = 0.1,
         pose_outer_radius: float = 3.5,
         pose_inner_radius: float = 2.5,
@@ -39,7 +39,6 @@ class ReconstructionLoss(nn.Module):
     ) -> None:
         super().__init__()
 
-        # kept for API compatibility, not used internally yet
         self.renderer = renderer
 
         normalized_source = point_source.lower()
@@ -125,6 +124,27 @@ class ReconstructionLoss(nn.Module):
             weighted_chamfer,
             chamfer_raw,
         )
+        # if confidence_mask is not None:
+        #     with torch.no_grad():
+        #         flat_counts = confidence_mask.reshape(confidence_mask.shape[0], -1).sum(dim=1)
+        #         loss_components["chamfer_pred_points_mean"] = float(flat_counts.float().mean())
+        #         loss_components["chamfer_pred_points_min"] = float(flat_counts.min())
+        #         loss_components["chamfer_pred_points_zero_frac"] = float(
+        #             (flat_counts == 0).float().mean()
+        #         )
+
+        #         if confidence_mask.dim() >= 4:
+        #             per_view_counts = confidence_mask.sum(dim=tuple(range(2, confidence_mask.dim())))
+        #             last_view_counts = per_view_counts[:, -1]
+        #             loss_components["chamfer_pred_points_last_view_mean"] = float(
+        #                 last_view_counts.float().mean()
+        #             )
+        #             loss_components["chamfer_pred_points_last_view_min"] = float(
+        #                 last_view_counts.min()
+        #             )
+        #             loss_components["chamfer_pred_points_last_view_zero_frac"] = float(
+        #                 (last_view_counts == 0).float().mean()
+        #             )
 
         # --- Confidence ---
         weighted_confidence, confidence_raw = self.confidence_regularizer(

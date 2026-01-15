@@ -268,48 +268,83 @@ class BasicNBVPolicy(BaseNBVPolicy):
         return self._activate_nbv(nbv_raw)
 
 
+class SinusoidalPositionalEncoding(nn.Module):
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
+        """
+        Args:
+            d_model: 隐层维度 (hidden_dim)
+            dropout: Dropout 比率
+            max_len: 预计算的最大长度 (设大一点没关系，不占多少内存)
+        """
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        # 1. 计算位置编码矩阵
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        
+        # 2. 计算分母的 div_term (10000^(2i/d_model))
+        # 使用 log 空间计算以提高数值稳定性
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        
+        # 3. 填充 sin 和 cos
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        
+        # 4. 增加 batch 维度: [1, max_len, d_model]
+        pe = pe.unsqueeze(0)
+        
+        # 5. 注册为 buffer (不会被优化器更新，但会随模型保存/加载，且会自动跟随 .to(device))
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        """
+        x: [Batch, Seq_Len, d_model]
+        """
+        # 动态截取当前序列长度对应的位置编码
+        x = x + self.pe[:, :x.size(1), :]
+        return self.dropout(x)
+
+
 class AttentionNBVPolicy(BaseNBVPolicy):
-    """
-    基于注意力机制的NBV策略网络
-    
-    使用Transformer编码器处理序列特征
-    """
-    
     def __init__(self, 
                  scene_feature_dim: int = 768,
-                 hidden_dim: int = 512,
+                 hidden_dim: int = 768,
                  num_heads: int = 8,
                  num_layers: int = 4,
+                 dropout: float = 0.0,  # 推荐加入 dropout
                  output_mode: str = "cartesian",
-                 token_pooling_mode: str = "mean"):
-        """
-        初始化注意力NBV策略网络
+                 token_pooling_mode: str = "mean",
+                 input_extrinsic_dim=7):
         
-        Args:
-            scene_feature_dim: 场景特征维度
-            hidden_dim: 隐藏层维度
-            num_heads: 注意力头数
-            num_layers: Transformer层数
-            output_mode: 输出模式
-        """
         super().__init__(output_mode, token_pooling_mode)
         
-        self.scene_feature_dim = scene_feature_dim
         self.hidden_dim = hidden_dim
         
+        self.camera_embedding = nn.Sequential(
+            nn.Linear(input_extrinsic_dim, hidden_dim // 2),
+            nn.GELU(),
+            nn.Linear(hidden_dim // 2, hidden_dim),
+            nn.LayerNorm(hidden_dim) 
+        )
+
         # 特征投影
         self.feature_projection = nn.Linear(scene_feature_dim, hidden_dim)
         
-        # 位置编码
-        self.pos_embedding = nn.Parameter(torch.randn(1, 100, hidden_dim))  # 支持最多100个视角
+        self.pos_encoder = SinusoidalPositionalEncoding(
+            d_model=hidden_dim, 
+            dropout=dropout, 
+            max_len=5000
+        )
         
         # Transformer编码器
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_dim,
             nhead=num_heads,
             dim_feedforward=hidden_dim * 4,
-            dropout=0.0,
-            batch_first=True
+            dropout=dropout,
+            batch_first=True,
+            norm_first=True # 推荐使用 Pre-Norm
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers)
         
@@ -317,49 +352,48 @@ class AttentionNBVPolicy(BaseNBVPolicy):
         self.global_pool = nn.MultiheadAttention(
             embed_dim=hidden_dim,
             num_heads=num_heads,
+            dropout=dropout,
             batch_first=True
         )
-        self.global_token = nn.Parameter(torch.randn(1, 1, hidden_dim))
+        self.global_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
         
         # 输出头
         self.output_head = nn.Sequential(
             nn.LayerNorm(hidden_dim),
             nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(0.0),
+            nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim // 2, self.target_dim)
         )
         
         self._initialize_weights()
-    
-    def forward(self, scene_features: torch.Tensor) -> torch.Tensor:
-        """
-        前向传播
         
-        Args:
-            scene_features: 场景特征 [B, S, 768]
-            
-        Returns:
-            camera_pose: 相机位姿 [B, target_dim]
-        """
-        scene_features = self._pool_tokens_if_needed(scene_features)  # [B, S, D]
+        nn.init.constant_(self.global_token, 0.0)
+
+    def forward(self, scene_features: torch.Tensor, camera_extrinsics: torch.Tensor) -> torch.Tensor:
+        # [B, S, P, D] -> [B, S, D]
+        scene_features = self._pool_tokens_if_needed(scene_features)
         B, S, D = scene_features.shape
         
-        # 特征投影
-        x = self.feature_projection(scene_features)  # [B, S, hidden_dim]
+        # 1. 投影
+        scene_tokens = self.feature_projection(scene_features) 
         
-        # 添加位置编码
-        x = x + self.pos_embedding[:, :S, :]
+        cam_pos_encoding = self.camera_embedding(camera_extrinsics)
+
+        x = scene_tokens + cam_pos_encoding
+
+        # 2. 添加位置编码 (无需手动处理长度，模块内自动处理)
+        x = self.pos_encoder(x)
+
+        # 3. Transformer 编码
+        encoded_features = self.transformer(x)
         
-        # Transformer编码
-        encoded_features = self.transformer(x)  # [B, S, hidden_dim]
-        
-        # 全局特征提取
+        # 4. 全局 Attention 池化
         global_token = self.global_token.expand(B, -1, -1)
         global_features, _ = self.global_pool(global_token, encoded_features, encoded_features)
-        global_features = global_features.squeeze(1)  # [B, hidden_dim]
+        global_features = global_features.squeeze(1)
         
-        # 输出预测
+        # 5. 输出
         nbv_raw = self.output_head(global_features)
         
         return self._activate_nbv(nbv_raw)

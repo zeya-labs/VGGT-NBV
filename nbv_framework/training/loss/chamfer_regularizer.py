@@ -62,13 +62,8 @@ class ChamferRegularizer:
         point_cloud_dir: Optional[str] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         zero = torch.zeros((), device=device, dtype=dtype)
-        if self.weight <= 0 or "gt_points" not in gt_data:
+        if self.weight <= 0:
             return zero, zero, None
-
-        if combined_camera_poses is None:
-            raise ValueError(
-                "combined_camera_poses must be provided when Chamfer loss is enabled."
-            )
 
         gt_point_maps = gt_data.get("gt_point_maps")
         gt_valid_masks = gt_data.get("gt_valid_masks")

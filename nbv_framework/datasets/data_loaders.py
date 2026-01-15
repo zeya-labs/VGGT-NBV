@@ -53,6 +53,8 @@ def create_data_loader(
     multiprocessing_context = None
     if num_workers > 0:
         multiprocessing_context = mp.get_context("spawn")
+    else:
+        persistent_workers = False
 
     loader_kwargs = dict(
         dataset=dataset,

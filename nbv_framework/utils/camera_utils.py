@@ -321,12 +321,15 @@ def position_to_pose_tensor(
     # 将旋转矩阵转换为四元数
     quaternions_wxyz = matrix_to_quaternion(R)
     # 转换为xyzw格式
-    quaternions_xyzw = torch.stack([
-        quaternions_wxyz[:, 1],  # x
-        quaternions_wxyz[:, 2],  # y
-        quaternions_wxyz[:, 3],  # z
-        quaternions_wxyz[:, 0]   # w
-    ], dim=1)
+    quaternions_xyzw = torch.stack(
+        [
+            quaternions_wxyz[:, 1],  # x
+            quaternions_wxyz[:, 2],  # y
+            quaternions_wxyz[:, 3],  # z
+            quaternions_wxyz[:, 0],  # w
+        ],
+        dim=1,
+    )
 
     # 拼接位置和四元数
     pose_tensor = torch.cat(
