@@ -22,7 +22,6 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-import multiprocessing as mp
 import torch.multiprocessing as tmp
 
 import numpy as np

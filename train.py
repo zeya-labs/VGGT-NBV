@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+from icecream import ic
 import lovely_tensors as lt
 lt.monkey_patch()
+from rich.pretty import pretty_repr
+ic.configureOutput(argToStringFunction=pretty_repr)
+from rich.traceback import install
+install(show_locals=True)
 
 import hydra
 from hydra.core.config_store import ConfigStore
 from nbv_framework.utils.logging_utils import get_logger
 from lightning.pytorch import seed_everything
-from lightning.pytorch.profilers import SimpleProfiler, AdvancedProfiler
+from lightning.pytorch.profilers import AdvancedProfiler
 
 from nbv_framework.training.config import NBVExperimentConfig
 from nbv_framework.training.runtime import (
@@ -17,7 +22,6 @@ from nbv_framework.training.runtime import (
     build_lightning_model,
     build_trainer,
     configure_run,
-    maybe_create_synthetic_data,
 )
 
 cs = ConfigStore.instance()
