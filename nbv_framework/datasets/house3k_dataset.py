@@ -24,9 +24,7 @@ from .house3k_utils import (
     scan_house3k_batches,
     split_house3k_dataset,
 )
-from nbv_framework.utils.logging_utils import get_logger
-
-LOGGER = get_logger(__name__)
+from loguru import logger
 
 
 class House3KDataset(BaseDataset):
@@ -122,12 +120,9 @@ class House3KDataset(BaseDataset):
         if self.test_ratio < 0:
             if self.test_ratio < -1e-6:
                 raise ValueError(f"Invalid split ratios: train={train_ratio}, val={val_ratio}")
-            LOGGER.warning(
-                "Split ratios sum to ~1 within tolerance; clamping test ratio to 0 "
-                "(train=%s, val=%s, computed_test=%s)",
-                train_ratio,
-                val_ratio,
-                self.test_ratio,
+            logger.warning(
+                f"Split ratios sum to ~1 within tolerance; clamping test ratio to 0 "
+                f"(train={train_ratio}, val={val_ratio}, computed_test={self.test_ratio})"
             )
             self.test_ratio = 0.0
         
@@ -156,20 +151,20 @@ class House3KDataset(BaseDataset):
 
         扫描所有BATCH目录，找到所有.obj文件，过滤掉没有纹理的模型，然后按比例分割
         """
-        LOGGER.info("正在扫描House3K数据集: %s", self.data_root)
+        logger.info(f"正在扫描House3K数据集: {self.data_root}")
         data_root_path = Path(self.data_root)
 
         # 1. 查找所有批次目录
         batch_dirs = find_batch_directories(data_root_path)
-        LOGGER.info("找到 %d 个批次目录: %s", len(batch_dirs), [d.name for d in batch_dirs])
+        logger.info(f"找到 {len(batch_dirs)} 个批次目录: {[d.name for d in batch_dirs]}")  
 
-        all_objects, total_scanned = scan_house3k_batches(batch_dirs, logger=LOGGER)
-        LOGGER.info(
+        all_objects, total_scanned = scan_house3k_batches(batch_dirs, logger=logger)
+        logger.info(
             "[House3K数据集] 总共扫描 %d 个3D模型，其中 %d 个有完整纹理",
             total_scanned,
             len(all_objects),
         )
-        LOGGER.info("[House3K数据集] 最终加载 %d 个有效3D模型", len(all_objects))
+        logger.info(f"[House3K数据集] 最终加载 {len(all_objects)} 个有效3D模型")
         
         # 4. 全局mesh数量限制
         if self.max_meshes and len(all_objects) > self.max_meshes:
@@ -177,7 +172,7 @@ class House3KDataset(BaseDataset):
             rng = random.Random(42)
             rng.shuffle(all_objects)
             all_objects = all_objects[:self.max_meshes]
-            LOGGER.info(
+            logger.info(
                 "[House3K数据集] 应用全局mesh限制，从 %d 个减少到 %d 个",
                 original_count,
                 self.max_meshes,
@@ -191,14 +186,11 @@ class House3KDataset(BaseDataset):
             val_ratio=self.val_ratio,
         )
 
-        LOGGER.info(
-            "数据集分割 - 总计: %d, 训练: %d, 验证: %d, 测试: %d",
-            split_stats["total"],
-            split_stats["train"],
-            split_stats["val"],
-            split_stats["test"],
+        logger.info(
+            f"数据集分割 - 总计: {split_stats['total']}, 训练: {split_stats['train']}, "
+            f"验证: {split_stats['val']}, 测试: {split_stats['test']}"
         )
-        LOGGER.info("当前分割 '%s': 加载了 %d 个样本", self.split, split_stats["current_split"])
+        logger.info(f"当前分割 '{self.split}': 加载了 {split_stats['current_split']} 个样本")
 
         return split_objects
     
@@ -629,9 +621,8 @@ class House3KDataset(BaseDataset):
                 ]
                 camera_poses_tensor = torch.stack(camera_pose_rows, dim=0)
             else:
-                LOGGER.warning(
-                    "未选择任何相机位姿，模型名称: %s",
-                    model_name,
+                logger.warning(
+                    f"未选择任何相机位姿，模型名称: {model_name}"
                 )
 
         gt_supervision = dict(gt_mesh_data)

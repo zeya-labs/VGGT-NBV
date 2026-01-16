@@ -4,9 +4,7 @@ import random
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from nbv_framework.utils.logging_utils import get_logger
-
-LOGGER = get_logger(__name__)
+from loguru import logger
 
 SplitStats = Dict[str, int]
 
@@ -16,7 +14,7 @@ def find_batch_directories(data_root: Path) -> List[Path]:
     return sorted([d for d in data_root.iterdir() if d.is_dir() and "BATCH" in d.name.upper()])
 
 
-def check_texture_files(mtl_path: Path, logger=LOGGER) -> bool:
+def check_texture_files(mtl_path: Path, logger=logger) -> bool:
     """Check whether all texture files referenced in an MTL file exist."""
     if not mtl_path.exists():
         return False
@@ -43,11 +41,11 @@ def check_texture_files(mtl_path: Path, logger=LOGGER) -> bool:
         return all((set_path / tex_file).exists() for tex_file in texture_files_found)
 
     except Exception as exc:  # pragma: no cover - defensive logging
-        logger.warning("读取MTL文件失败 %s: %s", mtl_path, exc)
+        logger.warning(f"读取MTL文件失败 {mtl_path}: {exc}")
         return False
 
 
-def scan_batch_directory(batch_path: Path, logger=LOGGER) -> List[Dict]:
+def scan_batch_directory(batch_path: Path, logger=logger) -> List[Dict]:
     """Scan a single batch directory and return all model entries."""
     batch_objects: List[Dict] = []
     obj_files = list(batch_path.glob("Set*/*.obj")) + list(batch_path.glob("SET*/*.obj"))
@@ -68,11 +66,11 @@ def scan_batch_directory(batch_path: Path, logger=LOGGER) -> List[Dict]:
             }
         )
 
-    logger.info("批次 %s: 找到 %d 个模型", batch_path.name, len(batch_objects))
+        logger.info(f"批次 {batch_path.name}: 找到 {len(batch_objects)} 个模型")
     return batch_objects
 
 
-def scan_house3k_batches(batch_dirs: List[Path], logger=LOGGER) -> Tuple[List[Dict], int]:
+def scan_house3k_batches(batch_dirs: List[Path], logger=logger) -> Tuple[List[Dict], int]:
     """Scan all batches, returning textured objects and total scanned count."""
     all_objects: List[Dict] = []
     total_scanned = 0

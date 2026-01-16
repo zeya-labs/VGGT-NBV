@@ -48,7 +48,7 @@ from ..utils.render_utils import render_gt_point_maps
 from ..models.direct_reconstruction import build_recon_from_point_maps
 
 
-LOGGER = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class PoseEvaluationResult(NamedTuple):
@@ -157,7 +157,7 @@ class NBVTrainer(LightningModule):
     #     注意：不要编译 renderer，PyTorch3D 的渲染器通常不兼容 inductor 编译器。
     #     """
     #     if self.policy_network is not None:
-    #         LOGGER.info("Compiling Policy Network...")
+    #         logger.info("Compiling Policy Network...")
     #         # mode="reduce-overhead" 适合小网络（策略网络通常不大），可以减少 Python 调用开销
     #         # 如果策略网络很大（如 ResNet50+），改用 mode="default"
     #         self.policy_network = torch.compile(self.policy_network, mode="default")
@@ -166,7 +166,7 @@ class NBVTrainer(LightningModule):
         # MapAnything/VGGT 结构通常很复杂，编译可能会失败或导致启动极慢。
         # 如果 vggt_wrapper 内部是标准的 Transformer/CNN，可以尝试取消下面的注释：
         # if self.vggt_wrapper is not None:
-        #     LOGGER.info("Compiling VGGT Wrapper...")
+        #     logger.info("Compiling VGGT Wrapper...")
         #     # fullgraph=False 允许在无法完全捕获图时回退到 Python
         #     self.vggt_wrapper = torch.compile(self.vggt_wrapper, mode="default", fullgraph=False)
 
@@ -313,7 +313,7 @@ class NBVTrainer(LightningModule):
         rel_trans = rel_trans_flat.view(B, S, 3)
 
         _, norm_factor = normalize_pose_translations(rel_trans, return_norm_factor=True)
-        LOGGER.info(
+        logger.info(
             "Pose scale factor stats — mean: %.4f, min: %.4f, max: %.4f",
             norm_factor.mean().item(),
             norm_factor.min().item(),
@@ -463,7 +463,7 @@ class NBVTrainer(LightningModule):
         #         fov_degrees=fov_degrees,
         #         valid_masks=new_valid_masks,
         #     )
-        #     LOGGER.info(
+        #     logger.info(
         #         "Inferred depth backprojection xy_signs=%s (fov=%.2f)",
         #         self._depth_backproject_xy_signs,
         #         fov_degrees,
@@ -710,7 +710,7 @@ class NBVTrainer(LightningModule):
             randomize=backprop,
         )
         if mesh_paths is not None and len(mesh_paths) != initial_images.shape[0]:
-            LOGGER.warning(
+            logger.warning(
                 "mesh_paths length (%d) does not match batch size (%d); disable mesh logging for this batch.",
                 len(mesh_paths),
                 initial_images.shape[0],
@@ -926,13 +926,13 @@ class NBVTrainer(LightningModule):
         if step_output_dir is None:
             return
         if initial_images.ndim != 5:
-            LOGGER.warning(
+            logger.warning(
                 "Skip pre_images grid: initial_images expected [B, N, C, H, W], got %s",
                 tuple(initial_images.shape),
             )
             return
         if new_images.ndim != 4:
-            LOGGER.warning(
+            logger.warning(
                 "Skip pre_images grid: new_images expected [B, C, H, W], got %s",
                 tuple(new_images.shape),
             )
@@ -940,14 +940,14 @@ class NBVTrainer(LightningModule):
 
         batch_size, num_views, channels, height, width = initial_images.shape
         if new_images.shape[0] != batch_size:
-            LOGGER.warning(
+            logger.warning(
                 "Skip pre_images grid: batch size mismatch initial_images=%d vs new_images=%d",
                 batch_size,
                 new_images.shape[0],
             )
             return
         if tuple(new_images.shape[1:]) != (channels, height, width):
-            LOGGER.warning(
+            logger.warning(
                 "Skip pre_images grid: new_images shape %s does not match expected %s",
                 tuple(new_images.shape),
                 (batch_size, channels, height, width),

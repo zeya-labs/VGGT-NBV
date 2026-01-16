@@ -8,9 +8,7 @@ from typing import Tuple
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .logging_utils import get_logger
-
-LOGGER = get_logger(__name__)
+from .logging_utils import setup_logging
 
 
 class TextureGenerator:
@@ -37,11 +35,11 @@ class TextureGenerator:
         for font_path in font_paths:
             try:
                 font = ImageFont.truetype(font_path, size=font_size)
-                LOGGER.info("Successfully loaded font: %s", font_path)
+                logger.info("Successfully loaded font: %s", font_path)
                 return font
             except IOError:
                 continue
-        LOGGER.warning("Could not load any TrueType font, using default font")
+        logger.warning("Could not load any TrueType font, using default font")
         return ImageFont.load_default()
 
     def generate_unique_color_texture(self, filepath: str, seed: int, font_scale: float = 0.7):
@@ -59,7 +57,7 @@ class TextureGenerator:
             colors.append(color)
 
         font_size = int(self.square_size * font_scale)
-        LOGGER.info("Font size: %d, Square size: %d", font_size, self.square_size)
+        logger.info("Font size: %d, Square size: %d", font_size, self.square_size)
         font = self._load_font(font_size)
 
         for i in range(self.num_squares):
@@ -82,7 +80,7 @@ class TextureGenerator:
                 draw.text((text_x, text_y), text_content, fill=text_color, font=font)
 
         image.save(filepath)
-        LOGGER.info("Generated unique color texture and saved to %s", filepath)
+        logger.info("Generated unique color texture and saved to %s", filepath)
         return image
 
     def generate_checkerboard_texture(self, filepath: str, seed: int, font_scale: float = 0.7):
@@ -112,7 +110,7 @@ class TextureGenerator:
                 draw.text((text_x, text_y), text_content, fill=text_color, font=font)
 
         image.save(filepath)
-        LOGGER.info("Generated checkerboard texture and saved to %s", filepath)
+        logger.info("Generated checkerboard texture and saved to %s", filepath)
         return image
 
     def generate_gradient_texture(self, filepath: str, seed: int, font_scale: float = 0.7):
@@ -143,7 +141,7 @@ class TextureGenerator:
                 draw.text((text_x, text_y), text_content, fill=(255, 255, 255), font=font)
 
         image.save(filepath)
-        LOGGER.info("Generated gradient texture and saved to %s", filepath)
+        logger.info("Generated gradient texture and saved to %s", filepath)
         return image
 
 

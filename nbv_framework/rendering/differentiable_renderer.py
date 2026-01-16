@@ -14,9 +14,7 @@ import math
 import warnings
 import torch.nn.functional as F
 
-from nbv_framework.utils.logging_utils import get_logger
-
-LOGGER = get_logger(__name__)
+from loguru import logger
 
 try:
     from pytorch3d.structures import Meshes
@@ -29,7 +27,7 @@ try:
     from pytorch3d.transforms import quaternion_to_matrix
     PYTORCH3D_AVAILABLE = True
 except ImportError:
-    LOGGER.warning("PyTorch3D not available.")
+    logger.warning("PyTorch3D not available.")
     PYTORCH3D_AVAILABLE = False
 
 

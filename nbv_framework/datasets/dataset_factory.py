@@ -7,9 +7,7 @@ from typing import Dict, Any, Optional, Type
 from .base_dataset import BaseDataset
 from .synthetic_dataset import SyntheticDataset
 from .house3k_dataset import House3KDataset
-from nbv_framework.utils.logging_utils import get_logger
-
-LOGGER = get_logger(__name__)
+from loguru import logger
 
 
 class DatasetFactory:
@@ -38,7 +36,7 @@ class DatasetFactory:
             raise ValueError(f"Dataset class must inherit from BaseDataset")
         
         cls._dataset_registry[name] = dataset_class
-        LOGGER.info("Registered dataset type: %s", name)
+        logger.info("Registered dataset type: %s", name)
     
     @classmethod
     def create_dataset(

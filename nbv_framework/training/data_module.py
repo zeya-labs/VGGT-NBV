@@ -12,9 +12,7 @@ from nbv_framework.datasets.mixed_dataset import MixedDataset
 from nbv_framework.datasets.repeated_dataset import RepeatedDataset
 from nbv_framework.training.config import NBVExperimentConfig
 from nbv_framework.utils.device_utils import coerce_device, resolve_dtype
-from nbv_framework.utils.logging_utils import get_logger
-
-LOGGER = get_logger(__name__)
+from loguru import logger
 
 
 class NBVDataModule(pl.LightningDataModule):
@@ -48,11 +46,9 @@ class NBVDataModule(pl.LightningDataModule):
 
         if requested > 0:
             if not self._warned_num_workers_cuda:
-                LOGGER.warning(
-                    "Dataset uses CUDA (%s) while num_workers=%d would spawn worker processes that each "
-                    "allocate their own renderer on the GPU; forcing num_workers=0 to avoid CUDA OOM.",
-                    self.device,
-                    requested,
+                logger.warning(
+                    f"Dataset uses CUDA ({self.device}) while num_workers={requested} would spawn worker processes that each "
+                    "allocate their own renderer on the GPU; forcing num_workers=0 to avoid CUDA OOM."
                 )
                 self._warned_num_workers_cuda = True
             return 0
@@ -98,7 +94,7 @@ class NBVDataModule(pl.LightningDataModule):
     def _build_val_dataset(self) -> Optional[Dataset]:
 
         if  self.cfg.trainer.get("limit_val_batches", 1.0) == 0.0:
-            LOGGER.info("Validation disabled via trainer.limit_val_batches=0; skipping val dataset.")
+            logger.info("Validation disabled via trainer.limit_val_batches=0; skipping val dataset.")
             return None
 
         dataset = MixedDataset(

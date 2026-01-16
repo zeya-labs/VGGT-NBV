@@ -13,11 +13,9 @@ from tqdm import tqdm
 
 from ..rendering import DifferentiableRenderer
 from ..training.loss import ChamferDistance
-from nbv_framework.utils.logging_utils import get_logger
+from loguru import logger
 if TYPE_CHECKING:
     from ..models import MapAnythingWrapper, BaseNBVPolicy
-
-LOGGER = get_logger(__name__)
 
 def evaluate_nbv_policy(policy_network: "BaseNBVPolicy",
                        vggt_wrapper: "MapAnythingWrapper",
@@ -399,4 +397,4 @@ def generate_evaluation_report(comparison_results: Dict[str, Dict[str, float]],
             for metric, value in results.items():
                 f.write(f"  {metric}: {value:.6f}\n")
     
-    LOGGER.info("Evaluation report saved to %s", save_path)
+    logger.info("Evaluation report saved to %s", save_path)

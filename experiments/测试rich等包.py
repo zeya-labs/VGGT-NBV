@@ -47,7 +47,7 @@ install(show_locals=True)  # 只要加这一行！
 def divide(x, y):
     return x / y
 
-# divide(10, 0) # 触发 ZeroDivisionError
+divide(10, 0) # 触发 ZeroDivisionError
 
 
 from rich import inspect

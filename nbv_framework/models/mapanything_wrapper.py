@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import torch
 import torch.nn as nn
 
-from nbv_framework.utils.logging_utils import get_logger
+from loguru import logger
 
 # 将 map-anything 仓库加入 Python 搜索路径
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -35,8 +35,6 @@ except ModuleNotFoundError as exc:  # pragma: no cover - 运行时缺依赖由�
 
 
 from ..utils.mapanything_views import prepare_mapanything_views
-
-LOGGER = get_logger(__name__)
 
 TensorDict = Dict[str, torch.Tensor]
 PredList = List[TensorDict]
@@ -58,12 +56,12 @@ class MapAnythingWrapper(nn.Module):
         self.data_norm_type = data_norm_type
         self.memory_efficient_inference = memory_efficient_inference
 
-        LOGGER.info("Loading MapAnything model: %s", model_name)
+        logger.info("Loading MapAnything model: %s", model_name)
         self.base_model: MapAnything = MapAnything.from_pretrained(model_name, revision='6f3a25bfbb8fcc799176bb01e9d07dfb49d5416a')
         self.base_model.eval()
         for param in self.base_model.parameters():
             param.requires_grad = False
-        LOGGER.info("MapAnything model loaded and frozen successfully")
+        logger.info("MapAnything model loaded and frozen successfully")
 
         encoder_dim = getattr(self.base_model.encoder, "enc_embed_dim", None)
 

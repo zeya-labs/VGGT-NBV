@@ -29,9 +29,7 @@ from nbv_framework.utils.device_utils import (
 from nbv_framework.training.runtime_utils import set_random_seed
 from nbv_framework.training.trainer import NBVTrainer
 from nbv_framework.utils.data_utils import create_synthetic_training_data
-from nbv_framework.utils.logging_utils import get_logger
-
-LOGGER = get_logger(__name__)
+from loguru import logger
 
 
 def build_lightning_model(cfg: NBVExperimentConfig) -> NBVTrainer:
@@ -109,36 +107,29 @@ def maybe_create_synthetic_data(cfg: NBVExperimentConfig) -> None:
     if not (cfg.create_data or not os.path.exists(cfg.synthetic_data_root)):
         return
 
-    LOGGER.info("Creating synthetic training data at %s", cfg.synthetic_data_root)
+    logger.info("Creating synthetic training data at %s", cfg.synthetic_data_root)
     create_synthetic_training_data(
         output_dir=cfg.synthetic_data_root,
         num_objects=20,
         num_views_per_object=15,
         image_size=cfg.image_size,
     )
-    LOGGER.info("Synthetic data creation finished")
+    logger.info("Synthetic data creation finished")
 
 
 def configure_run(cfg: NBVExperimentConfig) -> None:
     """Populate runtime attributes and log summary."""
-    rank = int(os.environ.get("RANK", "0"))
-    local_rank = int(os.environ.get("LOCAL_RANK", str(rank)))
-    LOGGER.info(f"RANK: {rank}, LOCAL_RANK: {local_rank}")
-
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    cfg.rank = local_rank
+    cfg.is_main_process = local_rank == 0
+    
     resolved_device = resolve_device(None, local_rank)
     resolved_dtype = resolve_dtype(cfg.trainer.precision)
     cfg.device = str(resolved_device)
     cfg.tensor_dtype = dtype_to_string(resolved_dtype)
 
-    cfg.rank = local_rank
-    cfg.is_main_process = local_rank == 0
-
-    LOGGER.info(
-        "NBV Lightning run: mode=%s, device=%s, dtype=%s, rank=%d",
-        cfg.mode,
-        resolved_device,
-        resolved_dtype,
-        local_rank,
+    logger.info(
+        f"NBV Lightning run: mode={cfg.mode}, device={resolved_device}, dtype={resolved_dtype}, rank={local_rank}",
     )
 
 
@@ -147,7 +138,7 @@ def _build_components(
     runtime_device: torch.device,
     runtime_dtype: torch.dtype,
 ) -> Tuple[MapAnythingWrapper, AttentionNBVPolicy, DifferentiableRenderer, ReconstructionLoss]:
-    LOGGER.info("Setting up models on device: %s", runtime_device)
+    logger.info(f"Setting up models on device: {runtime_device}")
     mapanything = MapAnythingWrapper(
         model_name="facebook/map-anything",
     )

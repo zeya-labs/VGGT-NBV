@@ -10,10 +10,8 @@ import numpy as np
 import torch
 
 from nbv_framework.training.config import NBVExperimentConfig
-from nbv_framework.utils.logging_utils import get_logger
+from loguru import logger
 
-
-LOGGER = get_logger(__name__)
 
 
 def set_random_seed(seed: int) -> None:
@@ -27,4 +25,4 @@ def set_random_seed(seed: int) -> None:
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-    LOGGER.info("Random seed set to %d for reproducibility", seed)
+    logger.info("Random seed set to %d for reproducibility", seed)
