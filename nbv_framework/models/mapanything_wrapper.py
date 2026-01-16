@@ -9,8 +9,6 @@
 
 from __future__ import annotations
 
-import os
-import sys
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
@@ -18,21 +16,8 @@ import torch.nn as nn
 
 from loguru import logger
 
-# 将 map-anything 仓库加入 Python 搜索路径
-_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-_MAP_ANYTHING_ROOT = os.path.join(_REPO_ROOT, "map-anything")
-if _MAP_ANYTHING_ROOT not in sys.path:
-    sys.path.append(_MAP_ANYTHING_ROOT)
-
-try:  # noqa: SIM105
-    from mapanything.models import MapAnything  # type: ignore
-    from uniception.models.info_sharing.base import MultiViewTransformerInput  # type: ignore
-except ModuleNotFoundError as exc:  # pragma: no cover - 运行时缺依赖由用户环境负责
-    missing = "uniception" if "uniception" in str(exc) else "mapanything"
-    raise ModuleNotFoundError(
-        f"无法导入 {missing} 模块, 请确认 map-anything 及其依赖已正确安装"
-    ) from exc
-
+from mapanything.models import MapAnything
+from uniception.models.info_sharing.base import MultiViewTransformerInput
 
 from ..utils.mapanything_views import prepare_mapanything_views
 
@@ -56,14 +41,12 @@ class MapAnythingWrapper(nn.Module):
         self.data_norm_type = data_norm_type
         self.memory_efficient_inference = memory_efficient_inference
 
-        logger.info("Loading MapAnything model: %s", model_name)
-        self.base_model: MapAnything = MapAnything.from_pretrained(model_name, revision='6f3a25bfbb8fcc799176bb01e9d07dfb49d5416a')
+        logger.info(f"Loading MapAnything model: {model_name}")
+        self.base_model: MapAnything = MapAnything.from_pretrained(model_name, revision='6f3a25bfbb8fcc799176bb01e9d07dfb49d5416a', local_files_only=True)
         self.base_model.eval()
         for param in self.base_model.parameters():
             param.requires_grad = False
         logger.info("MapAnything model loaded and frozen successfully")
-
-        encoder_dim = getattr(self.base_model.encoder, "enc_embed_dim", None)
 
         self.default_fov_degrees: float = 60.0
 

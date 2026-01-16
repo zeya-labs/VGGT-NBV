@@ -9,8 +9,8 @@ def render_gt_point_maps(
     mesh_batch: Meshes,
     camera_poses: torch.Tensor,
     *,
-    device: Optional[torch.device] = None,
-    output_device: Optional[torch.device] = None,
+    device: Optional[torch.device] = torch.device("cpu"),
+    output_device: Optional[torch.device] = torch.device("cpu"),
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     可微渲染点云图与掩码。
@@ -19,17 +19,12 @@ def render_gt_point_maps(
         renderer: 可微渲染器实例.
         mesh_batch: Meshes 对象，长度为 B.
         camera_poses: 相机位姿，支持 [B, S, 7] 或 [B*S, 7].
-        device: 计算设备 (必须是 GPU 以支持渲染).
+        device: 计算设备.
 
     Returns:
         point_maps: [B, S, H, W, 3] (带梯度)
         valid_masks: [B, S, H, W]   (通常无梯度，视光栅化器实现而定)
     """
-    if device is None:
-        if hasattr(renderer, "device"):
-            device = renderer.device
-        else:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # 1. 维度检查与预处理
     batch_size = len(mesh_batch)

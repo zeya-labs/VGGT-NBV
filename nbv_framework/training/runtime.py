@@ -5,8 +5,6 @@ from __future__ import annotations
 import os
 from typing import Tuple
 
-import torch
-
 from omegaconf import OmegaConf
 from lightning.pytorch import Trainer
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
@@ -20,13 +18,6 @@ from nbv_framework.rendering.differentiable_renderer import DifferentiableRender
 from nbv_framework.training.config import NBVExperimentConfig
 from nbv_framework.training.data_module import NBVDataModule
 from nbv_framework.training.loss import ReconstructionLoss
-from nbv_framework.utils.device_utils import (
-    coerce_device,
-    dtype_to_string,
-    resolve_device,
-    resolve_dtype,
-)
-from nbv_framework.training.runtime_utils import set_random_seed
 from nbv_framework.training.trainer import NBVTrainer
 from nbv_framework.utils.data_utils import create_synthetic_training_data
 from loguru import logger
@@ -34,9 +25,7 @@ from loguru import logger
 
 def build_lightning_model(cfg: NBVExperimentConfig) -> NBVTrainer:
     """Instantiate the LightningModule-backed trainer with all dependencies."""
-    runtime_device = coerce_device(cfg.device)
-    runtime_dtype = resolve_dtype(cfg.tensor_dtype)
-    mapanything, policy, renderer, loss_fn = _build_components(cfg, runtime_device, runtime_dtype)
+    mapanything, policy, renderer, loss_fn = _build_components(cfg)
     return NBVTrainer(
         vggt_wrapper=mapanything,
         policy_network=policy,
@@ -49,8 +38,6 @@ def build_lightning_model(cfg: NBVExperimentConfig) -> NBVTrainer:
         learning_rate=cfg.learning_rate,
         weight_decay=cfg.weight_decay,
         log_dir=cfg.log_dir,
-        device=str(runtime_device),
-        tensor_dtype=runtime_dtype,
         use_epoch_seed=cfg.use_epoch_seed,
         enable_random_baseline=False,
         rank=cfg.rank,
@@ -123,22 +110,14 @@ def configure_run(cfg: NBVExperimentConfig) -> None:
     cfg.rank = local_rank
     cfg.is_main_process = local_rank == 0
     
-    resolved_device = resolve_device(None, local_rank)
-    resolved_dtype = resolve_dtype(cfg.trainer.precision)
-    cfg.device = str(resolved_device)
-    cfg.tensor_dtype = dtype_to_string(resolved_dtype)
-
     logger.info(
-        f"NBV Lightning run: mode={cfg.mode}, device={resolved_device}, dtype={resolved_dtype}, rank={local_rank}",
+        f"NBV Lightning run: mode={cfg.mode}, dtype={cfg.trainer.precision}, rank={local_rank}",
     )
 
 
 def _build_components(
     cfg: NBVExperimentConfig,
-    runtime_device: torch.device,
-    runtime_dtype: torch.dtype,
 ) -> Tuple[MapAnythingWrapper, AttentionNBVPolicy, DifferentiableRenderer, ReconstructionLoss]:
-    logger.info(f"Setting up models on device: {runtime_device}")
     mapanything = MapAnythingWrapper(
         model_name="facebook/map-anything",
     )
@@ -151,12 +130,9 @@ def _build_components(
     )
     renderer = DifferentiableRenderer(
         image_size=cfg.image_size,
-        device=str(runtime_device),
     )
     loss_fn = ReconstructionLoss(
         renderer=renderer,
         pose_up_axis=cfg.up_axis,
-        default_device=runtime_device,
-        tensor_dtype=runtime_dtype,
     )
     return mapanything, policy, renderer, loss_fn

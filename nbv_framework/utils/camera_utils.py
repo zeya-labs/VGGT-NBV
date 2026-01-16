@@ -200,33 +200,6 @@ class CameraPoseGenerator:
             return json.load(f)
 
 
-def pose_dict_to_tensor(
-    pose_dict: Dict[str, List[float]],
-    device: Union[str, torch.device] = "cuda",
-    dtype: Optional[torch.dtype] = None,
-) -> torch.Tensor:
-    """
-    将相机位姿字典转换为张量格式
-
-    Args:
-        pose_dict: 包含position和quaternion的字典
-        device: 计算设备
-        dtype: 输出张量 dtype（默认使用 torch.get_default_dtype()）
-
-    Returns:
-        pose_tensor: 相机位姿张量 [1, 7] (x, y, z, qx, qy, qz, qw)
-    """
-    position = pose_dict["position"]
-    quaternion = pose_dict["quaternion"]
-
-    if dtype is None:
-        dtype = torch.get_default_dtype()
-
-    pose_tensor = torch.as_tensor([position + quaternion], dtype=dtype, device=device)
-
-    return pose_tensor
-
-
 def tensor_to_pose_dict(pose_tensor: torch.Tensor) -> Dict[str, List[float]]:
     """
     将相机位姿张量转换为字典格式

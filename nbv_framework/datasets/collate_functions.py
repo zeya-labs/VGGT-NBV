@@ -57,7 +57,7 @@ def get_collate_fn(dataset_type: str = "nbv"):
     Returns:
         对应的collate函数
     """
-    if dataset_type in ["nbv", "synthetic", "shapenet", "modelnet"]:
+    if dataset_type in ["nbv"]:
         return custom_nbv_collate_fn
     else:
         return default_collate

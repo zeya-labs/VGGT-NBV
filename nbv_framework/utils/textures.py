@@ -8,8 +8,6 @@ from typing import Tuple
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .logging_utils import setup_logging
-
 
 class TextureGenerator:
     """

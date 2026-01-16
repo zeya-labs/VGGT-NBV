@@ -39,15 +39,8 @@ def create_data_loader(
     Returns:
         数据加载器
     """
-    # 如果没有指定collate函数，根据数据集类型自动选择
     if collate_fn is None:
-        dataset_class_name = dataset.__class__.__name__.lower()
-        # 映射数据集类名到类型名
-        if "synthetic" in dataset_class_name:
-            dataset_type = "synthetic"
-        else:
-            dataset_type = "nbv"  # 默认类型
-
+        dataset_type = "nbv"
         collate_fn = get_collate_fn(dataset_type)
 
     multiprocessing_context = None

@@ -67,10 +67,7 @@ class BaseDataset(Dataset, ABC):
         self.data_list = self._load_data_list()
         
         logger.info(
-            "[%s] Loaded %d samples for %s split",
-            self.__class__.__name__,
-            len(self.data_list),
-            split,
+            f"[{self.__class__.__name__}] Loaded {len(self.data_list)} samples for {split} split"
         )
         logger.info(
             f"Mesh normalization: {normalize_method}, Sample points: {num_samples}",

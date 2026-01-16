@@ -13,7 +13,7 @@ from .evaluation import evaluate_nbv_policy
 
 from .coordinate_utils import get_up_vector, get_coordinate_transform_matrix, apply_transform_to_vertices
 from .mesh_generator import MeshGenerator, create_pytorch3d_mesh
-from .camera_utils import CameraPoseGenerator, pose_dict_to_tensor, tensor_to_pose_dict, position_to_pose_tensor
+from .camera_utils import CameraPoseGenerator, tensor_to_pose_dict, position_to_pose_tensor
 from .mapanything_views import (
     compute_pinhole_intrinsics,
     pose7d_to_opencv_cam2world_with_official_func,
@@ -39,7 +39,6 @@ __all__ = [
     "MeshGenerator",
     "create_pytorch3d_mesh",
     "CameraPoseGenerator",
-    "pose_dict_to_tensor",
     "tensor_to_pose_dict",
     "position_to_pose_tensor",
     "compute_pinhole_intrinsics",

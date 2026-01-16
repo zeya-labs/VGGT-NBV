@@ -34,7 +34,6 @@ except ImportError:
 class DifferentiableRenderer(nn.Module):
     def __init__(self, 
                  image_size: int = 518,
-                 device: str = "cuda",
                  fov: float = 60.0):
         """
         初始化可微分渲染器
@@ -45,7 +44,6 @@ class DifferentiableRenderer(nn.Module):
             raise ImportError("PyTorch3D is required.")
         
         self.image_size = image_size
-        self.device = torch.device(device)
         self.default_fov = fov
         
         # --- 1. 渲染设置 ---
@@ -58,20 +56,20 @@ class DifferentiableRenderer(nn.Module):
         
         # --- 2. 材质与混合参数 ---
         self.blend_params = BlendParams(background_color=(0.0, 0.0, 0.0))
-        self.materials = Materials(device=self.device, shininess=128.0)
+        self.materials = Materials(shininess=128.0)
         
         # --- 3. 组件初始化 ---
         # 光栅化器 (负责几何投影)
         self.rasterizer = MeshRasterizer(raster_settings=self.raster_settings)
         # 着色器 (负责颜色计算)
         self.shader = SoftPhongShader(
-            device=self.device,
             materials=self.materials,
             blend_params=self.blend_params
         )
 
     def _get_cameras(self, camera_poses: torch.Tensor, pose_format: str, fov: float):
         """内部帮助函数：构建相机对象"""
+        device = camera_poses.device
         # 1. 数据清洗与转换
         camera_poses = camera_poses.float()
         
@@ -109,7 +107,7 @@ class DifferentiableRenderer(nn.Module):
         # T = -C @ R
         T = -(positions.unsqueeze(1) @ R).squeeze(1)
 
-        return FoVPerspectiveCameras(device=self.device, R=R, T=T, fov=fov)
+        return FoVPerspectiveCameras(device=device, R=R, T=T, fov=fov)
 
     def forward(self, 
                 gt_mesh: Meshes,
@@ -133,17 +131,22 @@ class DifferentiableRenderer(nn.Module):
             Dict containing keys: 'rgb', 'depth', 'points', 'mask' based on requests.
             All tensors are [B, C, H, W].
         """
+        # PyTorch3D requires meshes / cameras / lights / materials to be on the same device.
+        device = gt_mesh.device
+        if camera_poses.device != device:
+            camera_poses = camera_poses.to(device)
+
+        # Move shader-side tensor properties (materials/lights/cameras) to the render device.
+        # This fixes device mismatch errors when the renderer module was constructed on CPU
+        # but later used on GPU (or vice versa).
+        self.shader.to(device)
         fov = fov if fov is not None else self.default_fov
         
-        # 强制 float32 避免 AMP 问题
-        with torch.amp.autocast(device_type=self.device.type, enabled=False):
-            gt_mesh = gt_mesh.to(self.device)
-            camera_poses = camera_poses.to(self.device, dtype=torch.float32)
-            
+        with torch.amp.autocast(device_type=device.type, enabled=False):
             # 1. 创建相机
             cameras = self._get_cameras(camera_poses, pose_format, fov)
             
-            # 2. 光栅化 (只执行一次)
+            # 2. 光栅化
             # fragments 包含: pix_to_face, zbuf, bary_coords, dists
             # shape: [B, H, W, K], K=8 (Medium settings)
             fragments = self.rasterizer(gt_mesh, cameras=cameras)
@@ -159,7 +162,7 @@ class DifferentiableRenderer(nn.Module):
             # --- RGB 计算 (纯环境光) ---
             if out_rgb:
                 # 构造纯白环境光，无镜面反射
-                lights = PointLights(device=self.device, ambient_color=((1.0, 1.0, 1.0),))
+                lights = PointLights(device=device, ambient_color=((1.0, 1.0, 1.0),))
                 # Shader 会利用所有 K=8 个面进行加权混合 (抗锯齿)
                 images = self.shader(fragments, gt_mesh, cameras=cameras, lights=lights)
                 # [B, H, W, 4] -> [B, 3, H, W]

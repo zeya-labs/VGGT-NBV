@@ -8,10 +8,9 @@ import os
 from typing import Dict, List
 
 from .mesh_generator import MeshGenerator, create_pytorch3d_mesh
-from .camera_utils import CameraPoseGenerator, pose_dict_to_tensor
+from .camera_utils import CameraPoseGenerator
 from ..rendering.differentiable_renderer import DifferentiableRenderer
 from .textures import TextureGenerator
-from .logging_utils import setup_logging
 
 
 class SyntheticDataGenerator:

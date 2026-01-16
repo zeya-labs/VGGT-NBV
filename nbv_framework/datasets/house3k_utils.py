@@ -66,7 +66,7 @@ def scan_batch_directory(batch_path: Path, logger=logger) -> List[Dict]:
             }
         )
 
-        logger.info(f"批次 {batch_path.name}: 找到 {len(batch_objects)} 个模型")
+    logger.info(f"批次 {batch_path.name}: 找到 {len(batch_objects)} 个模型")
     return batch_objects
 
 

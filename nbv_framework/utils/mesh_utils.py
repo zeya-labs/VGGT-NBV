@@ -133,8 +133,6 @@ def load_and_normalize_mesh(
 
     sampled_points = sample_points_from_meshes(normalized_mesh, num_samples=num_samples)
 
-
-
     return {
         "mesh_path": mesh_path,
         "original_mesh": mesh,

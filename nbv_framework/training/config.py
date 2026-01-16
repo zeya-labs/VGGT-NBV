@@ -47,7 +47,7 @@ class NBVExperimentConfig:
     # Optimizer & trainer controls
     learning_rate: float = 1e-5
     batch_size: int = 1
-    num_workers: int = 8
+    num_workers: int = 16
     max_epochs: int = 1000
     normalize_method: str = "mean"
     num_samples: int = 100000

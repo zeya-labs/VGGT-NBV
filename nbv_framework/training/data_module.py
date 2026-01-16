@@ -11,7 +11,6 @@ from nbv_framework.datasets.data_loaders import create_train_loader, create_val_
 from nbv_framework.datasets.mixed_dataset import MixedDataset
 from nbv_framework.datasets.repeated_dataset import RepeatedDataset
 from nbv_framework.training.config import NBVExperimentConfig
-from nbv_framework.utils.device_utils import coerce_device, resolve_dtype
 from loguru import logger
 
 
@@ -29,67 +28,42 @@ class NBVDataModule(pl.LightningDataModule):
     def __init__(self, cfg: NBVExperimentConfig) -> None:
         super().__init__()
         self.cfg = cfg
-        self.device = coerce_device(getattr(cfg, "device", None))
-        dtype = getattr(cfg, "tensor_dtype", None)
-        self.tensor_dtype = resolve_dtype(dtype)
         self.train_dataset: Optional[Dataset] = None
         self.val_dataset: Optional[Dataset] = None
         self._warned_num_workers_cuda: bool = False
 
-    def _effective_num_workers(self) -> int:
-        requested = int(getattr(self.cfg, "num_workers", 8))
-        if requested < 0:
-            raise ValueError(f"num_workers must be >= 0, got {requested}")
-
-        if self.device.type != "cuda":
-            return requested
-
-        if requested > 0:
-            if not self._warned_num_workers_cuda:
-                logger.warning(
-                    f"Dataset uses CUDA ({self.device}) while num_workers={requested} would spawn worker processes that each "
-                    "allocate their own renderer on the GPU; forcing num_workers=0 to avoid CUDA OOM."
-                )
-                self._warned_num_workers_cuda = True
-            return 0
-        return requested
-
     def setup(self, stage: Optional[str] = None) -> None:
-        if stage not in (None, "fit"):
-            return
-
-        self.train_dataset = self._build_train_dataset()
-        self.val_dataset = self._build_val_dataset()
+        if stage == 'fit' or stage is None:
+            print("正在加载训练和验证数据...")
+            self.train_dataset = self._build_train_dataset()
+            self.val_dataset = self._build_val_dataset()
+        if stage == 'test' or stage is None:
+            print("正在加载测试数据...")
+            self.test_dataset = self._build_test_dataset()
 
     def train_dataloader(self) -> DataLoader:
-        if self.train_dataset is None:
-            raise RuntimeError("train_dataset not initialized; did you call setup()?")
-        num_workers = self._effective_num_workers()
         return create_train_loader(
             self.train_dataset,
             batch_size=self.cfg.batch_size,
-            num_workers=num_workers,
+            num_workers=self.cfg.num_workers,
         )
 
     def val_dataloader(self) -> Optional[DataLoader]:
-        if self.val_dataset is None:
-            return None
-        num_workers = self._effective_num_workers()
         return create_val_loader(
             self.val_dataset,
             batch_size=self.cfg.batch_size,
-            num_workers=num_workers,
+            num_workers=self.cfg.num_workers,
         )
 
     def _build_train_dataset(self) -> Dataset:
         dataset = MixedDataset(
             dataset_configs=[self._house3k_config(split="train")],
-            seed=42,
+            seed=self.cfg.seed,
         )
         repeat_factor = max(1, int(self.cfg.train_repeat_factor))
         if repeat_factor > 1:
-            dataset = RepeatedDataset(dataset, repeat_factor)  # type: ignore[arg-type]
-        return dataset  # type: ignore[return-value]
+            dataset = RepeatedDataset(dataset, repeat_factor)
+        return dataset
 
     def _build_val_dataset(self) -> Optional[Dataset]:
 
@@ -99,13 +73,13 @@ class NBVDataModule(pl.LightningDataModule):
 
         dataset = MixedDataset(
             dataset_configs=[self._house3k_config(split="val")],
-            seed=42,
+            seed=self.cfg.seed,
         )
 
         repeat_factor = max(1, int(getattr(self.cfg, "val_repeat_factor", 1)))
         if repeat_factor > 1:
-            dataset = RepeatedDataset(dataset, repeat_factor)  # type: ignore[arg-type]
-        return dataset  # type: ignore[return-value]
+            dataset = RepeatedDataset(dataset, repeat_factor)
+        return dataset
 
     def _house3k_config(self, split: str) -> dict:
         data_root = (
@@ -129,6 +103,4 @@ class NBVDataModule(pl.LightningDataModule):
             "view_sampling_mode": getattr(self.cfg, "view_sampling_mode", "deterministic_per_call"),
             "view_sampling_seed": getattr(self.cfg, "view_sampling_seed", None),
             "process_rank": getattr(self.cfg, "rank", 0),
-            "device": str(self.device),#"cpu", #
-            "tensor_dtype": self.tensor_dtype,
         }

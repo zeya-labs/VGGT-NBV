@@ -33,8 +33,6 @@ class ReconstructionLoss(nn.Module):
         pose_outer_radius: float = 3.5,
         pose_inner_radius: float = 2.5,
         pose_floor_margin: float = 1.0,
-        default_device: Optional[torch.device] = None,
-        tensor_dtype: torch.dtype = torch.float32,
         use_log_warp_for_chamfer: bool = False,
     ) -> None:
         super().__init__()
@@ -65,8 +63,6 @@ class ReconstructionLoss(nn.Module):
             inner_radius=pose_inner_radius,
             floor_margin=pose_floor_margin,
         )
-        self.default_device = default_device or torch.device("cpu")
-        self.tensor_dtype = tensor_dtype
 
     # ---------- helpers ----------
 
@@ -101,8 +97,8 @@ class ReconstructionLoss(nn.Module):
         point_cloud_dir: Optional[str] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, float]]]:
 
-        device = self.default_device
-        dtype = self.tensor_dtype
+        device = combined_images_batch.device
+        dtype = combined_images_batch.dtype
 
         total_loss = torch.zeros((), device=device, dtype=dtype)
         loss_components: Dict[str, float] = {}

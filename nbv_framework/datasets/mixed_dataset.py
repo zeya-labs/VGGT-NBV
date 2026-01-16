@@ -21,11 +21,7 @@ class MixedDataset(Dataset):
     the requested global index.
     """
 
-    def __init__(self, dataset_configs: List[Dict[str, Any]], seed: Optional[int] = None) -> None:
-        if not dataset_configs:
-            raise ValueError("dataset_configs must contain at least one dataset configuration")
-
-        # ``seed`` is propagated to child datasets to keep their sampling deterministic.
+    def __init__(self, dataset_configs: List[Dict[str, Any]], seed: int = 42) -> None:
         self.dataset_configs = dataset_configs
         self.seed = seed
 
@@ -37,8 +33,7 @@ class MixedDataset(Dataset):
         total = 0
         for index, config in enumerate(dataset_configs):
             config_with_seed = config.copy()
-            if "seed" not in config_with_seed and self.seed is not None:
-                config_with_seed["seed"] = self.seed
+            config_with_seed["seed"] = self.seed
             dataset = DatasetFactory.create_from_config(config_with_seed)
 
             dataset_name = config.get("name", f"dataset_{index}")
@@ -51,13 +46,12 @@ class MixedDataset(Dataset):
             total += dataset_length
             self.cumulative_lengths.append(total)
 
-        if total == 0:
-            raise ValueError("All configured datasets are empty; MixedDataset has no samples to expose")
+        assert total > 0, "All configured datasets are empty; MixedDataset has no samples to expose"
 
         self.total_length = total
         self._epoch: int = 0
 
-        logger.info("混合数据集创建成功 (deterministic mode):")
+        logger.info("数据集创建成功:")
         for name, length in zip(self.dataset_names, self.dataset_lengths):
             logger.info("  - %s: %d 样本", name, length)
         logger.info("总计: %d 样本", self.total_length)
@@ -69,9 +63,7 @@ class MixedDataset(Dataset):
         dataset_idx, sample_idx = self._resolve_indices(idx)
         sample = self.datasets[dataset_idx][sample_idx]
 
-        # Annotate provenance under the meta namespace，保持批次结构一致
-        if not isinstance(sample, dict):
-            raise TypeError("MixedDataset expects child datasets to return dict samples")
+        assert isinstance(sample, dict), "MixedDataset expects child datasets to return dict samples"
 
         meta = sample.setdefault("meta", {})
         meta["source_dataset"] = self.dataset_names[dataset_idx]
@@ -80,14 +72,26 @@ class MixedDataset(Dataset):
         return sample
 
     def _resolve_indices(self, idx: int) -> Tuple[int, int]:
-        """Translate a global index into ``(dataset_idx, local_sample_idx)``."""
+        """
+        将全局索引映射为子数据集索引和局部样本索引。
+        
+        该方法首先处理负数索引，然后使用二分查找（bisect）在累积长度列表中
+        快速定位全局索引所属的子数据集。
 
-        if self.total_length == 0:
-            raise IndexError("MixedDataset is empty; no indices are valid")
+        Args:
+            idx (int): 全局索引 (支持 Python 风格的负数索引)。
 
+        Returns:
+            Tuple[int, int]: 一个包含两个整数的元组:
+                - dataset_idx: 目标数据站在 self.datasets 中的列表索引。
+                - sample_idx: 样本在目标数据集内部的局部索引。
+
+        Raises:
+            AssertionError: 如果索引超出了数据集的总长度范围。
+        """
         adjusted_idx = idx + self.total_length if idx < 0 else idx
-        if adjusted_idx < 0 or adjusted_idx >= self.total_length:
-            raise IndexError(f"Index {idx} is out of range for MixedDataset of length {self.total_length}")
+        assert 0 <= adjusted_idx < self.total_length, \
+            f"Index {idx} is out of range for MixedDataset of length {self.total_length}"
 
         dataset_idx = bisect_right(self.cumulative_lengths, adjusted_idx)
         dataset_start = 0 if dataset_idx == 0 else self.cumulative_lengths[dataset_idx - 1]
@@ -95,7 +99,20 @@ class MixedDataset(Dataset):
         return dataset_idx, sample_idx
 
     def get_dataset_info(self) -> Dict[str, Any]:
-        """Return descriptive metadata about the mixed dataset."""
+        """
+        返回关于混合数据集的详细信息。
+
+        Returns:
+            Dict[str, Any]: 包含以下键值对的字典:
+                - mixed_dataset: 始终为 True，用于标识这是一个混合数据集。
+                - total_samples: 混合数据集的总样本数。
+                - num_datasets: 包含在混合数据集中的子数据集数量。
+                - datasets: 一个列表，每个元素都是一个字典，包含子数据集的详细信息，包括:
+                    - name: 子数据集的名称。
+                    - type: 子数据集的类名。
+                    - samples: 子数据集中的样本数。
+                    - info: 子数据集的额外信息（如果有）。
+        """
 
         return {
             "mixed_dataset": True,
@@ -122,5 +139,4 @@ class MixedDataset(Dataset):
         """将当前epoch传递给所有子数据集以获得一致的采样。"""
         self._epoch = int(epoch)
         for dataset in self.datasets:
-            if hasattr(dataset, "set_epoch"):
-                dataset.set_epoch(epoch)
+            dataset.set_epoch(epoch)
