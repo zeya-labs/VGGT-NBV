@@ -12,7 +12,6 @@ NBV框架数据集模块
 from .base_dataset import BaseDataset
 
 # 具体数据集实现
-from .synthetic_dataset import SyntheticDataset
 from .mixed_dataset import MixedDataset
 from .repeated_dataset import RepeatedDataset
 

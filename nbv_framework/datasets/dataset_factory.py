@@ -5,7 +5,6 @@
 
 from typing import Dict, Any, Optional, Type
 from .base_dataset import BaseDataset
-from .synthetic_dataset import SyntheticDataset
 from .house3k_dataset import House3KDataset
 from loguru import logger
 

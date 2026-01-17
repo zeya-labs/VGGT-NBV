@@ -49,7 +49,7 @@ class DifferentiableRenderer(nn.Module):
         # --- 1. 渲染设置 ---
         self.raster_settings = RasterizationSettings(
             image_size=image_size,
-            blur_radius=1e-4, 
+            blur_radius=1e-5, 
             faces_per_pixel=8, 
             perspective_correct=False,
         )

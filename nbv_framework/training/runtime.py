@@ -19,7 +19,6 @@ from nbv_framework.training.config import NBVExperimentConfig
 from nbv_framework.training.data_module import NBVDataModule
 from nbv_framework.training.loss import ReconstructionLoss
 from nbv_framework.training.trainer import NBVTrainer
-from nbv_framework.utils.data_utils import create_synthetic_training_data
 from loguru import logger
 
 
@@ -87,22 +86,6 @@ def build_trainer(cfg: NBVExperimentConfig, profiler: Profiler) -> Trainer:
 
 def build_datamodule(cfg: NBVExperimentConfig) -> NBVDataModule:
     return NBVDataModule(cfg)
-
-@rank_zero_only
-def maybe_create_synthetic_data(cfg: NBVExperimentConfig) -> None:
-    """Optionally create synthetic data upfront."""
-    if not (cfg.create_data or not os.path.exists(cfg.synthetic_data_root)):
-        return
-
-    logger.info("Creating synthetic training data at %s", cfg.synthetic_data_root)
-    create_synthetic_training_data(
-        output_dir=cfg.synthetic_data_root,
-        num_objects=20,
-        num_views_per_object=15,
-        image_size=cfg.image_size,
-    )
-    logger.info("Synthetic data creation finished")
-
 
 def configure_run(cfg: NBVExperimentConfig) -> None:
     """Populate runtime attributes and log summary."""

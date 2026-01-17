@@ -1,0 +1,37 @@
+[project]
+name = "vggt-nbv"
+version = "0.1.0"
+description = "NBV Deep Learning Project"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "numpy",
+    "torch>=2.6.0",
+    "torchvision",
+    "torchaudio",
+    "mapanything",
+    "lovely-tensors>=0.1.20",
+    "icecream>=2.1.9",
+    "rich>=14.2.0",
+    "loguru>=0.7.3",
+    "lightning>=2.6.0",
+    "wandb>=0.24.0",
+    "pytorch3d",
+]
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch" }]
+torchvision = [{ index = "pytorch" }]
+torchaudio = [{ index = "pytorch" }]
+mapanything = { workspace = true, editable = true }
+pytorch3d = { git = "https://github.com/facebookresearch/pytorch3d.git", rev = "stable" }
+
+[tool.uv.workspace]
+members = [
+    "map-anything",
+]
