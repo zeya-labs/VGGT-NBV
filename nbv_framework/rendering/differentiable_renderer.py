@@ -1,34 +1,22 @@
 """
-可微分渲染器 (Refactored)
-
-使用PyTorch3D实现可微分渲染。
-- 质量锁定为 Medium (抗锯齿)
-- 光照锁定为 Ambient (环境光)
-- 支持灵活输出 RGB / Depth / Point Cloud / Mask
+可微分渲染器]
 """
 
 import torch
 import torch.nn as nn
 from typing import Tuple, Optional, Dict, Union
-import math
 import warnings
-import torch.nn.functional as F
 
 from loguru import logger
 
-try:
-    from pytorch3d.structures import Meshes
-    from pytorch3d.renderer import (
-        FoVPerspectiveCameras, RasterizationSettings, 
-        MeshRasterizer, SoftPhongShader, PointLights, BlendParams,
-        Materials
-    )
-    from pytorch3d.renderer.mesh.utils import interpolate_face_attributes
-    from pytorch3d.transforms import quaternion_to_matrix
-    PYTORCH3D_AVAILABLE = True
-except ImportError:
-    logger.warning("PyTorch3D not available.")
-    PYTORCH3D_AVAILABLE = False
+from pytorch3d.structures import Meshes
+from pytorch3d.renderer import (
+    FoVPerspectiveCameras, RasterizationSettings, 
+    MeshRasterizer, SoftPhongShader, PointLights, BlendParams,
+    Materials
+)
+from pytorch3d.renderer.mesh.utils import interpolate_face_attributes
+from pytorch3d.transforms import quaternion_to_matrix
 
 
 class DifferentiableRenderer(nn.Module):
@@ -40,16 +28,13 @@ class DifferentiableRenderer(nn.Module):
         """
         super().__init__()
         
-        if not PYTORCH3D_AVAILABLE:
-            raise ImportError("PyTorch3D is required.")
-        
         self.image_size = image_size
         self.default_fov = fov
         
         # --- 1. 渲染设置 ---
         self.raster_settings = RasterizationSettings(
             image_size=image_size,
-            blur_radius=1e-5, 
+            blur_radius=1e-4, 
             faces_per_pixel=8, 
             perspective_correct=False,
         )

@@ -113,13 +113,13 @@ class NBVTrainer(LightningModule):
         )
         self.log_dir = log_dir
         self.use_epoch_seed = use_epoch_seed
-        self.enable_random_baseline = bool(enable_random_baseline)
+        self.enable_random_baseline = enable_random_baseline
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
 
         self.min_initial_views = min_initial_views
         self.max_initial_views = max_initial_views
-        self.randomize_initial_views = bool(randomize_initial_views)
+        self.randomize_initial_views = randomize_initial_views
         self._last_initial_view_count = 0
         self._last_initial_view_indices: Optional[torch.Tensor] = None
 
@@ -130,13 +130,6 @@ class NBVTrainer(LightningModule):
         self._last_predicted_relative_position: Optional[torch.Tensor] = None
         self._last_next_camera_pose: Optional[torch.Tensor] = None
         self._last_new_point_maps_render: Optional[torch.Tensor] = None
-
-    def _configure_policy_mode(self, backprop: bool) -> None:
-        """根据是否反向传播设置策略网络模式。"""
-        if backprop:
-            self.policy_network.train()
-        else:
-            self.policy_network.eval()
 
     # def configure_model(self):
     #     """
@@ -655,7 +648,6 @@ class NBVTrainer(LightningModule):
     def _process_batch(
         self,
         batch: Dict[str, torch.Tensor],
-        backprop: bool = True,
     ) -> Tuple[torch.Tensor, Dict[str, float], Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         单个训练步骤
@@ -670,7 +662,6 @@ class NBVTrainer(LightningModule):
             new_images: 渲染的新视图
             initial_images: 初始视图
         """
-        self._configure_policy_mode(backprop)
 
         inputs = batch.get("inputs", {})
         targets = batch.get("targets", {})
@@ -694,7 +685,7 @@ class NBVTrainer(LightningModule):
             initial_images,
             camera_poses_batch,
             depth_z=depth_z_batch,
-            randomize=backprop,
+            randomize=self.trainer.training,
         )
         if mesh_paths is not None and len(mesh_paths) != initial_images.shape[0]:
             logger.warning(
@@ -728,9 +719,9 @@ class NBVTrainer(LightningModule):
             camera_poses_batch,
         )
 
-        pose_log_step = self.global_step if backprop else None
+        pose_log_step = self.global_step if self.trainer.training else None
         self._log_camera_pose_stats(next_camera_pose, predicted_relative_position, pose_log_step)
-        if backprop:
+        if self.trainer.training:
             try:
                 predicted_relative_position.retain_grad()
                 next_camera_pose.retain_grad()
@@ -741,7 +732,7 @@ class NBVTrainer(LightningModule):
                 self._last_next_camera_pose = None
 
         step_output_dir = None
-        if backprop:
+        if self.trainer.training:
             step_output_dir = os.path.join(
                 self.log_dir,
                 "images",
@@ -764,10 +755,9 @@ class NBVTrainer(LightningModule):
         self._log_new_view_diagnostics(
             new_images=new_images,
             new_depth_z=policy_eval.depth_z,
-            backprop=backprop,
         )
 
-        if backprop and step_output_dir is not None:
+        if self.trainer.training and step_output_dir is not None:
             self._save_pre_images_grid(
                 initial_images=initial_images,
                 new_images=new_images,
@@ -777,7 +767,7 @@ class NBVTrainer(LightningModule):
         random_chamfer: Optional[float] = None
         random_images = None
         random_position_norm_mean = None
-        if backprop and self.enable_random_baseline:
+        if self.trainer.training and self.enable_random_baseline:
             random_chamfer, random_images, random_position_norm_mean = self._compute_random_baseline(
                 initial_images=initial_images,
                 camera_poses_batch=camera_poses_batch,
@@ -810,7 +800,7 @@ class NBVTrainer(LightningModule):
             loss_dict["random_chamfer_loss"] = float(random_chamfer)
         loss_dict["num_initial_views"] = float(active_view_count)
 
-        if backprop:
+        if self.trainer.training:
             self._log_training_metrics(loss_dict, active_view_count)
             self._log_random_baseline(
                 loss_dict=loss_dict,
@@ -861,7 +851,6 @@ class NBVTrainer(LightningModule):
         if random_chamfer is None:
             return
 
-        step = int(self.global_step)
         self.log(
             "train/random_baseline_chamfer_loss",
             float(random_chamfer),
@@ -966,10 +955,9 @@ class NBVTrainer(LightningModule):
         *,
         new_images: torch.Tensor,
         new_depth_z: Optional[torch.Tensor],
-        backprop: bool,
     ) -> None:
         """记录新视图渲染质量诊断，帮助定位纯黑/空视角导致的梯度尖峰。"""
-        if not backprop:
+        if not self.trainer.training:
             return
         if new_images.numel() == 0:
             return
@@ -1023,7 +1011,7 @@ class NBVTrainer(LightningModule):
         self.world_size = self.trainer.world_size
 
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
-        loss, loss_dict, _, _ = self._process_batch(batch, backprop=True)
+        loss, loss_dict, _, _ = self._process_batch(batch)
         self.log(
             "train/total_loss",
             loss,
@@ -1035,7 +1023,7 @@ class NBVTrainer(LightningModule):
         return loss
 
     def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
-        loss, loss_dict, _, _ = self._process_batch(batch, backprop=False)
+        loss, loss_dict, _, _ = self._process_batch(batch)
         self.log(
             "val/total_loss",
             loss,
