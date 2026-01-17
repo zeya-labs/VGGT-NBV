@@ -17,7 +17,6 @@ from nbv_framework.training.runtime import (
     build_datamodule,
     build_lightning_model,
     build_trainer,
-    configure_run,
 )
 
 cs = ConfigStore.instance()
@@ -28,7 +27,6 @@ def main(cfg: NBVExperimentConfig) -> None:
     setup_logging()
     try:
         seed_everything(cfg.seed, workers=True)
-        configure_run(cfg)
         model = build_lightning_model(cfg)
         datamodule = build_datamodule(cfg)
 

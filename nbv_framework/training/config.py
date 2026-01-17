@@ -27,15 +27,9 @@ class NBVExperimentConfig:
 
     # High-level job controls
     mode: str = "train"
-    create_data: bool = False
     resume_checkpoint: Optional[str] = None
     auto_resume: bool = True
     seed: int = 42
-
-    # Distributed runtime metadata
-    rank: int = 0
-    local_rank: int = 0
-    is_main_process: bool = True
 
     # Model / policy hyperparameters
     scene_feature_dim: int = 768

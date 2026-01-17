@@ -78,11 +78,8 @@ class NBVTrainer(LightningModule):
                  learning_rate: float = 1e-4,
                  weight_decay: float = 1e-5,
                  log_dir: str = "runs/nbv_experiment",
-                 device: str = "cuda",
-                 tensor_dtype: torch.dtype = torch.float32,
                  use_epoch_seed: bool = False,
-                 enable_random_baseline: bool = True,
-                 rank: int = 0):
+                 enable_random_baseline: bool = True):
         """
         初始化训练器
 
@@ -97,23 +94,15 @@ class NBVTrainer(LightningModule):
             learning_rate: 学习率
             weight_decay: 权重衰减
             log_dir: 训练日志/可视化输出目录
-            device: 计算设备
-            tensor_dtype: 浮点张量默认dtype
             enable_random_baseline: 是否计算随机基线视角的 Chamfer 统计
-            distributed: 是否启用分布式训练
-            rank: 当前进程的全局rank
         """
         super().__init__()
-
-        device = torch.device(device)
 
         self.vggt_wrapper = vggt_wrapper
         self.policy_network = policy_network
         self.renderer = renderer
         self.loss_fn = loss_fn
         self.max_epochs = max_epochs
-        self.runtime_device = device
-        self.tensor_dtype = tensor_dtype
         self.save_hyperparameters(
             ignore=[
                 "vggt_wrapper",
@@ -125,8 +114,6 @@ class NBVTrainer(LightningModule):
         self.log_dir = log_dir
         self.use_epoch_seed = use_epoch_seed
         self.enable_random_baseline = bool(enable_random_baseline)
-        self.rank = int(rank)
-        self.is_main_process = True
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
 
@@ -477,7 +464,7 @@ class NBVTrainer(LightningModule):
         #     xy_signs=self._depth_backproject_xy_signs,
         # )
 
-        # if self.training and self.is_main_process:
+        # if self.training and self.trainer.is_global_zero:
         #     with torch.no_grad():
         #         diff_l2 = (new_point_maps - new_point_maps_render).norm(dim=-1)  # [B, S, H, W]
         #         if new_valid_masks.any():
@@ -558,7 +545,7 @@ class NBVTrainer(LightningModule):
         axis_index = {"X": 0, "Y": 1, "Z": 2}.get(up_axis, 1)
         min_height = -floor_margin
 
-        dtype = self.tensor_dtype
+        dtype = self.dtype
         positions = torch.zeros(batch_size, 3, device=device, dtype=dtype)
         filled = 0
         attempts = 0
@@ -759,7 +746,7 @@ class NBVTrainer(LightningModule):
                 self.log_dir,
                 "images",
                 f"step_{self.global_step:06d}",
-                f"rank_{self.rank:02d}",
+                f"rank_{self.global_rank:02d}",
             )
 
         policy_eval = self._evaluate_candidate_pose(
@@ -892,7 +879,7 @@ class NBVTrainer(LightningModule):
                 prog_bar=False,
                 sync_dist=self.world_size > 1,
             )
-        if not self.is_main_process:
+        if not self.trainer.is_global_zero:
             return
         if random_images is None or step_output_dir is None:
             return
@@ -921,7 +908,7 @@ class NBVTrainer(LightningModule):
             - Rows: samples in the batch (B)
             - Cols: N initial views, then the generated (N+1)-th NBV view
         """
-        if not self.is_main_process:
+        if not self.trainer.is_global_zero:
             return
         if step_output_dir is None:
             return
@@ -1034,7 +1021,6 @@ class NBVTrainer(LightningModule):
 
     def setup(self, stage=None):
         self.world_size = self.trainer.world_size
-        self.is_main_process = bool(self.trainer.is_global_zero)
 
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
         loss, loss_dict, _, _ = self._process_batch(batch, backprop=True)
@@ -1192,12 +1178,12 @@ class NBVTrainer(LightningModule):
     def transfer_batch_to_device(self, batch: Dict[str, torch.Tensor], device: torch.device, dataloader_idx: int):
         """递归迁移 inputs/targets 到设备，float 张量统一 float32。meta 保持在 CPU。"""
 
-        tensor_dtype = self.tensor_dtype
+        dtype = self.dtype
 
         def move_item(x):
             if isinstance(x, torch.Tensor):
                 moved = x.to(device)
-                return moved.to(dtype=tensor_dtype) if moved.is_floating_point() else moved
+                return moved.to(dtype=dtype) if moved.is_floating_point() else moved
             if isinstance(x, Meshes):
                 return x.to(device)
             return x
@@ -1216,7 +1202,7 @@ class NBVTrainer(LightningModule):
         return moved
 
     def _log_image(self, tag: str, img_tensor: torch.Tensor, step: int) -> None:
-        if not self.is_main_process:
+        if not self.trainer.is_global_zero:
             return
         if not isinstance(self.logger, WandbLogger):
             return

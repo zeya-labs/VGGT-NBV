@@ -39,7 +39,6 @@ def build_lightning_model(cfg: NBVExperimentConfig) -> NBVTrainer:
         log_dir=cfg.log_dir,
         use_epoch_seed=cfg.use_epoch_seed,
         enable_random_baseline=False,
-        rank=cfg.rank,
     )
 
 
@@ -61,8 +60,7 @@ def build_trainer(cfg: NBVExperimentConfig, profiler: Profiler) -> Trainer:
     logger = None
     if cfg.wandb.enabled and str(cfg.wandb.mode).lower() != "disabled":
         wandb_mode = str(cfg.wandb.mode).lower()
-        if wandb_mode not in {"online", "offline", "disabled"}:
-            raise ValueError(f"Unsupported wandb.mode={cfg.wandb.mode!r}")
+        assert wandb_mode in {"online", "offline"}, f"Unsupported wandb.mode={cfg.wandb.mode!r}"
         os.environ["WANDB_MODE"] = wandb_mode
         os.environ.setdefault("WANDB_DIR", os.path.abspath(cfg.log_dir))
         logger = WandbLogger(
@@ -86,17 +84,6 @@ def build_trainer(cfg: NBVExperimentConfig, profiler: Profiler) -> Trainer:
 
 def build_datamodule(cfg: NBVExperimentConfig) -> NBVDataModule:
     return NBVDataModule(cfg)
-
-def configure_run(cfg: NBVExperimentConfig) -> None:
-    """Populate runtime attributes and log summary."""
-    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    cfg.rank = local_rank
-    cfg.is_main_process = local_rank == 0
-    
-    logger.info(
-        f"NBV Lightning run: mode={cfg.mode}, dtype={cfg.trainer.precision}, rank={local_rank}",
-    )
-
 
 def _build_components(
     cfg: NBVExperimentConfig,
