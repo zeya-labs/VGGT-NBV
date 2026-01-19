@@ -695,17 +695,16 @@ class NBVTrainer(LightningModule):
 
     def _process_batch(
         self,
-        batch: Dict[str, torch.Tensor],
+        batch: Dict,
     ) -> Tuple[torch.Tensor, Dict[str, float], Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         单个训练步骤
 
         Args:
             batch: 训练批次数据
-                - initial_images: 初始N个视图 [B, N, 3, H, W]
-                - gt_mesh_data: GT mesh数据
 
         Returns:
+            total_loss: 总损失
             loss_dict: 损失字典
             new_images: 渲染的新视图
             initial_images: 初始视图
@@ -782,7 +781,7 @@ class NBVTrainer(LightningModule):
     def setup(self, stage=None):
         self.world_size = self.trainer.world_size
 
-    def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
+    def training_step(self, batch: Dict, batch_idx: int):
         loss, loss_dict, _, _ = self._process_batch(batch)
         self.log(
             "train/total_loss",
@@ -794,7 +793,7 @@ class NBVTrainer(LightningModule):
         )
         return loss
 
-    def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
+    def validation_step(self, batch: Dict, batch_idx: int):
         loss, loss_dict, _, _ = self._process_batch(batch)
         self.log(
             "val/total_loss",
