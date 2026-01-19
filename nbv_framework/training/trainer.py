@@ -7,14 +7,11 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 from typing import Any, Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import torch
 import torch.optim as optim
-import torchvision
 from lightning.pytorch import LightningModule
-from lightning.pytorch.loggers import WandbLogger
 from lightning_fabric.utilities.apply_func import apply_to_collection
 from pytorch3d.structures import Meshes
 from pytorch3d.transforms import quaternion_to_matrix
@@ -29,6 +26,7 @@ from mapanything.utils.geometry import (
 if TYPE_CHECKING:
     from ..models import MapAnythingWrapper, BaseNBVPolicy
 from ..rendering import DifferentiableRenderer
+from .logging import log_step_outputs, resolve_step_output_dir
 from .loss import ReconstructionLoss
 from .step_types import (
     PoseEvaluationResult,
@@ -288,86 +286,6 @@ class NBVTrainer(LightningModule):
         )
         return norm_factor
 
-    def _log_camera_pose_stats(
-        self,
-        next_camera_pose: torch.Tensor,
-        predicted_relative_position: torch.Tensor,
-        step_index: Optional[int],
-    ) -> None:
-        """记录相机位姿统计信息。"""
-        if step_index is None:
-            return
-
-        positions = next_camera_pose[:, :3]
-        quaternions = next_camera_pose[:, 3:]
-
-        position_norms = torch.norm(positions, dim=1)
-        self.log(
-            "Camera_pose/position_norm_mean",
-            position_norms.mean(),
-            on_step=True,
-            on_epoch=False,
-            prog_bar=False,
-            sync_dist=self.world_size > 1,
-        )
-        if position_norms.numel() > 1:
-            self.log(
-                "Camera_pose/position_norm_std",
-                position_norms.std(),
-                on_step=True,
-                on_epoch=False,
-                prog_bar=False,
-                sync_dist=self.world_size > 1,
-            )
-
-        # quaternion_norms = torch.norm(quaternions, dim=1)
-        # if quaternion_norms.numel() > 1:
-        #     self.log(
-        #         "Camera_pose/quaternion_norm_std",
-        #         quaternion_norms.std(),
-        #         on_step=True,
-        #         on_epoch=False,
-        #         prog_bar=False,
-        #         sync_dist=self.world_size > 1,
-        #     )
-        if quaternions.numel() > 0:
-            qw_abs = quaternions[:, 3].abs()
-            self.log(
-                "Camera_pose/quaternion_w_abs_mean",
-                qw_abs.mean(),
-                on_step=True,
-                on_epoch=False,
-                prog_bar=False,
-                sync_dist=self.world_size > 1,
-            )
-            self.log(
-                "Camera_pose/quaternion_w_abs_min",
-                qw_abs.min(),
-                on_step=True,
-                on_epoch=False,
-                prog_bar=False,
-                sync_dist=self.world_size > 1,
-            )
-
-        relative_position_norms = torch.norm(predicted_relative_position, dim=1)
-        self.log(
-            "Camera_pose/relative_position_norm_mean",
-            relative_position_norms.mean(),
-            on_step=True,
-            on_epoch=False,
-            prog_bar=False,
-            sync_dist=self.world_size > 1,
-        )
-        if relative_position_norms.numel() > 1:
-            self.log(
-                "Camera_pose/relative_position_norm_std",
-                relative_position_norms.std(),
-                on_step=True,
-                on_epoch=False,
-                prog_bar=False,
-                sync_dist=self.world_size > 1,
-            )
-
     def _trim_gt_mesh_data(
         self,
         gt_mesh_data: Dict[str, torch.Tensor],
@@ -474,16 +392,6 @@ class NBVTrainer(LightningModule):
         except RuntimeError:
             self._last_predicted_relative_position = None
             self._last_next_camera_pose = None
-
-    def _resolve_step_output_dir(self) -> Optional[str]:
-        if not self.trainer.training:
-            return None
-        return os.path.join(
-            self.log_dir,
-            "images",
-            f"step_{self.global_step:06d}",
-            f"rank_{self.global_rank:02d}",
-        )
 
     def _build_loss_dict(
         self,
@@ -810,18 +718,12 @@ class NBVTrainer(LightningModule):
             depth_z_batch=prepared.depth_z,
         )
 
-        pose_log_step = self.global_step if self.trainer.training else None
-        self._log_camera_pose_stats(
-            policy_inference.next_camera_pose,
-            policy_inference.predicted_relative_position,
-            pose_log_step,
-        )
         self._maybe_track_policy_gradients(
             policy_inference.predicted_relative_position,
             policy_inference.next_camera_pose,
         )
 
-        step_output_dir = self._resolve_step_output_dir()
+        step_output_dir = resolve_step_output_dir(self)
 
         policy_eval = self._evaluate_candidate_pose(
             pose=policy_inference.next_camera_pose,
@@ -834,19 +736,6 @@ class NBVTrainer(LightningModule):
 
         total_loss = policy_eval.total_loss
         new_images = policy_eval.new_images
-        self._log_view_diagnostics(
-            new_images=new_images,
-            new_depth_z=policy_eval.depth_z,
-            initial_images=prepared.initial_images,
-            initial_depth_z=prepared.depth_z,
-        )
-
-        if self.trainer.training and step_output_dir is not None:
-            self._save_pre_images_grid(
-                initial_images=prepared.initial_images,
-                new_images=new_images,
-                step_output_dir=step_output_dir,
-            )
 
         random_baseline = self._maybe_compute_random_baseline(
             initial_images=prepared.initial_images,
@@ -862,233 +751,17 @@ class NBVTrainer(LightningModule):
             prepared.active_view_count,
         )
 
-        if self.trainer.training:
-            self._log_training_metrics(loss_dict, prepared.active_view_count)
-            self._log_random_baseline(
-                loss_dict=loss_dict,
-                random_chamfer=random_baseline.chamfer_loss if random_baseline else None,
-                random_position_norm_mean=(
-                    random_baseline.position_norm_mean if random_baseline else None
-                ),
-                random_images=random_baseline.images if random_baseline else None,
-                step_output_dir=step_output_dir,
-            )
+        log_step_outputs(
+            self,
+            prepared=prepared,
+            policy_inference=policy_inference,
+            policy_eval=policy_eval,
+            random_baseline=random_baseline,
+            loss_dict=loss_dict,
+            step_output_dir=step_output_dir,
+        )
 
         return total_loss, loss_dict, new_images, prepared.initial_images
-
-    def _log_training_metrics(self, loss_dict: Dict[str, float], active_view_count: int) -> None:
-        """Record scalar metrics for training."""
-        metrics: Dict[str, float] = {
-            "train/num_initial_views": float(active_view_count),
-        }
-        if "chamfer_loss" in loss_dict:
-            metrics["train/chamfer_loss"] = loss_dict["chamfer_loss"]
-        # for key in (
-        #     "chamfer_pred_points_mean",
-        #     "chamfer_pred_points_min",
-        #     "chamfer_pred_points_zero_frac",
-        #     "chamfer_pred_points_last_view_mean",
-        #     "chamfer_pred_points_last_view_min",
-        #     "chamfer_pred_points_last_view_zero_frac",
-        # ):
-        #     if key in loss_dict:
-        #         metrics[f"train/{key}"] = loss_dict[key]
-        if "pose_penalty_loss" in loss_dict:
-            metrics["train/pose_penalty_loss"] = loss_dict["pose_penalty_loss"]
-        self.log_dict(
-            metrics,
-            on_step=True,
-            on_epoch=False,
-            prog_bar=False,
-            sync_dist=self.world_size > 1,
-        )
-
-    def _log_random_baseline(
-        self,
-        loss_dict: Dict[str, float],
-        random_chamfer: Optional[float],
-        random_position_norm_mean: Optional[float],
-        random_images: Optional[torch.Tensor],
-        step_output_dir: Optional[str],
-    ) -> None:
-        """Log random baseline diagnostics."""
-        if random_chamfer is None:
-            return
-
-        self.log(
-            "train/random_baseline_chamfer_loss",
-            float(random_chamfer),
-            on_step=True,
-            on_epoch=False,
-            prog_bar=False,
-            sync_dist=self.world_size > 1,
-        )
-        if random_position_norm_mean is not None:
-            self.log(
-                "train/random_baseline_position_norm_mean",
-                float(random_position_norm_mean),
-                on_step=True,
-                on_epoch=False,
-                prog_bar=False,
-                sync_dist=self.world_size > 1,
-            )
-        if not self.trainer.is_global_zero:
-            return
-        if random_images is None or step_output_dir is None:
-            return
-
-        random_image_dir = os.path.join(step_output_dir, "random_baseline")
-        os.makedirs(random_image_dir, exist_ok=True)
-        save_path = os.path.join(random_image_dir, "random_view.png")
-        random_images_cpu = random_images.detach().cpu()
-        torchvision.utils.save_image(random_images_cpu, save_path)
-        # if random_images_cpu.dim() == 4 and random_images_cpu.size(0) > 0:
-        #     first_image = random_images_cpu[0]
-        # else:
-        #     first_image = random_images_cpu
-        # self._log_image("train/random_baseline_new_view", first_image, step)
-
-    def _save_pre_images_grid(
-        self,
-        *,
-        initial_images: torch.Tensor,
-        new_images: torch.Tensor,
-        step_output_dir: str,
-    ) -> None:
-        """Save a stitched grid of initial views + NBV view into step_output_dir/pre_images/pre_images.png.
-
-        Layout:
-            - Rows: samples in the batch (B)
-            - Cols: N initial views, then the generated (N+1)-th NBV view
-        """
-        if not self.trainer.is_global_zero:
-            return
-        if step_output_dir is None:
-            return
-        if initial_images.ndim != 5:
-            logger.warning(
-                "Skip pre_images grid: initial_images expected [B, N, C, H, W], got %s",
-                tuple(initial_images.shape),
-            )
-            return
-        if new_images.ndim != 4:
-            logger.warning(
-                "Skip pre_images grid: new_images expected [B, C, H, W], got %s",
-                tuple(new_images.shape),
-            )
-            return
-
-        batch_size, num_views, channels, height, width = initial_images.shape
-        if new_images.shape[0] != batch_size:
-            logger.warning(
-                "Skip pre_images grid: batch size mismatch initial_images=%d vs new_images=%d",
-                batch_size,
-                new_images.shape[0],
-            )
-            return
-        if tuple(new_images.shape[1:]) != (channels, height, width):
-            logger.warning(
-                "Skip pre_images grid: new_images shape %s does not match expected %s",
-                tuple(new_images.shape),
-                (batch_size, channels, height, width),
-            )
-            return
-
-        initial_cpu = initial_images.detach().float().cpu().clamp(0.0, 1.0)
-        new_cpu = new_images.detach().float().cpu().clamp(0.0, 1.0)
-        images_for_grid = []
-        for sample_idx in range(batch_size):
-            for view_idx in range(num_views):
-                images_for_grid.append(initial_cpu[sample_idx, view_idx])
-            images_for_grid.append(new_cpu[sample_idx])
-
-        grid_tensor = torch.stack(images_for_grid, dim=0)
-        grid = torchvision.utils.make_grid(
-            grid_tensor,
-            nrow=num_views + 1,
-            padding=2,
-        )
-
-        pre_images_dir = os.path.join(step_output_dir, "pre_images")
-        os.makedirs(pre_images_dir, exist_ok=True)
-        save_path = os.path.join(pre_images_dir, "pre_images.png")
-        torchvision.utils.save_image(grid, save_path)
-
-    def _log_view_diagnostics(
-        self,
-        *,
-        new_images: torch.Tensor,
-        new_depth_z: Optional[torch.Tensor],
-        initial_images: Optional[torch.Tensor] = None,
-        initial_depth_z: Optional[torch.Tensor] = None,
-    ) -> None:
-        """记录渲染视图质量诊断，帮助定位纯黑/空视角导致的梯度尖峰。"""
-        if not self.trainer.training:
-            return
-        if new_images.numel() == 0 and (initial_images is None or initial_images.numel() == 0):
-            return
-
-        with torch.no_grad():
-            metrics: Dict[str, torch.Tensor] = {}
-
-            if new_images.numel() > 0:
-                mean_intensity = new_images.mean()
-                min_val = new_images.min()
-                max_val = new_images.max()
-                gray = new_images.mean(dim=1) if new_images.dim() == 4 else None
-                black_frac = None
-                if gray is not None:
-                    black_frac = (gray < 0.05).float().mean()
-
-                metrics.update(
-                    {
-                        "render/new_view_intensity_mean": mean_intensity,
-                        "render/new_view_intensity_min": min_val,
-                        "render/new_view_intensity_max": max_val,
-                    }
-                )
-                if black_frac is not None:
-                    metrics["render/new_view_black_frac"] = black_frac
-
-                if new_depth_z is not None and torch.is_tensor(new_depth_z) and new_depth_z.numel() > 0:
-                    depth_nonzero = (new_depth_z.abs() > 1e-6).float()
-                    metrics["render/new_view_valid_frac"] = depth_nonzero.mean()
-
-            if initial_images is not None and initial_images.numel() > 0:
-                init_mean = initial_images.mean()
-                init_min = initial_images.min()
-                init_max = initial_images.max()
-                init_gray = initial_images.mean(dim=2) if initial_images.dim() == 5 else None
-                init_black_frac = None
-                if init_gray is not None:
-                    init_black_frac = (init_gray < 0.05).float().mean()
-
-                metrics.update(
-                    {
-                        "render/initial_view_intensity_mean": init_mean,
-                        "render/initial_view_intensity_min": init_min,
-                        "render/initial_view_intensity_max": init_max,
-                    }
-                )
-                if init_black_frac is not None:
-                    metrics["render/initial_view_black_frac"] = init_black_frac
-
-                if (
-                    initial_depth_z is not None
-                    and torch.is_tensor(initial_depth_z)
-                    and initial_depth_z.numel() > 0
-                ):
-                    init_depth_nonzero = (initial_depth_z.abs() > 1e-6).float()
-                    metrics["render/initial_view_valid_frac"] = init_depth_nonzero.mean()
-
-            if metrics:
-                self.log_dict(
-                    metrics,
-                    on_step=True,
-                    on_epoch=False,
-                    prog_bar=False,
-                    sync_dist=self.world_size > 1,
-                )
 
     def configure_optimizers(self):
         optimizer = optim.AdamW(
@@ -1287,28 +960,3 @@ class NBVTrainer(LightningModule):
             else:
                 moved[key] = value
         return moved
-
-    def _log_image(self, tag: str, img_tensor: torch.Tensor, step: int) -> None:
-        if not self.trainer.is_global_zero:
-            return
-        if not isinstance(self.logger, WandbLogger):
-            return
-        try:
-            import wandb  # type: ignore
-        except ModuleNotFoundError:
-            return
-
-        image_cpu = img_tensor.detach().float().cpu()
-        if image_cpu.ndim == 3 and image_cpu.shape[0] in (1, 3):
-            image_cpu = image_cpu.permute(1, 2, 0).contiguous()
-        elif image_cpu.ndim != 2 and image_cpu.ndim != 3:
-            return
-
-        run = self.logger.experiment
-        current_step = getattr(run, "step", None)
-        if current_step is None:
-            run.log({tag: wandb.Image(image_cpu.numpy())})
-            return
-
-        safe_step = max(int(step), int(current_step))
-        run.log({tag: wandb.Image(image_cpu.numpy())}, step=safe_step)
