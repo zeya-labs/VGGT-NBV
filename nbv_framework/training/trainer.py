@@ -8,10 +8,9 @@ from __future__ import annotations
 import logging
 import math
 import os
-from typing import Any, Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING, NamedTuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import torch
-import torch.nn as nn
 import torch.optim as optim
 import torchvision
 from lightning.pytorch import LightningModule
@@ -30,27 +29,21 @@ from mapanything.utils.geometry import (
 if TYPE_CHECKING:
     from ..models import MapAnythingWrapper, BaseNBVPolicy
 from ..rendering import DifferentiableRenderer
-from .loss import ReconstructionLoss, ChamferDistance
+from .loss import ReconstructionLoss
+from .step_types import (
+    PoseEvaluationResult,
+    PolicyInferenceOutput,
+    PreparedBatch,
+    RandomBaselineOutput,
+)
 from ..utils.camera_utils import (
     position_to_pose_tensor,
-    world_points_to_camera_depth,
-    camera_depth_z_to_world_points,
-    infer_depth_backprojection_xy_signs,
 )
 from ..utils.mapanything_views import _compute_pose_quats_and_trans_for_across_views_in_ref_view
-from ..utils.render_utils import render_gt_point_maps
 from ..models.direct_reconstruction import build_recon_from_point_maps
 
 
 logger = logging.getLogger(__name__)
-
-
-class PoseEvaluationResult(NamedTuple):
-    total_loss: torch.Tensor
-    loss_components: Dict[str, float]
-    new_images: torch.Tensor
-    gt_mesh_data: Dict[str, torch.Tensor]
-    depth_z: Optional[torch.Tensor]
 
 
 class NBVTrainer(LightningModule):
@@ -394,6 +387,159 @@ class NBVTrainer(LightningModule):
             trimmed[key] = value.index_select(1, selection_device).contiguous()
         return trimmed
 
+    def _parse_mesh_paths(self, meta: Any) -> Optional[List[Optional[str]]]:
+        if not isinstance(meta, list):
+            return None
+        mesh_paths: List[Optional[str]] = []
+        for entry in meta:
+            if isinstance(entry, dict):
+                mesh_paths.append(entry.get("mesh_path"))
+            else:
+                mesh_paths.append(None)
+        return mesh_paths
+
+    def _prepare_batch(self, batch: Dict[str, torch.Tensor]) -> PreparedBatch:
+        inputs = batch.get("inputs", {})
+        targets = batch.get("targets", {})
+        mesh_data = batch.get("mesh", {})
+        meta = batch.get("meta")
+
+        initial_images = inputs["images"]
+        camera_poses_batch = inputs["camera_poses"]
+        gt_mesh_data = targets["gt_mesh_data"]
+        mesh_batch = mesh_data.get("normalized")
+        depth_z_batch = gt_mesh_data.get("depth_z")
+
+        initial_images, camera_poses_batch, depth_z_batch, selection, active_view_count = self._select_initial_views(
+            initial_images,
+            camera_poses_batch,
+            depth_z=depth_z_batch,
+            randomize=self.trainer.training,
+        )
+
+        mesh_paths = self._parse_mesh_paths(meta)
+
+        trimmed_gt_mesh_data = self._trim_gt_mesh_data(gt_mesh_data, selection)
+
+        return PreparedBatch(
+            initial_images=initial_images,
+            camera_poses=camera_poses_batch,
+            depth_z=depth_z_batch,
+            gt_mesh_data=gt_mesh_data,
+            trimmed_gt_mesh_data=trimmed_gt_mesh_data,
+            mesh_batch=mesh_batch,
+            mesh_paths=mesh_paths,
+            selection=selection,
+            active_view_count=active_view_count,
+        )
+
+    def _infer_next_pose(
+        self,
+        *,
+        initial_images: torch.Tensor,
+        camera_poses_batch: torch.Tensor,
+        depth_z_batch: Optional[torch.Tensor],
+    ) -> PolicyInferenceOutput:
+        scene_features, views = self._extract_scene_features(
+            initial_images,
+            camera_poses_batch,
+            depth_z_batch,
+        )
+
+        camera_poses_batch_across_views = self._compute_pose_for_across_views_in_ref_view(views)
+        policy_output = self.policy_network(scene_features, camera_poses_batch_across_views)
+
+        next_camera_pose, predicted_relative_position, _ = self._compute_policy_pose(
+            policy_output,
+            camera_poses_batch,
+        )
+
+        return PolicyInferenceOutput(
+            next_camera_pose=next_camera_pose,
+            predicted_relative_position=predicted_relative_position,
+        )
+
+    def _maybe_track_policy_gradients(
+        self,
+        predicted_relative_position: torch.Tensor,
+        next_camera_pose: torch.Tensor,
+    ) -> None:
+        if not self.trainer.training:
+            return
+        try:
+            predicted_relative_position.retain_grad()
+            next_camera_pose.retain_grad()
+            self._last_predicted_relative_position = predicted_relative_position
+            self._last_next_camera_pose = next_camera_pose
+        except RuntimeError:
+            self._last_predicted_relative_position = None
+            self._last_next_camera_pose = None
+
+    def _resolve_step_output_dir(self) -> Optional[str]:
+        if not self.trainer.training:
+            return None
+        return os.path.join(
+            self.log_dir,
+            "images",
+            f"step_{self.global_step:06d}",
+            f"rank_{self.global_rank:02d}",
+        )
+
+    def _build_loss_dict(
+        self,
+        loss_components: Dict[str, float],
+        random_baseline: Optional[RandomBaselineOutput],
+        active_view_count: int,
+    ) -> Dict[str, float]:
+        logged_loss_keys = (
+            "total_loss",
+            "chamfer_loss",
+            "weighted_chamfer_loss",
+            "chamfer_pred_points_mean",
+            "chamfer_pred_points_min",
+            "chamfer_pred_points_zero_frac",
+            "chamfer_pred_points_last_view_mean",
+            "chamfer_pred_points_last_view_min",
+            "chamfer_pred_points_last_view_zero_frac",
+            "confidence_loss",
+            "weighted_confidence_loss",
+            "viewpoint_loss",
+            "weighted_viewpoint_loss",
+            "pose_penalty_loss",
+            "weighted_pose_penalty_loss",
+        )
+        loss_dict = {
+            key: float(loss_components[key]) for key in logged_loss_keys if key in loss_components
+        }
+        if random_baseline is not None:
+            loss_dict["random_chamfer_loss"] = float(random_baseline.chamfer_loss)
+        loss_dict["num_initial_views"] = float(active_view_count)
+        return loss_dict
+
+    def _maybe_compute_random_baseline(
+        self,
+        *,
+        initial_images: torch.Tensor,
+        camera_poses_batch: torch.Tensor,
+        gt_mesh_data: Dict[str, torch.Tensor],
+        mesh_batch,
+        mesh_paths: Optional[Sequence[Optional[str]]] = None,
+    ) -> Optional[RandomBaselineOutput]:
+        if not self.trainer.training or not self.enable_random_baseline:
+            return None
+        random_chamfer, random_images, random_position_norm_mean = self._compute_random_baseline(
+            initial_images=initial_images,
+            camera_poses_batch=camera_poses_batch,
+            gt_mesh_data=gt_mesh_data,
+            mesh_batch=mesh_batch,
+            mesh_paths=mesh_paths,
+        )
+        return RandomBaselineOutput(
+            chamfer_loss=float(random_chamfer),
+            images=random_images,
+            position_norm_mean=float(random_position_norm_mean),
+        )
+
     def _evaluate_candidate_pose(
         self,
         *,
@@ -656,154 +802,79 @@ class NBVTrainer(LightningModule):
             new_images: 渲染的新视图
             initial_images: 初始视图
         """
-        inputs = batch.get("inputs", {})
-        targets = batch.get("targets", {})
-        mesh_data = batch.get("mesh", {})
-        meta = batch.get("meta")
-        mesh_paths: Optional[List[Optional[str]]] = None
-        if isinstance(meta, list):
-            mesh_paths = []
-            for entry in meta:
-                if isinstance(entry, dict):
-                    mesh_paths.append(entry.get("mesh_path"))
-                else:
-                    mesh_paths.append(None)
+        prepared = self._prepare_batch(batch)
 
-        initial_images = inputs["images"]
-        camera_poses_batch = inputs["camera_poses"]
-        gt_mesh_data = targets["gt_mesh_data"]
-        mesh_batch = mesh_data.get("normalized")
-        depth_z_batch = gt_mesh_data.get("depth_z")
-        initial_images, camera_poses_batch, depth_z_batch, selection, active_view_count = self._select_initial_views(
-            initial_images,
-            camera_poses_batch,
-            depth_z=depth_z_batch,
-            randomize=self.trainer.training,
-        )
-        if mesh_paths is not None and len(mesh_paths) != initial_images.shape[0]:
-            logger.warning(
-                "mesh_paths length (%d) does not match batch size (%d); disable mesh logging for this batch.",
-                len(mesh_paths),
-                initial_images.shape[0],
-            )
-            mesh_paths = None
-
-        trimmed_gt_mesh_data = self._trim_gt_mesh_data(gt_mesh_data, selection)
-
-        scene_features, views = self._extract_scene_features(
-            initial_images,
-            camera_poses_batch,
-            depth_z_batch,
-        )
-
-        # print(views[0].keys())
-        # dict_keys(['img', 'data_norm_type', 'is_metric_scale', 'depth_along_ray', 'camera_pose_quats', 'camera_pose_trans', 'ray_directions_cam'])
-        camera_poses_batch_across_views = self._compute_pose_for_across_views_in_ref_view(views)
-
-        policy_output = self.policy_network(scene_features, camera_poses_batch_across_views)
-
-        if policy_output.shape[-1] < 3:
-            raise ValueError(
-                f"policy_network 输出维度需至少包含位置 (3)，实际为 {policy_output.shape[-1]}"
-            )
-
-        next_camera_pose, predicted_relative_position, _ = self._compute_policy_pose(
-            policy_output,
-            camera_poses_batch,
+        policy_inference = self._infer_next_pose(
+            initial_images=prepared.initial_images,
+            camera_poses_batch=prepared.camera_poses,
+            depth_z_batch=prepared.depth_z,
         )
 
         pose_log_step = self.global_step if self.trainer.training else None
-        self._log_camera_pose_stats(next_camera_pose, predicted_relative_position, pose_log_step)
-        if self.trainer.training:
-            try:
-                predicted_relative_position.retain_grad()
-                next_camera_pose.retain_grad()
-                self._last_predicted_relative_position = predicted_relative_position
-                self._last_next_camera_pose = next_camera_pose
-            except RuntimeError:
-                self._last_predicted_relative_position = None
-                self._last_next_camera_pose = None
+        self._log_camera_pose_stats(
+            policy_inference.next_camera_pose,
+            policy_inference.predicted_relative_position,
+            pose_log_step,
+        )
+        self._maybe_track_policy_gradients(
+            policy_inference.predicted_relative_position,
+            policy_inference.next_camera_pose,
+        )
 
-        step_output_dir = None
-        if self.trainer.training:
-            step_output_dir = os.path.join(
-                self.log_dir,
-                "images",
-                f"step_{self.global_step:06d}",
-                f"rank_{self.global_rank:02d}",
-            )
+        step_output_dir = self._resolve_step_output_dir()
 
         policy_eval = self._evaluate_candidate_pose(
-            pose=next_camera_pose,
-            initial_images=initial_images,
-            camera_poses_batch=camera_poses_batch,
-            gt_mesh_data=trimmed_gt_mesh_data,
-            mesh_batch=mesh_batch,
+            pose=policy_inference.next_camera_pose,
+            initial_images=prepared.initial_images,
+            camera_poses_batch=prepared.camera_poses,
+            gt_mesh_data=prepared.trimmed_gt_mesh_data,
+            mesh_batch=prepared.mesh_batch,
             point_cloud_dir=step_output_dir,
         )
 
         total_loss = policy_eval.total_loss
-        loss_components = policy_eval.loss_components
         new_images = policy_eval.new_images
-        self._log_new_view_diagnostics(
+        self._log_view_diagnostics(
             new_images=new_images,
             new_depth_z=policy_eval.depth_z,
+            initial_images=prepared.initial_images,
+            initial_depth_z=prepared.depth_z,
         )
 
         if self.trainer.training and step_output_dir is not None:
             self._save_pre_images_grid(
-                initial_images=initial_images,
+                initial_images=prepared.initial_images,
                 new_images=new_images,
                 step_output_dir=step_output_dir,
             )
 
-        random_chamfer: Optional[float] = None
-        random_images = None
-        random_position_norm_mean = None
-        if self.trainer.training and self.enable_random_baseline:
-            random_chamfer, random_images, random_position_norm_mean = self._compute_random_baseline(
-                initial_images=initial_images,
-                camera_poses_batch=camera_poses_batch,
-                gt_mesh_data=trimmed_gt_mesh_data,
-                mesh_batch=mesh_batch,
-                mesh_paths=mesh_paths,
-            )
-
-        logged_loss_keys = (
-            "total_loss",
-            "chamfer_loss",
-            "weighted_chamfer_loss",
-            "chamfer_pred_points_mean",
-            "chamfer_pred_points_min",
-            "chamfer_pred_points_zero_frac",
-            "chamfer_pred_points_last_view_mean",
-            "chamfer_pred_points_last_view_min",
-            "chamfer_pred_points_last_view_zero_frac",
-            "confidence_loss",
-            "weighted_confidence_loss",
-            "viewpoint_loss",
-            "weighted_viewpoint_loss",
-            "pose_penalty_loss",
-            "weighted_pose_penalty_loss",
+        random_baseline = self._maybe_compute_random_baseline(
+            initial_images=prepared.initial_images,
+            camera_poses_batch=prepared.camera_poses,
+            gt_mesh_data=prepared.trimmed_gt_mesh_data,
+            mesh_batch=prepared.mesh_batch,
+            mesh_paths=prepared.mesh_paths,
         )
-        loss_dict = {
-            key: float(loss_components[key]) for key in logged_loss_keys if key in loss_components
-        }
-        if random_chamfer is not None:
-            loss_dict["random_chamfer_loss"] = float(random_chamfer)
-        loss_dict["num_initial_views"] = float(active_view_count)
+
+        loss_dict = self._build_loss_dict(
+            policy_eval.loss_components,
+            random_baseline,
+            prepared.active_view_count,
+        )
 
         if self.trainer.training:
-            self._log_training_metrics(loss_dict, active_view_count)
+            self._log_training_metrics(loss_dict, prepared.active_view_count)
             self._log_random_baseline(
                 loss_dict=loss_dict,
-                random_chamfer=random_chamfer,
-                random_position_norm_mean=random_position_norm_mean,
-                random_images=random_images,
+                random_chamfer=random_baseline.chamfer_loss if random_baseline else None,
+                random_position_norm_mean=(
+                    random_baseline.position_norm_mean if random_baseline else None
+                ),
+                random_images=random_baseline.images if random_baseline else None,
                 step_output_dir=step_output_dir,
             )
 
-        return total_loss, loss_dict, new_images, initial_images
+        return total_loss, loss_dict, new_images, prepared.initial_images
 
     def _log_training_metrics(self, loss_dict: Dict[str, float], active_view_count: int) -> None:
         """Record scalar metrics for training."""
@@ -943,46 +1014,81 @@ class NBVTrainer(LightningModule):
         save_path = os.path.join(pre_images_dir, "pre_images.png")
         torchvision.utils.save_image(grid, save_path)
 
-    def _log_new_view_diagnostics(
+    def _log_view_diagnostics(
         self,
         *,
         new_images: torch.Tensor,
         new_depth_z: Optional[torch.Tensor],
+        initial_images: Optional[torch.Tensor] = None,
+        initial_depth_z: Optional[torch.Tensor] = None,
     ) -> None:
-        """记录新视图渲染质量诊断，帮助定位纯黑/空视角导致的梯度尖峰。"""
+        """记录渲染视图质量诊断，帮助定位纯黑/空视角导致的梯度尖峰。"""
         if not self.trainer.training:
             return
-        if new_images.numel() == 0:
+        if new_images.numel() == 0 and (initial_images is None or initial_images.numel() == 0):
             return
 
         with torch.no_grad():
-            mean_intensity = new_images.mean()
-            min_val = new_images.min()
-            max_val = new_images.max()
-            gray = new_images.mean(dim=1) if new_images.dim() == 4 else None
-            black_frac = None
-            if gray is not None:
-                black_frac = (gray < 0.05).float().mean()
+            metrics: Dict[str, torch.Tensor] = {}
 
-            metrics = {
-                "render/new_view_intensity_mean": mean_intensity,
-                "render/new_view_intensity_min": min_val,
-                "render/new_view_intensity_max": max_val,
-            }
-            if black_frac is not None:
-                metrics["render/new_view_black_frac"] = black_frac
+            if new_images.numel() > 0:
+                mean_intensity = new_images.mean()
+                min_val = new_images.min()
+                max_val = new_images.max()
+                gray = new_images.mean(dim=1) if new_images.dim() == 4 else None
+                black_frac = None
+                if gray is not None:
+                    black_frac = (gray < 0.05).float().mean()
 
-            if new_depth_z is not None and torch.is_tensor(new_depth_z) and new_depth_z.numel() > 0:
-                depth_nonzero = (new_depth_z.abs() > 1e-6).float()
-                metrics["render/new_view_valid_frac"] = depth_nonzero.mean()
+                metrics.update(
+                    {
+                        "render/new_view_intensity_mean": mean_intensity,
+                        "render/new_view_intensity_min": min_val,
+                        "render/new_view_intensity_max": max_val,
+                    }
+                )
+                if black_frac is not None:
+                    metrics["render/new_view_black_frac"] = black_frac
 
-            self.log_dict(
-                metrics,
-                on_step=True,
-                on_epoch=False,
-                prog_bar=False,
-                sync_dist=self.world_size > 1,
-            )
+                if new_depth_z is not None and torch.is_tensor(new_depth_z) and new_depth_z.numel() > 0:
+                    depth_nonzero = (new_depth_z.abs() > 1e-6).float()
+                    metrics["render/new_view_valid_frac"] = depth_nonzero.mean()
+
+            if initial_images is not None and initial_images.numel() > 0:
+                init_mean = initial_images.mean()
+                init_min = initial_images.min()
+                init_max = initial_images.max()
+                init_gray = initial_images.mean(dim=2) if initial_images.dim() == 5 else None
+                init_black_frac = None
+                if init_gray is not None:
+                    init_black_frac = (init_gray < 0.05).float().mean()
+
+                metrics.update(
+                    {
+                        "render/initial_view_intensity_mean": init_mean,
+                        "render/initial_view_intensity_min": init_min,
+                        "render/initial_view_intensity_max": init_max,
+                    }
+                )
+                if init_black_frac is not None:
+                    metrics["render/initial_view_black_frac"] = init_black_frac
+
+                if (
+                    initial_depth_z is not None
+                    and torch.is_tensor(initial_depth_z)
+                    and initial_depth_z.numel() > 0
+                ):
+                    init_depth_nonzero = (initial_depth_z.abs() > 1e-6).float()
+                    metrics["render/initial_view_valid_frac"] = init_depth_nonzero.mean()
+
+            if metrics:
+                self.log_dict(
+                    metrics,
+                    on_step=True,
+                    on_epoch=False,
+                    prog_bar=False,
+                    sync_dist=self.world_size > 1,
+                )
 
     def configure_optimizers(self):
         optimizer = optim.AdamW(
