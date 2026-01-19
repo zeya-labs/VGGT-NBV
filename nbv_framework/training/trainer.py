@@ -1,12 +1,6 @@
 """
 NBV策略训练器
-
-实现端到端的目标驱动策略学习训练流程：
-1. 状态编码：MapAnything 提取场景特征
-2. 动作提议：策略网络输出相机位姿
-3. 环境交互：可微分渲染生成新视图
-4. 质量评估：VGGT重建并计算质量损失
-5. 策略更新：反向传播更新策略网络
+实现端到端的目标驱动策略学习训练流程
 """
 
 from __future__ import annotations
@@ -662,7 +656,6 @@ class NBVTrainer(LightningModule):
             new_images: 渲染的新视图
             initial_images: 初始视图
         """
-
         inputs = batch.get("inputs", {})
         targets = batch.get("targets", {})
         mesh_data = batch.get("mesh", {})
@@ -1107,7 +1100,7 @@ class NBVTrainer(LightningModule):
 
     def on_after_backward(self) -> None:
         """Log gradients w.r.t. pose tensors to pinpoint spike sources."""
-        if not self.training:
+        if not self.trainer.training:
             self._last_predicted_relative_position = None
             self._last_next_camera_pose = None
             return

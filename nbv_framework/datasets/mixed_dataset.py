@@ -53,8 +53,8 @@ class MixedDataset(Dataset):
 
         logger.info("数据集创建成功:")
         for name, length in zip(self.dataset_names, self.dataset_lengths):
-            logger.info("  - %s: %d 样本", name, length)
-        logger.info("总计: %d 样本", self.total_length)
+            logger.info(f"  - {name}: {length} 样本")
+        logger.info(f"总计: {self.total_length} 样本")
 
     def __len__(self) -> int:
         return self.total_length
