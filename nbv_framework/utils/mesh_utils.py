@@ -4,7 +4,7 @@ Mesh 工具函数
 提供 mesh 的加载、归一化与点采样功能。
 """
 
-from typing import Dict
+from typing import Dict, List
 
 import torch
 from pytorch3d.structures import Meshes
@@ -65,51 +65,61 @@ def load_mesh_as_pytorch3d(mesh_path: str) -> Meshes:
 
     return mesh
 
+
 def normalize_mesh(mesh: Meshes, method: str = "quantile") -> Meshes:
     """
-    对 mesh 进行归一化处理。
+    对 mesh 进行归一化处理（支持 Batch）。
     """
     if method == 'none':
         return mesh.clone()
 
-    # .clone() 确保我们不会修改原始的 mesh 对象
-    new_mesh = mesh.clone()
-    verts = new_mesh.verts_packed()
+    # 获取顶点列表（将 Batch 拆分为单独的 Tensor 列表）
+    # 这样我们可以针对每个 mesh 独立计算 mean 和 scale
+    verts_list = mesh.verts_list()
+    new_verts_list: List[torch.Tensor] = []
 
-    # 中心化
-    centroid = verts.mean(dim=0)
-    verts = verts - centroid
+    for verts in verts_list:
+        # 1. 中心化 (Centering)
+        centroid = verts.mean(dim=0)
+        verts_centered = verts - centroid
 
-    # 缩放
-    scale = None
-    if method == 'unit_sphere':
-        scale = torch.norm(verts, p=2, dim=1).max()
-    elif method == 'unit_cube':
-        scale = torch.max(torch.abs(verts))
-    elif method == 'std':
-        distances = torch.norm(verts, p=2, dim=1)
-        scale = torch.sqrt(torch.mean(distances ** 2))
-    elif method in {'mean', 'mean_radius'}:
-        distances = torch.norm(verts, p=2, dim=1)
-        scale = torch.mean(distances)
-    elif method == 'quantile':
-        distances = torch.norm(verts, p=2, dim=1)
-        scale = torch.quantile(distances, q=0.95)
-    elif method == 'centered':
-        pass
-    else:
-        raise ValueError(f"不支持的归一化方法: {method}")
+        # 2. 计算缩放因子 (Scaling)
+        scale = 1.0
+        # 计算距离 (N,)
+        distances = torch.norm(verts_centered, p=2, dim=1)
 
-    if scale is not None and scale > 1e-8:
-        verts = verts / scale
+        if method == 'unit_sphere':
+            scale = distances.max()
+        elif method == 'unit_cube':
+            scale = torch.abs(verts_centered).max()
+        elif method == 'std':
+            scale = torch.sqrt(torch.mean(distances ** 2))
+        elif method in {'mean', 'mean_radius'}:
+            scale = torch.mean(distances)
+        elif method == 'quantile':
+            # 95% 分位数，去除离群点影响
+            scale = torch.quantile(distances, q=0.95)
+        elif method == 'centered':
+            pass
+        else:
+            raise ValueError(f"不支持的归一化方法: {method}")
 
-    normalized_mesh = Meshes(
-        verts=[verts],
-        faces=[mesh.faces_packed()],
+        # 应用缩放
+        if scale > 1e-8 and method != 'centered':
+            verts_centered = verts_centered / scale
+        
+        new_verts_list.append(verts_centered)
+
+    # 3. 重建 Meshes 对象
+    # 使用原始的 faces 和 textures，但使用新的顶点位置
+    # 注意：这里我们使用 mesh.faces_list() 来保持 batch 结构
+    new_mesh = Meshes(
+        verts=new_verts_list,
+        faces=mesh.faces_list(),
         textures=mesh.textures
     )
 
-    return normalized_mesh
+    return new_mesh
 
 
 def load_and_normalize_mesh(

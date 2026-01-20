@@ -29,62 +29,68 @@ class CameraPoseGenerator:
         """
         self.up_axis = up_axis
         self.up_vector = get_up_vector(up_axis)
-
+        
     def _generate_poses_from_positions(
         self,
         sphere_positions: np.ndarray,
         seed: int = 0,
         base_radius: float = 2.5,
         radius_variation: float = 0,
-        radii: Optional[np.ndarray] = None
+        radii: Optional[np.ndarray] = None,
+        to_c2w: bool = False
     ) -> List[Dict[str, List[float]]]:
-        """
-        从球面位置生成相机位姿的通用方法
-
-        Args:
-            sphere_positions: 球面位置数组
-            seed: 随机种子
-            base_radius: 基础相机距离
-            radius_variation: 距离变化范围
-            radii: 可选的半径数组
-
-        Returns:
-            camera_poses: 相机位姿列表，每个元素包含position和quaternion
-        """
-        # 使用局部随机数生成器，避免影响全局随机状态
+        
+        num_views = len(sphere_positions)
         rng = np.random.RandomState(seed)
+
+        # 1. 准备半径数据 (Batch 处理)
         if radii is not None:
-            if len(radii) != len(sphere_positions):
-                raise ValueError("radii must have the same length as sphere_positions.")
-            radii = np.asarray(radii, dtype=np.float32)
+            if len(radii) != num_views:
+                raise ValueError("radii length mismatch")
+            batch_radii = np.asarray(radii, dtype=np.float32)
+        else:
+            # 一次性生成所有随机半径
+            batch_radii = base_radius + rng.uniform(-radius_variation, radius_variation, size=num_views)
+            batch_radii = batch_radii.astype(np.float32)
 
+        # 2. 计算位置 (利用 Numpy 广播机制)
+        # sphere_positions: [N, 3], batch_radii: [N] -> positions: [N, 3]
+        positions = sphere_positions * batch_radii[:, np.newaxis]
+
+        # 3. 转换为 PyTorch Tensor 进行批处理计算
+        # 注意：device 建议显式指定，如果有 GPU 可以传 device='cuda'
+        eye = torch.tensor(positions, dtype=torch.float32) 
+        at = torch.zeros((1, 3), dtype=torch.float32)  # 广播：所有相机都看原点
+        up = torch.tensor(self.up_vector, dtype=torch.float32).view(1, 3) # 广播 Up 向量
+
+        # 一次性计算所有 View Transform
+        # R: [N, 3, 3], T: [N, 3] (这是 World-to-Camera)
+        R, T = look_at_view_transform(eye=eye, at=at, up=up)
+
+        # 4. (关键) 根据需要转换坐标系
+        if to_c2w:
+            # 如果需要 Camera-to-World (Pose)，需要对旋转矩阵求逆(转置)
+            R = R.transpose(1, 2)
+            # 注意：T 在 C2W 中通常直接用 eye (相机位置)，而 W2C 中的 T 是 -R*eye
+            # 因为你下面直接存的是 'position' (即 eye)，所以这里只用关心 R 的方向是否正确
+
+        # 5. 批量转换为四元数
+        # PyTorch3D 返回的是 [w, x, y, z]
+        quaternions_wxyz = matrix_to_quaternion(R)
+        
+        # 6. 格式化输出
+        # 将 Tensor 转回 Numpy/List，这一步必须循环，但因为不涉及复杂计算，速度很快
         poses = []
+        positions_np = positions  # 已经是 numpy
+        quats_np = quaternions_wxyz.detach().cpu().numpy() # 转回 numpy
 
-        for i, direction in enumerate(sphere_positions):
-            if radii is not None:
-                radius = float(radii[i])
-            else:
-                radius = base_radius + rng.uniform(-radius_variation, radius_variation)
-
-            # 计算相机位置
-            position = direction * radius
-
-            # 使用PyTorch3D的look_at_view_transform
-            # 将numpy数组转换为张量以避免性能警告
-            eye = torch.tensor(position.reshape(1, 3), dtype=torch.float32)
-            at = torch.tensor([[0, 0, 0]], dtype=torch.float32)  # 看向原点
-
-            up = torch.tensor(self.up_vector.reshape(1, -1), dtype=torch.float32)  # 使用指定的up向量
-
-            R, T = look_at_view_transform(eye=eye, at=at, up=up)
-
-            # 将旋转矩阵转换为四元数
-            quaternions_wxyz = matrix_to_quaternion(R)
-            q = quaternions_wxyz[0]  # 获取批次中的第一个四元数
-            quaternion_xyzw = [q[1].item(), q[2].item(), q[3].item(), q[0].item()]
-
+        for i in range(num_views):
+            q = quats_np[i] # [w, x, y, z]
+            # 转换为 [x, y, z, w]
+            quaternion_xyzw = [float(q[1]), float(q[2]), float(q[3]), float(q[0])]
+            
             poses.append({
-                "position": [float(position[0]), float(position[1]), float(position[2])],
+                "position": positions_np[i].tolist(), # [x, y, z]
                 "quaternion": quaternion_xyzw
             })
 
@@ -172,6 +178,69 @@ class CameraPoseGenerator:
             seed,
             base_radius,
             radius_variation,
+            radii=radii,
+        )
+
+    def generate_random_camera_poses(
+        self,
+        num_views: int,
+        seed: Optional[int] = None,
+        base_radius: float = 2.6,
+        radius_variation: float = 0.0,
+        hemisphere: str = "upper",
+        radius_mode: str = "random",
+    ) -> List[Dict[str, List[float]]]:
+        """
+        随机采样相机位姿，支持上半球或全球面。
+
+        Args:
+            num_views: 视图数量。
+            seed: 可选随机种子；None 表示非确定性采样。
+            base_radius: 相机距离基准。
+            radius_variation: 距离变化范围。
+            hemisphere: 'upper' 使用上半球，'full' 使用全球面。
+            radius_mode: 'random' 或 'constant'。
+
+        Returns:
+            camera_poses: 相机位姿列表。
+        """
+        hemisphere = (hemisphere or "upper").lower()
+        if hemisphere not in {"upper", "full"}:
+            raise ValueError(f"Unsupported hemisphere '{hemisphere}'. Expected 'upper' or 'full'.")
+
+        radius_mode = (radius_mode or "random").lower()
+        if radius_mode not in {"random", "constant"}:
+            raise ValueError(f"Unsupported radius_mode '{radius_mode}'. Expected 'random' or 'constant'.")
+
+        rng = np.random.RandomState() if seed is None else np.random.RandomState(seed)
+        theta = rng.uniform(0.0, 2.0 * math.pi, size=num_views)
+        if hemisphere == "upper":
+            up = rng.uniform(0.0, 1.0, size=num_views)
+        else:
+            up = rng.uniform(-1.0, 1.0, size=num_views)
+        radius_plane = np.sqrt(np.clip(1.0 - up ** 2, 0.0, 1.0))
+
+        axis_index = {"X": 0, "Y": 1, "Z": 2}.get(self.up_axis, 1)
+        other_axes = [0, 1, 2]
+        other_axes.remove(axis_index)
+
+        directions = np.zeros((num_views, 3), dtype=np.float32)
+        directions[:, axis_index] = up.astype(np.float32)
+        directions[:, other_axes[0]] = (radius_plane * np.cos(theta)).astype(np.float32)
+        directions[:, other_axes[1]] = (radius_plane * np.sin(theta)).astype(np.float32)
+
+        if radius_mode == "constant" or radius_variation <= 0:
+            radii = np.full(num_views, base_radius, dtype=np.float32)
+        else:
+            radius_min = max(1e-6, base_radius - radius_variation)
+            radius_max = max(radius_min, base_radius + radius_variation)
+            radii = rng.uniform(radius_min, radius_max, size=num_views).astype(np.float32)
+
+        return self._generate_poses_from_positions(
+            directions,
+            seed=0 if seed is None else seed,
+            base_radius=base_radius,
+            radius_variation=radius_variation,
             radii=radii,
         )
 

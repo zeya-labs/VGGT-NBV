@@ -29,7 +29,6 @@ class BaseDataset(Dataset, ABC):
         num_samples: int = 10000,
         up_axis: str = "Y",
         seed: Optional[int] = None,
-        device: str = "cuda",
         tensor_dtype: torch.dtype = torch.float32,
         **kwargs
     ):
@@ -54,23 +53,20 @@ class BaseDataset(Dataset, ABC):
         self.normalize_method = normalize_method
         self.num_samples = num_samples
         self.up_axis = up_axis.upper()  # 确保大写格式
-        self._base_seed = seed
-        self.device = torch.device(device)
+        self.seed = seed
         self.tensor_dtype = tensor_dtype
         self._epoch: int = 0
         
-        # 验证数据根目录
-        if not os.path.exists(data_root):
-            raise ValueError(f"Data root directory does not exist: {data_root}")
+        assert os.path.exists(data_root), f"数据根目录不存在: {data_root}"
         
         # 由子类实现具体的数据加载逻辑
         self.data_list = self._load_data_list()
         
         logger.info(
-            f"[{self.__class__.__name__}] Loaded {len(self.data_list)} samples for {split} split"
+            f"[{self.__class__.__name__}] 为 {split} 划分加载了 {len(self.data_list)} 个样本"
         )
         logger.info(
-            f"Mesh normalization: {normalize_method}, Sample points: {num_samples}",
+            f"[{self.__class__.__name__}] 网格归一化: {normalize_method}, 采样点数: {num_samples}",
         )
     
     @abstractmethod # 由子类实现具体的数据加载逻辑
@@ -252,7 +248,16 @@ class BaseDataset(Dataset, ABC):
         """
         加载网格数据
         
-        这是一个通用的网格加载方法，子类可以重写以支持特定格式
+        Output:
+            Dict[str, torch.Tensor]: 包含顶点、法线、索引和变换矩阵的字典
+            {
+                'gt_points': tensor[100000, 3] n=300000 (1.1Mb) x∈[-1.122, 1.438] μ=0.066 σ=0.615,
+                'mesh_path': '/mnt/sdb/chenmohan/VGGT-NBV/models/House3K_obj/BATCH_3/SetD/BAT3_SETD_HOUSE33.obj',
+                'normalize_method': 'mean',
+                'normalized_mesh': <pytorch3d.structures.meshes.Meshes object at 0x7f8b5cc05b10>,
+                'num_samples': 100000,
+                'original_mesh': <pytorch3d.structures.meshes.Meshes object at 0x7f8b5c1f4b50>
+            }
         """
         from ..utils.mesh_utils import load_and_normalize_mesh
         
@@ -289,8 +294,7 @@ class BaseDataset(Dataset, ABC):
         canonical = "\n".join(sorted(available_images))
         import hashlib
         epoch = getattr(self, "_epoch", 0)
-        base_seed = getattr(self, "_base_seed", None)
-        seed_material = f"{canonical}|{base_seed if base_seed is not None else 0}|{epoch}"
+        seed_material = f"{canonical}|{self.seed}|{epoch}"
         digest = hashlib.md5(seed_material.encode("utf-8")).hexdigest()
         seed = int(digest, 16) % (2 ** 32 - 1)
         logger.info(f"Using seed {seed} for initial view selection")  

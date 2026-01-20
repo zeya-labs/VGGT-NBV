@@ -56,14 +56,16 @@ class NBVExperimentConfig:
     image_size: int = 518
     up_axis: str = "Y"
     max_meshes: int = 20
+    camera_radius: float = 2.6
+    camera_radius_variation: float = 0.0
+    camera_radius_mode: str = "random"
     train_repeat_factor: int = 1
     val_repeat_factor: int = 1
     # View sampling modes:
-    # - "fixed": 每次都采样同一组视角（可通过 view_sampling_seed 控制全局随机性）
+    # - "fixed": 每次都采样同一组视角
     # - "deterministic_per_call": 单次调用随机但可重现；不同进程/worker/batch 会打散，跨 epoch 保持一致
     # - "fully_random": 每次调用完全随机，不可重现
     view_sampling_mode: str = "deterministic_per_call"
-    view_sampling_seed: Optional[int] = None
     manual_camera_position: List[List[float]] = field(
         default_factory=lambda: [[-1.093546, 1.648833, -1.686863]]
     )

@@ -20,7 +20,7 @@ def create_data_loader(
     drop_last: bool = True,
     collate_fn: Optional[Callable] = None,
     sampler: Optional[Sampler] = None,
-    prefetch_factor: Optional[int] = 8,
+    prefetch_factor: Optional[int] = 2,
 ) -> DataLoader:
     """
     创建数据加载器
@@ -64,7 +64,10 @@ def create_data_loader(
     # prefetch_factor 仅在 num_workers > 0 时可用，否则 DataLoader 会报参数无效
     if prefetch_factor is not None and num_workers > 0:
         loader_kwargs["prefetch_factor"] = prefetch_factor
-
+    
+    from loguru import logger
+    
+    logger.info(f"创建数据加载器: {loader_kwargs}")
     return DataLoader(**loader_kwargs)
 
 

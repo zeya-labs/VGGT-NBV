@@ -36,7 +36,9 @@ from .step_types import (
 )
 from ..utils.camera_utils import (
     position_to_pose_tensor,
+    normalize_depth_for_visualization,
 )
+from ..utils.render_utils import render_mesh_views
 from ..utils.mapanything_views import _compute_pose_quats_and_trans_for_across_views_in_ref_view
 from ..models.direct_reconstruction import build_recon_from_point_maps
 
@@ -297,7 +299,7 @@ class NBVTrainer(LightningModule):
             return trimmed
 
         selection_device = selection
-        for key in ("gt_point_maps", "gt_valid_masks", "depth_z"):
+        for key in ("gt_point_maps", "gt_valid_masks", "depth_z", "depth_z_viz"):
             value = trimmed.get(key)
             if value is None:
                 continue
@@ -316,16 +318,92 @@ class NBVTrainer(LightningModule):
                 mesh_paths.append(None)
         return mesh_paths
 
+    def _render_inputs(
+        self,
+        *,
+        initial_images: Optional[torch.Tensor],
+        camera_poses_batch: torch.Tensor,
+        gt_mesh_data: Dict[str, torch.Tensor],
+        mesh_batch: Optional[Meshes],
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        needs_images = initial_images is None
+        gt_point_maps = gt_mesh_data.get("gt_point_maps")
+        gt_valid_masks = gt_mesh_data.get("gt_valid_masks")
+        needs_points = gt_point_maps is None
+        needs_depth = gt_mesh_data.get("depth_z") is None
+        needs_mask = gt_valid_masks is None or (needs_depth and gt_valid_masks is None)
+
+        if not (needs_images or needs_points or needs_depth or needs_mask):
+            return initial_images, gt_mesh_data
+
+        if (needs_images or needs_points or needs_depth or needs_mask) and mesh_batch is None:
+            raise ValueError("mesh_batch is required to render initial views on GPU.")
+
+        render_out = None
+        if needs_images or needs_points or needs_depth or needs_mask:
+            with torch.no_grad():
+                render_out = render_mesh_views(
+                    renderer=self.renderer,
+                    mesh_batch=mesh_batch,
+                    camera_poses=camera_poses_batch,
+                    out_rgb=needs_images,
+                    out_points=needs_points,
+                    out_mask=needs_mask,
+                    out_depth=needs_depth,
+                )
+
+            if needs_images:
+                initial_images = render_out.get("rgb")
+                if initial_images is None:
+                    raise RuntimeError("Renderer did not return rgb output.")
+                if initial_images.is_floating_point() and initial_images.dtype != self.dtype:
+                    initial_images = initial_images.to(dtype=self.dtype)
+
+            if needs_points:
+                gt_point_maps = render_out.get("points")
+                if gt_point_maps is None:
+                    raise RuntimeError("Renderer did not return point maps.")
+                if gt_point_maps.is_floating_point() and gt_point_maps.dtype != self.dtype:
+                    gt_point_maps = gt_point_maps.to(dtype=self.dtype)
+                gt_mesh_data["gt_point_maps"] = gt_point_maps
+
+            if needs_mask:
+                gt_valid_masks = render_out.get("mask")
+                if gt_valid_masks is None:
+                    raise RuntimeError("Renderer did not return masks.")
+                gt_valid_masks = gt_valid_masks.to(dtype=torch.bool)
+                gt_mesh_data["gt_valid_masks"] = gt_valid_masks
+
+        if needs_depth:
+            depth_z = render_out.get("depth")
+            if depth_z is None:
+                raise RuntimeError("Renderer did not return depth output.")
+            if depth_z.is_floating_point() and depth_z.dtype != self.dtype:
+                depth_z = depth_z.to(dtype=self.dtype)
+            gt_mesh_data["depth_z"] = depth_z
+            gt_mesh_data["depth_z_viz"] = normalize_depth_for_visualization(
+                depth_z, gt_valid_masks
+            )
+            
+        return initial_images, gt_mesh_data
+
     def _prepare_batch(self, batch: Dict[str, torch.Tensor]) -> PreparedBatch:
         inputs = batch.get("inputs", {})
         targets = batch.get("targets", {})
         mesh_data = batch.get("mesh", {})
         meta = batch.get("meta")
 
-        initial_images = inputs["images"]
-        camera_poses_batch = inputs["camera_poses"]
-        gt_mesh_data = targets["gt_mesh_data"]
+        initial_images = inputs.get("images")
+        camera_poses_batch = inputs.get("camera_poses")
+
+        gt_mesh_data = targets.get("gt_mesh_data", {})
         mesh_batch = mesh_data.get("normalized")
+        initial_images, gt_mesh_data = self._render_inputs(
+            initial_images=initial_images,
+            camera_poses_batch=camera_poses_batch,
+            gt_mesh_data=gt_mesh_data,
+            mesh_batch=mesh_batch,
+        )
         depth_z_batch = gt_mesh_data.get("depth_z")
 
         initial_images, camera_poses_batch, depth_z_batch, selection, active_view_count = self._select_initial_views(

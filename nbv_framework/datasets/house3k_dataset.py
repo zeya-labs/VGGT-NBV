@@ -1,22 +1,20 @@
 """
-House3K数据集加载器
-用于加载House3K_obj数据集，支持从3D网格动态生成多视角图像
+House3K 数据集加载器。
+
+负责扫描网格文件、生成相机位姿并返回训练所需的结构化样本。
+渲染逻辑已移至训练阶段的 GPU 路径执行。
 """
 
-import os
 import hashlib
 import random
 import torch
 from pathlib import Path
-from typing import List, Dict, Optional, Sequence, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 from torch.utils.data import get_worker_info
 from .base_dataset import BaseDataset
 from ..utils.camera_utils import (
     position_to_pose_tensor,
-    world_points_to_camera_depth,
-    normalize_depth_for_visualization,
 )
-from ..utils.render_utils import render_gt_point_maps
 from .house3k_utils import (
     find_batch_directories,
     scan_house3k_batches,
@@ -27,25 +25,25 @@ from loguru import logger
 
 class House3KDataset(BaseDataset):
     """
-    House3K数据集加载器
-    
-    数据结构：
-    data_root/
-    ├── BATCH_1/
-    │   ├── Set_A/
-    │   │   ├── BAT1_SETA_HOUSE1.obj
-    │   │   ├── BAT1_SETA_HOUSE1.mtl
-    │   │   ├── BAT1_SETA_HOUSE2.obj
-    │   │   └── ...
-    │   └── Set_B/
-    │       └── ...
-    ├── BATCH_2/
-    └── ...
-    
-    特点：
-    - 只有3D网格文件，没有预渲染图像
-    - 需要动态生成相机位姿和渲染图像
-    - 支持训练/验证/测试分割
+    House3K 数据集加载器。
+
+    数据结构:
+        data_root/
+        ├── BATCH_1/
+        │   ├── Set_A/
+        │   │   ├── BAT1_SETA_HOUSE1.obj
+        │   │   ├── BAT1_SETA_HOUSE1.mtl
+        │   │   ├── BAT1_SETA_HOUSE2.obj
+        │   │   └── ...
+        │   └── Set_B/
+        │       └── ...
+        ├── BATCH_2/
+        └── ...
+
+    特点:
+    - 只有 3D 网格文件，没有预渲染图像
+    - 相机位姿在加载时动态生成
+    - 训练/验证/测试分割
     """
     
     def __init__(
@@ -56,12 +54,13 @@ class House3KDataset(BaseDataset):
         split: str = "train",
         normalize_method: str = "quantile",
         num_samples: int = 10000,
+        camera_radius: float = 2.6,
+        camera_radius_variation: float = 0.0,
+        camera_radius_mode: str = "random",
         train_ratio: float = 0.8,
         val_ratio: float = 0.2,
         max_meshes: int = None,
-        use_cache: bool = True,
         view_sampling_mode: str = "deterministic_per_call",
-        view_sampling_seed: Optional[int] = None,
         manual_camera_position: Optional[
             Union[
                 Sequence[float],
@@ -90,12 +89,15 @@ class House3KDataset(BaseDataset):
             split: 数据集分割 (train/val/test)
             normalize_method: 网格归一化方法
             num_samples: 采样点数量
+            camera_radius: 相机半径基准
+            camera_radius_variation: 相机半径随机偏移范围
+            camera_radius_mode: 相机半径采样模式 ("random"/"constant")
+                - random: 在 [base_radius - variation, base_radius + variation] 内随机采样
+                - constant: 固定为 base_radius（忽略 variation）
             train_ratio: 训练集比例
             val_ratio: 验证集比例
             max_meshes: 全局最大mesh数量限制（用于控制训练规模）
-            use_cache: 是否使用缓存加速数据加载
             view_sampling_mode: 视角采样模式，支持 fixed / deterministic_per_call / fully_random
-            view_sampling_seed: 视角采样的基础种子（可选）；未提供则回退到 dataset seed
             manual_camera_position: 手动指定的相机位置，支持单个位置、列表或按模型名称/索引映射
             manual_camera_look_at: 手动指定的相机朝向目标点，格式同上，默认为原点
             use_manual_camera: 是否启用手动相机逻辑
@@ -105,13 +107,14 @@ class House3KDataset(BaseDataset):
         self.val_ratio = val_ratio
         self.test_ratio = 1.0 - train_ratio - val_ratio
         self.max_meshes = max_meshes
-        self.use_cache = use_cache
         self.use_manual_camera = use_manual_camera
         self.manual_camera_position = manual_camera_position
         self.manual_camera_look_at = manual_camera_look_at
         self.view_sampling_mode = str(view_sampling_mode).lower()
-        self.view_sampling_seed = view_sampling_seed
         self.seed = seed
+        self.camera_radius = float(camera_radius)
+        self.camera_radius_variation = float(camera_radius_variation)
+        self.camera_radius_mode = str(camera_radius_mode).lower()
 
         # 验证分割比例，允许浮点运算带来的微小负数
         if self.test_ratio < 0:
@@ -123,14 +126,7 @@ class House3KDataset(BaseDataset):
             )
             self.test_ratio = 0.0
         
-        # 初始化渲染器（延迟加载）
-        self._renderer = None
         self._camera_generator = None
-        
-        # 图像缓存目录
-        self.cache_dir = os.path.join(data_root, ".cache", split) if use_cache else None
-        if self.cache_dir:
-            os.makedirs(self.cache_dir, exist_ok=True)
         
         super().__init__(
             data_root=data_root,
@@ -146,12 +142,12 @@ class House3KDataset(BaseDataset):
         """
         加载House3K数据集列表
 
-        扫描所有BATCH目录，找到所有.obj文件，过滤掉没有纹理的模型，然后按比例分割
+        扫描所有批次目录，找到可用 .obj 文件，按比例分割。
         """
         logger.info(f"正在扫描House3K数据集: {self.data_root}")
         data_root_path = Path(self.data_root)
 
-        # 1. 查找所有批次目录
+        # 查找所有批次目录
         batch_dirs = find_batch_directories(data_root_path)
         logger.info(f"找到 {len(batch_dirs)} 个批次目录: {[d.name for d in batch_dirs]}")  
 
@@ -159,7 +155,7 @@ class House3KDataset(BaseDataset):
         logger.info(f"[House3K数据集] 总共扫描 {total_scanned} 个3D模型")
         logger.info(f"[House3K数据集] 加载 {len(all_objects)} 个有效3D模型")
         
-        # 4. 全局mesh数量限制
+        # 全局 mesh 数量限制
         if self.max_meshes and len(all_objects) > self.max_meshes:
             rng = random.Random(self.seed)
             rng.shuffle(all_objects)
@@ -168,7 +164,7 @@ class House3KDataset(BaseDataset):
                 f"[House3K数据集] 应用全局mesh限制，从 {len(all_objects)} 个减少到 {self.max_meshes} 个"
             )
         
-        # 5. 按分割比例划分数据集
+        # 按分割比例划分数据集
         split_objects, split_stats = split_house3k_dataset(
             all_objects,
             split=self.split,
@@ -190,63 +186,9 @@ class House3KDataset(BaseDataset):
     
     def _get_image_paths(self, data_item: Dict) -> List[str]:
         """
-        返回可用视图的符号标识列表。
-
-        House3K 样本的图像在加载时即时渲染，因此这里不返回真实文件路径，
-        而是生成用于确定性采样的稳定标识。
+        House3K 不提供预渲染图像路径，保留该接口以满足基类约束。
         """
-        model_name = data_item["model_name"]
-        return [self._view_token(model_name, i) for i in range(self._num_candidate_views())]
-
-    def _view_token(self, model_name: str, index: int) -> str:
-        """为指定模型的视图生成稳定且可解析的标识符。"""
-        return f"{model_name}#view_{index:03d}"
-
-    def _num_candidate_views(self) -> int:
-        """返回每个网格可用的候选视图数量。"""
-        return max(20, self.num_initial_views * 2)
-
-    def _sample_view_indices(self, model_name: str, num_candidate_views: int) -> List[int]:
-        """
-        根据模型名称和当前 epoch 均匀采样初始视图索引，保持与基类相同的确定性行为。
-        """
-        if num_candidate_views < self.num_initial_views:
-            raise ValueError(
-                f"Not enough candidate views ({num_candidate_views}) for initial selection "
-                f"({self.num_initial_views})."
-            )
-
-        mode = self.view_sampling_mode
-        base_seed = (
-            self.view_sampling_seed
-            if self.view_sampling_seed is not None
-            else (self._base_seed if self._base_seed is not None else 0)
-        )
-
-        if mode == "fixed":
-            # 完全固定：同一模型始终返回同一视角；不随 epoch/进程/worker 变化
-            seed_material = f"{model_name}|{base_seed}"
-            digest = hashlib.md5(seed_material.encode("utf-8")).hexdigest()
-            seed = int(digest, 16) % (2 ** 32 - 1)
-            rng = random.Random(seed)
-            return sorted(rng.sample(range(num_candidate_views), self.num_initial_views))
-
-        if mode == "deterministic_per_call":
-            # 可重现的“每次调用随机”：跨 epoch 数据一致，不同 worker/进程打散
-            worker_info = get_worker_info()
-            worker_id = worker_info.id if worker_info is not None else 0
-            seed_material = f"{model_name}|{worker_id}|{base_seed}"
-            digest = hashlib.md5(seed_material.encode("utf-8")).hexdigest()
-            seed = int(digest, 16) % (2 ** 32 - 1)
-            rng = random.Random(seed)
-            return sorted(rng.sample(range(num_candidate_views), self.num_initial_views))
-
-        if mode == "fully_random":
-            # 完全随机：不可重现
-            rng = random.SystemRandom()
-            return sorted(rng.sample(range(num_candidate_views), self.num_initial_views))
-
-        raise ValueError(f"Unknown view_sampling_mode: {self.view_sampling_mode}")
+        return []
 
     def set_epoch(self, epoch: int) -> None:
         """更新 epoch，保持 BaseDataset 的行为。"""
@@ -261,25 +203,24 @@ class House3KDataset(BaseDataset):
         """
         return None
     
-    def _extract_image_index(self, image_path: str) -> Optional[int]:
-        """从视图标识符中提取索引。"""
-        marker = "view_"
-        if marker in image_path:
-            try:
-                suffix = image_path.split(marker, 1)[1]
-                digits = ""
-                for char in suffix:
-                    if char.isdigit():
-                        digits += char
-                    else:
-                        break
-                if digits:
-                    return int(digits)
-            except (IndexError, ValueError):
-                return None
-        return super()._extract_image_index(image_path)
-    
-    def _generate_camera_poses(self, num_views: int, seed: int = None) -> List[Dict]:
+    def _resolve_view_seed(self, model_name: str, idx: int) -> Optional[int]:
+        mode = self.view_sampling_mode
+        base_seed = self.seed
+
+        if mode == "fixed":
+            seed_material = f"{model_name}|{base_seed}"
+        elif mode == "deterministic_per_call":
+            logger.info(f"当前数据加载进程ID: {idx}")
+            seed_material = f"{model_name}|{idx}|{base_seed}"
+        elif mode == "fully_random":
+            return None
+        else:
+            raise ValueError(f"Unknown view_sampling_mode: {self.view_sampling_mode}")
+
+        digest = hashlib.md5(seed_material.encode("utf-8")).hexdigest()
+        return int(digest, 16) % (2 ** 32 - 1)
+
+    def _generate_camera_poses(self, num_views: int, seed: Optional[int] = None) -> List[Dict[str, List[float]]]:
         """
         生成相机位姿
         
@@ -294,72 +235,55 @@ class House3KDataset(BaseDataset):
             # 延迟导入和初始化
             from ..utils.camera_utils import CameraPoseGenerator
             self._camera_generator = CameraPoseGenerator(up_axis=self.up_axis)
-        
-        return self._camera_generator.generate_camera_poses(num_views, seed=seed, hemisphere='upper')
-    
-    def _get_renderer(self):
-        """获取渲染器（延迟初始化），失败时立即抛出异常。"""
-        if self._renderer is None:
-            from ..rendering.differentiable_renderer import DifferentiableRenderer
-            self._renderer = DifferentiableRenderer(
-                image_size=self.image_size,
-            )
 
-        return self._renderer
-
-    def _render_images_from_mesh_data(
-        self,
-        gt_mesh_data: Dict,
-        camera_poses: List[Dict],
-        selected_indices: List[int]
-    ) -> torch.Tensor:
-        """
-        从已加载的网格数据渲染图像
-        
-        Args:
-            gt_mesh_data: 已加载的网格数据字典，包含normalized_mesh
-            camera_poses: 相机位姿列表
-            selected_indices: 选中的视图索引
-            
-        Returns:
-            渲染的图像张量 [N, 3, H, W]
-        """
-        renderer = self._get_renderer()
-
-        # 使用已经归一化的网格
-        mesh = gt_mesh_data['normalized_mesh']
-        mesh_device = mesh.device
-
-        # 选择对应的相机位姿
-        selected_poses = [camera_poses[i] for i in selected_indices]
-
-        batch_data = [
-            p["position"] + p["quaternion"] 
-            for p in selected_poses
-        ]
-
-        camera_poses_tensor = torch.tensor(
-            batch_data, 
-            device=mesh_device, 
-            dtype=torch.float32
+        return self._camera_generator.generate_random_camera_poses(
+            num_views,
+            seed=seed,
+            hemisphere="upper",
+            base_radius=self.camera_radius,
+            radius_variation=self.camera_radius_variation,
+            radius_mode=self.camera_radius_mode,
         )
 
-        # 创建批次化的网格，每个相机位姿对应一个网格副本
-        num_views = len(selected_poses)
-        meshes_batch = mesh.extend(num_views)
+    def _poses_tensor_to_list(self, camera_poses: torch.Tensor) -> List[Dict[str, List[float]]]:
+        return [
+            {
+                "position": camera_poses[i, :3].tolist(),
+                "quaternion": camera_poses[i, 3:].tolist(),
+            }
+            for i in range(camera_poses.shape[0])
+        ]
 
-        # 渲染图像
-        with torch.no_grad():
-            rendered_images = renderer.forward(
-                gt_mesh=meshes_batch,
-                camera_poses=camera_poses_tensor,
-                pose_format="cartesian",
-                fov=60.0
-            )['rgb']  # [N, 3, H, W]
+    def _build_camera_poses(
+        self,
+        idx: int,
+        data_item: Dict,
+        model_name: str,
+        num_views: int,
+    ) -> Tuple[torch.Tensor, List[Dict[str, List[float]]]]:
+        if self.use_manual_camera:
+            manual_positions = self._resolve_manual_camera_positions(idx, data_item)
+            if manual_positions is not None:
+                manual_look_at = self._resolve_manual_camera_look_at(idx, data_item)
+                manual_camera_pose = position_to_pose_tensor(
+                    manual_positions,
+                    up_axis=self.up_axis,
+                    look_at=manual_look_at,
+                )
+                return (
+                    manual_camera_pose.detach(),
+                    self._poses_tensor_to_list(manual_camera_pose),
+                )
 
-        # 确保返回CPU张量，避免pin_memory问题
-        return rendered_images.cpu()
-    
+        seed = self._resolve_view_seed(model_name, idx)
+        camera_poses_list = self._generate_camera_poses(num_views, seed=seed)
+        camera_pose_rows = [
+            torch.tensor(pose["position"] + pose["quaternion"], dtype=torch.float32)
+            for pose in camera_poses_list
+        ]
+        camera_poses_tensor = torch.stack(camera_pose_rows, dim=0)
+        return camera_poses_tensor, camera_poses_list
+
     def _resolve_manual_config(self, config, idx: int, data_item: Dict):
         if config is None:
             return None
@@ -386,6 +310,7 @@ class House3KDataset(BaseDataset):
         if value is None:
             return None
 
+        positions = torch.as_tensor(value, dtype=torch.float32)
         if positions.ndim == 1:
             if positions.numel() != 3:
                 raise ValueError(
@@ -410,6 +335,7 @@ class House3KDataset(BaseDataset):
         if value is None:
             return None
 
+        look_at = torch.as_tensor(value, dtype=torch.float32)
         if look_at.ndim == 1:
             if look_at.numel() != 3:
                 raise ValueError(
@@ -425,184 +351,36 @@ class House3KDataset(BaseDataset):
 
         return look_at
     
-    def render_custom_view(
-        self,
-        idx: int,
-        position: Union[Sequence[float], torch.Tensor],
-        *,
-        look_at: Optional[Union[Sequence[float], torch.Tensor]] = None,
-    ) -> Dict[str, torch.Tensor]:
-        """
-        根据自定义相机位置渲染图像，并自动计算朝向。
-
-        Args:
-            idx: 数据集中样本的索引。
-            position: 相机位置 (x, y, z)，可以是长度为3的序列或张量。
-            look_at: 可选的目标点 (x, y, z)，默认为原点。
-
-        Returns:
-            包含渲染图像、相机位姿以及基础元数据的字典。
-        """
-        data_item = self.data_list[idx]
-        mesh_path = self._get_mesh_path(data_item)
-        gt_mesh_data = self._load_mesh_data(
-            mesh_path,
-            normalize_method=self.normalize_method,
-            num_samples=self.num_samples,
-        )
-
-        renderer = self._get_renderer()
-
-        position_tensor = torch.as_tensor(position, dtype=torch.float32)
-        if position_tensor.ndim == 1:
-            if position_tensor.numel() != 3:
-                raise ValueError(
-                    f"position expects 3 values, but received shape {tuple(position_tensor.shape)}"
-                )
-            position_tensor = position_tensor.unsqueeze(0)
-        elif position_tensor.ndim != 2 or position_tensor.shape[1] != 3:
-            raise ValueError(
-                f"position must have shape [N, 3] or [3], but received {tuple(position_tensor.shape)}"
-            )
-
-        look_at_tensor: Optional[torch.Tensor] = None
-        if look_at is not None:
-            look_at_tensor = torch.as_tensor(look_at, dtype=torch.float32)
-            if look_at_tensor.ndim == 1:
-                if look_at_tensor.numel() != 3:
-                    raise ValueError(
-                        f"look_at expects 3 values, but received shape {tuple(look_at_tensor.shape)}"
-                    )
-                look_at_tensor = look_at_tensor.unsqueeze(0)
-            elif look_at_tensor.ndim != 2 or look_at_tensor.shape[1] != 3:
-                raise ValueError(
-                    f"look_at must have shape [N, 3] or [3], but received {tuple(look_at_tensor.shape)}"
-                )
-
-        camera_pose_tensor = position_to_pose_tensor(
-            position_tensor,
-            up_axis=self.up_axis,
-            look_at=look_at_tensor,
-        )
-
-        num_views = camera_pose_tensor.shape[0]
-        meshes_batch = mesh.extend(num_views)
-
-        with torch.no_grad():
-            rendered_images = renderer.forward(
-                gt_mesh=meshes_batch,
-                camera_poses=camera_pose_tensor,
-                pose_format="cartesian",
-                fov=60.0,
-            )
-
-        rendered_images = rendered_images.detach().cpu()
-        camera_pose_cpu = camera_pose_tensor.detach().cpu()
-
-        pose_dicts = [
-            {
-                "position": camera_pose_cpu[i, :3].tolist(),
-                "quaternion": camera_pose_cpu[i, 3:].tolist(),
-            }
-            for i in range(camera_pose_cpu.shape[0])
-        ]
-
-        result = {
-            "rendered_images": rendered_images,
-            "camera_poses": camera_pose_cpu,
-            "gt_mesh_data": gt_mesh_data,
-            "mesh_path": mesh_path,
-            "batch_name": data_item["batch_name"],
-            "set_name": data_item["set_name"],
-            "model_name": data_item["model_name"],
-        }
-        result["camera_pose_dicts"] = pose_dicts
-
-        if look_at_tensor is not None:
-            result["look_at"] = look_at_tensor.detach().cpu()
-
-        return result
-    
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """返回结构化样本：inputs/targets/mesh/meta。"""
         data_item = self.data_list[idx]
+        '''
+        from icecream import ic
+        ic(data_item)
+        {
+            'batch_name': 'BATCH_3',
+            'has_texture': True,
+            'model_name': 'BAT3_SETD_HOUSE33',
+            'mtl_path': '/mnt/sdb/chenmohan/VGGT-NBV/models/House3K_obj/BATCH_3/SetD/BAT3_SETD_HOUSE33.mtl',
+            'obj_path': '/mnt/sdb/chenmohan/VGGT-NBV/models/House3K_obj/BATCH_3/SetD/BAT3_SETD_HOUSE33.obj',
+            'set_name': 'SetD',
+            'set_path': '/mnt/sdb/chenmohan/VGGT-NBV/models/House3K_obj/BATCH_3/SetD'
+        }
+        '''
         mesh_path = self._get_mesh_path(data_item)
         gt_mesh_data = self._load_mesh_data(
             mesh_path,
             normalize_method=self.normalize_method,
             num_samples=self.num_samples,
         )
-
+        
         model_name = data_item["model_name"]
-        num_candidate_views = self._num_candidate_views()
-        selected_indices = self._sample_view_indices(model_name, num_candidate_views)
-
-        camera_poses_list: List[Dict] = []
-        initial_images: torch.Tensor
-        camera_poses_tensor: torch.Tensor
-
-        manual_mode = False
-        if self.use_manual_camera:
-            renderer = self._get_renderer()
-            manual_positions = self._resolve_manual_camera_positions(
-                idx, data_item
-            )
-            if manual_positions is not None:
-                manual_mode = True
-                manual_look_at = self._resolve_manual_camera_look_at(
-                    idx, data_item
-                )
-                manual_camera_pose = position_to_pose_tensor(
-                    manual_positions,
-                    up_axis=self.up_axis,
-                    look_at=manual_look_at,
-                )
-                mesh = gt_mesh_data["normalized_mesh"]
-                meshes_batch = mesh.extend(manual_camera_pose.shape[0])
-                with torch.no_grad():
-                    rendered = renderer.forward(
-                        gt_mesh=meshes_batch,
-                        camera_poses=manual_camera_pose,
-                        pose_format="cartesian",
-                        fov=60.0,
-                    )
-                initial_images = rendered.detach().cpu()
-                camera_poses_tensor = manual_camera_pose.detach().cpu()
-                selected_indices = list(range(camera_poses_tensor.shape[0]))
-                camera_poses_list = [
-                    {
-                        "position": camera_poses_tensor[i, :3].tolist(),
-                        "quaternion": camera_poses_tensor[i, 3:].tolist(),
-                    }
-                    for i in range(camera_poses_tensor.shape[0])
-                ]
-
-        if not manual_mode:
-            if selected_indices:
-                seed = abs(hash(model_name)) % (2 ** 32 - 1)
-                camera_poses_list = self._generate_camera_poses(
-                    num_candidate_views, seed=seed
-                )
-
-                initial_images = self._render_images_from_mesh_data(
-                    gt_mesh_data=gt_mesh_data,
-                    camera_poses=camera_poses_list,
-                    selected_indices=selected_indices,
-                )
-
-                selected_camera_poses = [camera_poses_list[i] for i in selected_indices]
-                camera_pose_rows = [
-                    torch.tensor(
-                        pose["position"] + pose["quaternion"],
-                        dtype=torch.float32,
-                    )
-                    for pose in selected_camera_poses
-                ]
-                camera_poses_tensor = torch.stack(camera_pose_rows, dim=0)
-            else:
-                logger.warning(
-                    f"未选择任何相机位姿，模型名称: {model_name}"
-                )
+        camera_poses_tensor, camera_poses_list = self._build_camera_poses(
+            idx,
+            data_item,
+            model_name,
+            self.num_initial_views,
+        )
 
         gt_supervision = dict(gt_mesh_data)
         original_mesh = gt_supervision.pop("original_mesh", None)
@@ -611,8 +389,7 @@ class House3KDataset(BaseDataset):
 
         metadata = {
             "data_item": data_item,
-            "selected_indices": selected_indices,
-            "camera_poses_list": camera_poses_list,
+            # "camera_poses_list": camera_poses_list,
             "mesh_path": mesh_path,
             "batch_name": data_item["batch_name"],
             "set_name": data_item["set_name"],
@@ -621,17 +398,9 @@ class House3KDataset(BaseDataset):
             "num_samples": gt_supervision.get("num_samples"),
         }
 
-        gt_targets = self._build_gt_targets(gt_mesh_data, camera_poses_tensor, metadata)
-        if gt_targets:
-            gt_supervision.update(gt_targets)
-
         inputs = {
-            "images": initial_images,
             "camera_poses": camera_poses_tensor,
         }
-        depth_z = gt_supervision.get("depth_z")
-        if depth_z is not None:
-            inputs["depth_z"] = depth_z
 
         sample = {
             "inputs": inputs,
@@ -647,48 +416,6 @@ class House3KDataset(BaseDataset):
 
         return sample
 
-    def _build_gt_targets(
-        self,
-        gt_mesh_data: Dict[str, torch.Tensor],
-        camera_poses: Optional[torch.Tensor],
-        metadata: Dict,
-    ) -> Dict[str, torch.Tensor]:
-        if camera_poses is None or camera_poses.numel() == 0:
-            return {}
-
-        renderer = self._get_renderer()
-        if renderer is None:
-            return {}
-
-        normalized_mesh = gt_mesh_data.get("normalized_mesh")
-        if normalized_mesh is None:
-            return {}
-
-        # Ensure poses include batch dimension expected by renderer helper.
-        poses_with_batch = camera_poses.unsqueeze(0) if camera_poses.dim() == 2 else camera_poses
-        point_maps, valid_masks = render_gt_point_maps(
-            renderer=renderer,
-            mesh_batch=normalized_mesh,
-            camera_poses=poses_with_batch,
-        )
-
-        # Remove batch dimension for dataset sample.
-        point_maps = point_maps.squeeze(0).contiguous()
-        valid_masks = valid_masks.squeeze(0).contiguous()
-        depth_z = world_points_to_camera_depth(
-            point_maps,
-            camera_poses,
-            valid_masks=valid_masks,
-        )
-        depth_z_viz = normalize_depth_for_visualization(depth_z, valid_masks)
-
-        return {
-            "gt_point_maps": point_maps.to(dtype=torch.float32),
-            "gt_valid_masks": valid_masks.to(dtype=torch.bool),
-            "depth_z": depth_z,
-            "depth_z_viz": depth_z_viz,
-        }
-
     @property
     def dataset_info(self) -> Dict:
         """返回数据集信息"""
@@ -697,9 +424,11 @@ class House3KDataset(BaseDataset):
             "train_ratio": self.train_ratio,
             "val_ratio": self.val_ratio,
             "test_ratio": self.test_ratio,
-            "use_cache": self.use_cache,
             "dynamic_rendering": True,
             "has_prerendered_images": False,
             "manual_camera_enabled": self.use_manual_camera,
+            "camera_radius": self.camera_radius,
+            "camera_radius_variation": self.camera_radius_variation,
+            "camera_radius_mode": self.camera_radius_mode,
         })
         return base_info

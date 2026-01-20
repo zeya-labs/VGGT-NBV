@@ -13,6 +13,7 @@ from tqdm import tqdm
 
 from ..rendering import DifferentiableRenderer
 from ..training.loss import ChamferDistance
+from ..utils.render_utils import render_mesh_views
 from loguru import logger
 if TYPE_CHECKING:
     from ..models import MapAnythingWrapper, BaseNBVPolicy
@@ -88,10 +89,28 @@ def _evaluate_single_sample(test_sample: Dict,
     targets = test_sample.get("targets", {})
     mesh = test_sample.get("mesh", {})
 
-    initial_images = inputs["images"].to(device)
+    initial_images = inputs.get("images")
     initial_camera_poses = inputs["camera_poses"].to(device)
     gt_mesh_data = targets["gt_mesh_data"]
     mesh_batch = mesh.get("normalized")
+    if mesh_batch is not None:
+        mesh_batch = mesh_batch.to(device)
+
+    if initial_images is None:
+        if mesh_batch is None:
+            raise RuntimeError("Mesh batch missing when rendering initial images.")
+        render_out = render_mesh_views(
+            renderer=renderer,
+            mesh_batch=mesh_batch,
+            camera_poses=initial_camera_poses,
+            out_rgb=True,
+            out_points=False,
+            out_mask=False,
+            out_depth=False,
+        )
+        initial_images = render_out["rgb"].squeeze(0)
+    else:
+        initial_images = initial_images.to(device)
     
     # 记录开始时间
     start_time = time.time()
