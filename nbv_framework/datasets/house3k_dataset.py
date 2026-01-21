@@ -210,7 +210,6 @@ class House3KDataset(BaseDataset):
         if mode == "fixed":
             seed_material = f"{model_name}|{base_seed}"
         elif mode == "deterministic_per_call":
-            logger.info(f"当前数据加载进程ID: {idx}")
             seed_material = f"{model_name}|{idx}|{base_seed}"
         elif mode == "fully_random":
             return None
@@ -368,6 +367,7 @@ class House3KDataset(BaseDataset):
         }
         '''
         mesh_path = self._get_mesh_path(data_item)
+        # logger.info(f"Loading mesh from {mesh_path}")
         gt_mesh_data = self._load_mesh_data(
             mesh_path,
             normalize_method=self.normalize_method,
