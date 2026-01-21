@@ -363,8 +363,8 @@ class NBVTrainer(LightningModule):
                 gt_point_maps = render_out.get("points")
                 if gt_point_maps is None:
                     raise RuntimeError("Renderer did not return point maps.")
-                if gt_point_maps.is_floating_point() and gt_point_maps.dtype != self.dtype:
-                    gt_point_maps = gt_point_maps.to(dtype=self.dtype)
+                # if gt_point_maps.is_floating_point() and gt_point_maps.dtype != self.dtype:
+                #     gt_point_maps = gt_point_maps.to(dtype=self.dtype)
                 gt_mesh_data["gt_point_maps"] = gt_point_maps
 
             if needs_mask:
@@ -378,8 +378,8 @@ class NBVTrainer(LightningModule):
             depth_z = render_out.get("depth")
             if depth_z is None:
                 raise RuntimeError("Renderer did not return depth output.")
-            if depth_z.is_floating_point() and depth_z.dtype != self.dtype:
-                depth_z = depth_z.to(dtype=self.dtype)
+            # if depth_z.is_floating_point() and depth_z.dtype != self.dtype:
+            #     depth_z = depth_z.to(dtype=self.dtype)
             gt_mesh_data["depth_z"] = depth_z
             gt_mesh_data["depth_z_viz"] = normalize_depth_for_visualization(
                 depth_z, gt_valid_masks
@@ -664,7 +664,7 @@ class NBVTrainer(LightningModule):
         axis_index = {"X": 0, "Y": 1, "Z": 2}.get(up_axis, 1)
         min_height = -floor_margin
 
-        dtype = self.dtype
+        dtype = torch.float32
         positions = torch.zeros(batch_size, 3, device=device, dtype=dtype)
         filled = 0
         attempts = 0
@@ -1012,28 +1012,32 @@ class NBVTrainer(LightningModule):
         self._last_predicted_relative_position = None
         self._last_next_camera_pose = None
 
-    def transfer_batch_to_device(self, batch: Dict[str, torch.Tensor], device: torch.device, dataloader_idx: int):
-        """递归迁移 inputs/targets 到设备，float 张量统一 float32。meta 保持在 CPU。"""
+def transfer_batch_to_device(self, batch: Dict[str, Any], device: torch.device, dataloader_idx: int):
+    
+    def move_item(x):
+        # 处理 Tensor：只移动设备，不改变精度(保持 float32 以保证几何计算稳定)
+        if isinstance(x, torch.Tensor):
+            # non_blocking=True 是一个小优化，允许数据传输和GPU计算重叠
+            return x.to(device, non_blocking=True)
+            
+        # 处理 PyTorch3D Meshes：调用其内部的 .to() 方法
+        if isinstance(x, Meshes):
+            return x.to(device)
+            
+        return x
 
-        dtype = self.dtype
-
-        def move_item(x):
-            if isinstance(x, torch.Tensor):
-                moved = x.to(device)
-                return moved.to(dtype=dtype) if moved.is_floating_point() else moved
-            if isinstance(x, Meshes):
-                return x.to(device)
-            return x
-
-        moved: Dict[str, Any] = {}
-        data_keys = {"inputs", "targets", "mesh"}
-        for key, value in batch.items():
-            if key in data_keys:
-                moved[key] = apply_to_collection(
-                    value,
-                    dtype=(torch.Tensor, Meshes),
-                    function=move_item,
-                )
-            else:
-                moved[key] = value
-        return moved
+    moved: Dict[str, Any] = {}
+    # 只处理这三个 key，meta 信息保持原样留在 CPU
+    data_keys = {"inputs", "targets", "mesh"}
+    
+    for key, value in batch.items():
+        if key in data_keys:
+            moved[key] = apply_to_collection(
+                value,
+                dtype=(torch.Tensor, Meshes),
+                function=move_item,
+            )
+        else:
+            moved[key] = value
+            
+    return moved
