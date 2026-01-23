@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NBV WebUI</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <h1>NBV WebUI</h1>
+
+        <div class="section">
+          <label for="model-path">Model Path (server-side)</label>
+          <div class="row">
+            <input id="model-path" type="text" placeholder="models/House3K_obj/BATCH_1/.../model.obj" />
+            <button id="load-model">Load</button>
+          </div>
+          <div id="model-status" class="status"></div>
+        </div>
+
+        <div class="section">
+          <div class="row">
+            <h2>Cameras</h2>
+            <button id="add-camera">Add</button>
+            <button id="clear-cameras">Clear</button>
+          </div>
+          <div id="camera-list" class="list"></div>
+        </div>
+
+        <div class="section">
+          <div class="row">
+            <h2>Render Settings</h2>
+          </div>
+          <div class="row">
+            <label for="image-size">Image Size</label>
+            <input id="image-size" type="number" min="64" max="1024" value="256" />
+          </div>
+          <div class="row">
+            <label for="fov">FOV</label>
+            <input id="fov" type="number" min="20" max="120" value="60" />
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="row">
+            <h2>History</h2>
+            <button id="clear-history">Clear</button>
+          </div>
+          <div id="history" class="history"></div>
+        </div>
+      </aside>
+
+      <main id="viewer">
+        <canvas id="three-canvas"></canvas>
+      </main>
+    </div>
+
+    <button id="calculate-btn" class="floating">Calculate</button>
+
+    <script type="module" src="/static/app.js"></script>
+  </body>
+</html>
