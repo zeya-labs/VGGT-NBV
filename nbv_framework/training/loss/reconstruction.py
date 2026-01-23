@@ -18,10 +18,10 @@ class ReconstructionLoss(nn.Module):
 
     def __init__(
         self,
-        chamfer_weight: float = 10.0,
+        chamfer_weight: float = 5.0,
         confidence_weight: float = 0.0,
         viewpoint_weight: float = 0.0,
-        pose_penalty_weight: float = 0.0,
+        pose_penalty_weight: float = 1.0,
         renderer: Optional["DifferentiableRenderer"] = None,
         pose_up_axis: str = "Y",
         save_point_clouds: bool = True,

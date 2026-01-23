@@ -103,5 +103,4 @@ class NBVDataModule(pl.LightningDataModule):
             "manual_camera_look_at": self.cfg.manual_camera_look_at,
             "use_manual_camera": self.cfg.use_manual_camera,
             "view_sampling_mode": getattr(self.cfg, "view_sampling_mode", "deterministic_per_call"),
-            "process_rank": getattr(self.cfg, "rank", 0),
         }

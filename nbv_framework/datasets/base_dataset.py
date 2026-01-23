@@ -28,7 +28,7 @@ class BaseDataset(Dataset, ABC):
         normalize_method: str = "quantile",
         num_samples: int = 10000,
         up_axis: str = "Y",
-        seed: Optional[int] = None,
+        seed: Optional[int] = 42,
         tensor_dtype: torch.dtype = torch.float32,
         **kwargs
     ):

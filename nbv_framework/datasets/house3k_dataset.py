@@ -76,6 +76,7 @@ class House3KDataset(BaseDataset):
             ]
         ] = None,
         use_manual_camera: bool = False,
+        up_axis: str = "Y",
         seed: int = 42,
         **kwargs,
     ):
@@ -101,6 +102,8 @@ class House3KDataset(BaseDataset):
             manual_camera_position: 手动指定的相机位置，支持单个位置、列表或按模型名称/索引映射
             manual_camera_look_at: 手动指定的相机朝向目标点，格式同上，默认为原点
             use_manual_camera: 是否启用手动相机逻辑
+            up_axis: 相机向上轴，支持 "Y" (默认) 或 "Z"
+            seed: 随机种子，用于相机位姿生成
             **kwargs: 其他参数
         """
         self.train_ratio = train_ratio
@@ -111,7 +114,6 @@ class House3KDataset(BaseDataset):
         self.manual_camera_position = manual_camera_position
         self.manual_camera_look_at = manual_camera_look_at
         self.view_sampling_mode = str(view_sampling_mode).lower()
-        self.seed = seed
         self.camera_radius = float(camera_radius)
         self.camera_radius_variation = float(camera_radius_variation)
         self.camera_radius_mode = str(camera_radius_mode).lower()
@@ -135,6 +137,8 @@ class House3KDataset(BaseDataset):
             split=split,
             normalize_method=normalize_method,
             num_samples=num_samples,
+            up_axis=up_axis,
+            seed=seed,
             **kwargs
         )
     
@@ -144,7 +148,7 @@ class House3KDataset(BaseDataset):
 
         扫描所有批次目录，找到可用 .obj 文件，按比例分割。
         """
-        logger.info(f"正在扫描House3K数据集: {self.data_root}")
+        logger.info(f"正在扫描House3K数据集: {self.data_root}，seed={self.seed}")
         data_root_path = Path(self.data_root)
 
         # 查找所有批次目录

@@ -239,6 +239,14 @@ class NBVTrainer(LightningModule):
             rotation_c2w_row,
         ).squeeze(1)
         absolute_position = reference_position + predicted_relative_position_world
+        dist = torch.norm(absolute_position, dim=-1, keepdim=True)
+        
+        min_r, max_r = 2.7, 4.0 
+        
+        clamped_dist = torch.clamp(dist, min=min_r, max=max_r)
+        
+        absolute_position = absolute_position * (clamped_dist / (dist + 1e-8))
+        
         next_camera_pose = position_to_pose_tensor(absolute_position)
         return next_camera_pose, predicted_relative_position, absolute_position
 

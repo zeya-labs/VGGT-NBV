@@ -1,5 +1,5 @@
 """
-可微分渲染器]
+可微分渲染器
 """
 
 import torch
@@ -37,11 +37,23 @@ class DifferentiableRenderer(nn.Module):
             blur_radius=1e-5, 
             faces_per_pixel=4, 
             perspective_correct=False,
+            clip_barycentric_coords=True,
+            cull_backfaces=True  
         )
         
         # --- 2. 材质与混合参数 ---
         self.blend_params = BlendParams(background_color=(0.0, 0.0, 0.0))
-        self.materials = Materials(shininess=128.0)
+        
+        # ambient_color=1.0: 让纹理颜色 100% 呈现
+        # diffuse_color=0.0: 关闭漫反射（防止受光照角度影响变亮或变暗）
+        # specular_color=0.0: 关闭高光（防止出现亮斑）
+        self.materials = Materials(
+            device="cpu", # 初始在CPU即可，forward里self.shader.to(device)会自动搬运
+            ambient_color=((1.0, 1.0, 1.0),), # 材质对光照的响应率设为 1
+            diffuse_color=((1.0, 1.0, 1.0),),
+            specular_color=((0.0, 0.0, 0.0),), # 重建初期建议关闭高光，太难优化
+            shininess=0.0
+        )
         
         # --- 3. 组件初始化 ---
         # 光栅化器 (负责几何投影)
@@ -146,12 +158,28 @@ class DifferentiableRenderer(nn.Module):
 
             # --- RGB 计算 (纯环境光) ---
             if out_rgb:
-                # 构造纯白环境光，无镜面反射
-                lights = PointLights(device=device, ambient_color=((1.0, 1.0, 1.0),))
-                # Shader 会利用所有 K=8 个面进行加权混合 (抗锯齿)
+                # 构造纯白环境光，显式关闭漫反射和镜面反射光分量
+                light_location = cameras.get_camera_center()
+                lights = PointLights(
+                    device=device, 
+                    ambient_color=((0.4, 0.4, 0.4),),  # 基础亮度：0.4
+                    diffuse_color=((0.6, 0.6, 0.6),),  # 几何亮度：0.6
+                    specular_color=((0.0, 0.0, 0.0),), # 高光：0
+                    location=light_location         # 光源放在相机附近或固定位置
+                )
+                
+                # Shader 计算：
+                # Color = Texture * (Ambient_Mat * Ambient_Light + 0 + 0)
+                #       = Texture * (1.0 * 1.0)
+                #       = Texture
                 images = self.shader(fragments, gt_mesh, cameras=cameras, lights=lights)
+                
                 # [B, H, W, 4] -> [B, 3, H, W]
-                outputs['rgb'] = images.permute(0, 3, 1, 2)[:, :3, :, :]
+                # PyTorch3D 的输出 alpha 通道已经处理了背景混合，这里直接取 RGB
+                rgb_images = images.permute(0, 3, 1, 2)[:, :3, :, :]
+                
+                # 额外的过曝保护
+                outputs['rgb'] = rgb_images.clamp(0.0, 1.0)
 
             # --- Depth 计算 ---
             if out_depth:

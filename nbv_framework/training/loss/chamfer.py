@@ -145,7 +145,7 @@ class ChamferDistance(nn.Module):
             pred_batched,
             x_lengths=gt_lengths,
             y_lengths=pred_lengths,
-            single_directional = True,
+            # single_directional = True,
         )
 
         save_dir = self._resolve_point_cloud_directory(point_cloud_dir)
