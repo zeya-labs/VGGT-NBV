@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import sys
 import uuid
@@ -19,6 +20,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from pipeline import CameraInput, compute_chamfer_record, compute_mesh_info, resolve_mesh_path
+
+logger = logging.getLogger("uvicorn.error")
 
 
 FRONTEND_DIR = BASE_DIR / "frontend"
@@ -137,7 +140,8 @@ def calculate(payload: ComputeRequest) -> ComputeResponse:
             fov=payload.fov,
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        logger.exception("Calculate failed for mesh %s", mesh_path)
+        raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
 
     record_payload = {
         "record_id": record_id,

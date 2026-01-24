@@ -110,7 +110,7 @@ def compute_chamfer_record(
     mesh_data = load_and_normalize_mesh(
         str(mesh_path),
         normalize_method="quantile",
-        num_samples=100000,
+        num_samples=32768,
     )
     normalized_mesh = mesh_data["normalized_mesh"]
     gt_points = mesh_data["gt_points"]
@@ -151,7 +151,7 @@ def compute_chamfer_record(
         confidence_weight=0.0,
         viewpoint_weight=0.0,
         pose_penalty_weight=0.0,
-        save_point_clouds=False,
+        save_point_clouds=True,
     )
 
     total_loss, components = loss_fn(

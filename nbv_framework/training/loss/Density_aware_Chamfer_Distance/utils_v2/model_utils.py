@@ -16,7 +16,7 @@ import torch.nn.functional as F
 from .metrics import cd, emd, fscore
 
 
-def calc_dcd(x, gt, alpha=1000, n_lambda=1, return_raw=False, non_reg=False):
+def calc_dcd(x, gt, alpha=40, n_lambda=0.5, return_raw=False, non_reg=False):
     """密度感知倒角距离。
 
     参数：

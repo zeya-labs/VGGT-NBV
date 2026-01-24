@@ -44,7 +44,7 @@ class NBVExperimentConfig:
     num_workers: int = 16
     max_epochs: int = 1000
     normalize_method: str = "mean"
-    num_samples: int = 100000
+    num_samples: int = 32768
     weight_decay: float = 0
     use_epoch_seed: bool = False
 
