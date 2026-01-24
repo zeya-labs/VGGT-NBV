@@ -41,15 +41,9 @@ class PointCloudExtractor:
         flat_conf = conf_data.view(B, -1) # (B, N)
 
         # 3. 计算 Mask
-        if confidence_threshold > 0.0:
-            # 优化: 在 GPU 上对整个 Batch 计算分位数可能比逐个样本快
-            # 注意: 如果需要严格的单样本分位数，这里还是需要 loop，但通常全局统计或固定阈值足够
-            # 这里保持简单的高效逻辑：
-            mask = (flat_conf > 1e-5)
-            if confidence_threshold > 0.1: # 只有非微小阈值才计算 quantile
-                # 为了速度，这里简化为绝对阈值判断，或者你可以用 topk 代替 quantile
-                thresh_val = torch.quantile(flat_conf, confidence_threshold / 100.0)
-                mask = mask & (flat_conf >= thresh_val)
+        if confidence_threshold > 0.1:
+            thresh_val = torch.quantile(flat_conf, confidence_threshold / 100.0)
+            mask = (flat_conf >= thresh_val)
         else:
             mask = flat_conf > 1e-5
 

@@ -18,7 +18,7 @@ class ReconstructionLoss(nn.Module):
 
     def __init__(
         self,
-        chamfer_weight: float = 5.0,
+        chamfer_weight: float = 10.0,
         confidence_weight: float = 0.0,
         viewpoint_weight: float = 0.0,
         pose_penalty_weight: float = 1.0,
@@ -94,7 +94,7 @@ class ReconstructionLoss(nn.Module):
         combined_images_batch: Optional[torch.Tensor],
         combined_camera_poses: Optional[torch.Tensor],
         return_components: bool = False,
-        point_cloud_dir: Optional[str] = None,
+        point_cloud_dir: Optional[str] = None,# runs/.../logs/images/step_/rank_/
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, float]]]:
 
         device = combined_images_batch.device
@@ -108,9 +108,6 @@ class ReconstructionLoss(nn.Module):
             recon_data,
             gt_data,
             combined_images_batch,
-            combined_camera_poses,
-            device,
-            dtype,
             point_cloud_dir=point_cloud_dir,
         )
         total_loss = self._add_loss(

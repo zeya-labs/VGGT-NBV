@@ -27,8 +27,8 @@ def build_recon_from_point_maps(
     使用预先获得的点云直接拼装重建结果, 不经过 MapAnything 前向。
 
     Args:
-        point_maps: [B, S, H, W, 3] 世界坐标点云(例如 new_point_maps 或拼接后的 updated_point_maps)。
-        camera_poses: [B, S, 7] 或 [B, 7] 的相机位姿 (position xyz + quaternion qx,qy,qz,qw)。
+        point_maps: [B, S, H, W, 3] 世界坐标点云。
+        camera_poses: [B, S, 7] 的相机位姿 (position xyz + quaternion qx,qy,qz,qw)。
         valid_masks: 可选的有效像素掩码, [B, S, H, W], 用作 non_ambiguous_mask。
         depth_z: 可选的深度张量, 若为空则由 point_maps 和 camera_poses 计算。
 

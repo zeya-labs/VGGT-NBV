@@ -796,7 +796,6 @@ class NBVTrainer(LightningModule):
             initial_images: 初始视图
         """
         prepared = self._prepare_batch(batch)
-
         policy_inference = self._infer_next_pose(
             initial_images=prepared.initial_images,
             camera_poses_batch=prepared.camera_poses,

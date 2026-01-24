@@ -1,61 +1,158 @@
-"""Chamfer distance loss helpers."""
-
 from __future__ import annotations
 
 import os
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union, Literal
 import torch
 import torch.nn as nn
 import torch.nn.utils.rnn as rnn_utils
 
-from pytorch3d.loss import chamfer_distance
 from mapanything.utils.geometry import apply_log_to_norm
 import trimesh
 
+import sys
+current_dir = os.path.dirname(os.path.abspath(__file__))
+dcd_dir = os.path.join(current_dir, "Density_aware_Chamfer_Distance")
+if dcd_dir not in sys.path:
+    sys.path.append(dcd_dir)
+from utils_v2.model_utils import calc_dcd, calc_cd, calc_emd
+
+MetricType = Literal["cd", "emd", "dcd"]
+CDVariant = Literal["cd_p", "cd_t"]
+
 class ChamferDistance(nn.Module):
-    """Compute Chamfer distance with optional downsampling."""
-
-    _pytorch3d_bf16_knn_cuda_supported: Optional[bool] = None
-    _pytorch3d_bf16_knn_cpu_supported: Optional[bool] = None
-
+    """Compute point cloud distance (cd/emd/dcd) with optional downsampling."""
     def __init__(
         self,
-        *,
         max_points_per_cloud: int = 32768,
-        use_log_warp: bool = False,
+        save_point_clouds: bool = False,
+        point_cloud_dir_name: str = "point_clouds",
+        use_log_warp: bool = False, # 是否开启对对数压缩
+        distance_type: MetricType = "emd",
+        cd_variant: CDVariant = "cd_t",
+        dcd_alpha: float = 40.0,
+        dcd_n_lambda: float = 0.5,
+        dcd_non_reg: bool = False,
+        emd_eps: float = 0.005,
+        emd_iterations: int = 50,
     ) -> None:
         super().__init__()
         self.max_points_per_cloud = max_points_per_cloud
-        self.save_point_clouds: bool = True
-        self.point_cloud_subdir: str = "point_clouds"
+        self.save_point_clouds: bool = save_point_clouds
+        self.point_cloud_dir_name: str = point_cloud_dir_name
         self.use_log_warp: bool = use_log_warp
-
-    def configure_point_cloud_logging(
+        self.distance_type: MetricType = distance_type
+        self.cd_variant: CDVariant = cd_variant
+        self.dcd_alpha = dcd_alpha
+        self.dcd_n_lambda = dcd_n_lambda
+        self.dcd_non_reg = dcd_non_reg
+        self.emd_eps = emd_eps
+        self.emd_iterations = emd_iterations
+        
+    def configure_distance(
         self,
-        *,
-        max_points_per_cloud: Optional[int] = None,
-        enable_save: Optional[bool] = None,
-        subdir_name: Optional[str] = None,
+        distance_type: Optional[MetricType] = None,
     ) -> None:
-        if max_points_per_cloud is not None:
-            self.max_points_per_cloud = max_points_per_cloud
-        if enable_save is not None:
-            self.save_point_clouds = bool(enable_save)
-        if subdir_name is not None:
-            self.point_cloud_subdir = subdir_name
+        if distance_type is not None:
+            self.distance_type = distance_type
+            
+    @staticmethod
+    def _sample_points(points: torch.Tensor, target: int) -> torch.Tensor:
+        if points.shape[0] <= target:
+            return points
+        idx = torch.randperm(points.shape[0], device=points.device)[:target]
+        return points.index_select(0, idx)
+
+    def _can_compute_batched(
+        self,
+        pred_batched: torch.Tensor,
+        gt_batched: torch.Tensor,
+        pred_lengths: torch.Tensor,
+        gt_lengths: torch.Tensor,
+    ) -> bool:
+        # 0. 空数据防御
+        if pred_lengths.numel() == 0 or gt_lengths.numel() == 0:
+            return False
+
+        # 1. 检查长度一致性 (利用 unique)
+        p_unique = pred_lengths.unique()
+        g_unique = gt_lengths.unique()
+
+        # 如果 unique 后的元素数量不为 1，说明 batch 内长度参差不齐，含 padding
+        if p_unique.numel() != 1 or g_unique.numel() != 1:
+            return False
+
+        # 提取统一后的长度数值
+        p_len, g_len = p_unique.item(), g_unique.item()
+
+        # 2. 检查是否存在 Padding (有效长度必须等于 Tensor 的物理维度)
+        # 如果由 rnn_utils.pad_sequence 产生，物理维度是最大长度。
+        # 这里要求物理维度必须等于当前有效长度，才算完全没 padding。
+        if p_len != pred_batched.shape[1] or g_len != gt_batched.shape[1]:
+            return False
+
+        # 3. EMD 特殊限制: 预测点数必须等于真值点数
+        if self.distance_type == "emd" and p_len != g_len:
+            return False
+
+        return True
+
+    def _compute_distance_batched(
+        self, pred_batched: torch.Tensor, gt_batched: torch.Tensor
+    ) -> torch.Tensor:
+        pred_batched = pred_batched.contiguous().float()
+        gt_batched = gt_batched.contiguous().float()
+        if self.distance_type == "cd":
+            cd_p, cd_t = calc_cd(pred_batched, gt_batched)
+            return cd_p if self.cd_variant == "cd_p" else cd_t
+        if self.distance_type == "emd":
+            return calc_emd(pred_batched, gt_batched, eps=self.emd_eps, iterations=self.emd_iterations)
+        if self.distance_type == "dcd":
+            return calc_dcd(
+                pred_batched,
+                gt_batched,
+                alpha=self.dcd_alpha,
+                n_lambda=self.dcd_n_lambda,
+                non_reg=self.dcd_non_reg,
+            )[0]
+        raise ValueError(f"Unknown distance_type: {self.distance_type}")
+
+    def _compute_distance(
+        self,
+        pred_batched: torch.Tensor,
+        gt_batched: torch.Tensor,
+        pred_lengths: torch.Tensor,
+        gt_lengths: torch.Tensor,
+    ) -> torch.Tensor:
+        if self._can_compute_batched(pred_batched, gt_batched, pred_lengths, gt_lengths):
+            return self._compute_distance_batched(pred_batched, gt_batched)
+
+        losses: List[torch.Tensor] = []
+        for i in range(pred_batched.shape[0]):
+            p_len = int(pred_lengths[i].item())
+            g_len = int(gt_lengths[i].item())
+            pred_i = pred_batched[i, :p_len]
+            gt_i = gt_batched[i, :g_len]
+            if self.distance_type == "emd" and p_len != g_len:
+                target = min(p_len, g_len)
+                pred_i = self._sample_points(pred_i, target)
+                gt_i = self._sample_points(gt_i, target)
+            loss_i = self._compute_distance_batched(pred_i.unsqueeze(0), gt_i.unsqueeze(0))
+            losses.append(loss_i.squeeze(0))
+        return torch.stack(losses, dim=0)
 
     def _to_batched(
         self, data: Union[List[torch.Tensor], torch.Tensor], *, downsample: bool
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         将输入统一为 (B, N, 3) 和长度张量。
-        若需要，按 max_points_per_cloud 下采样。
+        若需要，按 max_points_per_cloud 随机下采样。
+        
+        返回：
+            batched: (B, N, 3) 张量，包含所有点云。
+            lengths: (B,) 张量，记录每个点云的有效点数。
         """
         if torch.is_tensor(data):
-            if data.ndim == 2:
-                data = data.unsqueeze(0)
-            if data.ndim != 3:
-                raise ValueError(f"Expected tensor with shape [B, N, 3], got {tuple(data.shape)}")
+            assert data.ndim == 3, f"Expected tensor with shape [B, N, 3], got {tuple(data.shape)}"
             lengths = torch.full(
                 (data.shape[0],),
                 data.shape[1],
@@ -64,8 +161,6 @@ class ChamferDistance(nn.Module):
             )
             batched = data
         else:
-            if len(data) == 0:
-                return torch.empty((0, 0, 3)), torch.zeros((), dtype=torch.long)
             lengths = torch.tensor([p.shape[0] for p in data], device=data[0].device, dtype=torch.long)
             batched = rnn_utils.pad_sequence(data, batch_first=True)
 
@@ -98,99 +193,27 @@ class ChamferDistance(nn.Module):
         pred_batched, pred_lengths = self._to_batched(pred, downsample=True)
         gt_batched, gt_lengths = self._to_batched(gt, downsample=False)
 
-        if pred_lengths.numel() == 0 or gt_lengths.numel() == 0:
-            device = pred_batched.device if torch.is_tensor(pred_batched) else torch.device("cpu")
-            return torch.tensor(0.0, device=device, requires_grad=True)
-
-        if pred_batched.shape[0] != gt_batched.shape[0]:
-            raise ValueError(
-                f"Batch size mismatch in Chamfer loss: Pred {pred_batched.shape[0]} vs GT {gt_batched.shape[0]}."
-            )
-
-        # PyTorch3D's chamfer_distance does not guarantee stable behavior when a batch item
-        # contains 0 points (x_lengths==0). Filter them out to avoid NaNs/inf gradients.
-        valid_batch = (pred_lengths > 0) & (gt_lengths > 0)
-        save_requested = point_cloud_dir is not None
-        if not bool(valid_batch.all()):
-            if not bool(valid_batch.any()):
-                return torch.tensor(0.0, device=pred_batched.device, requires_grad=True)
-            pred_batched = pred_batched[valid_batch]
-            pred_lengths = pred_lengths[valid_batch]
-            gt_batched = gt_batched[valid_batch]
-            gt_lengths = gt_lengths[valid_batch]
-            # Avoid confusing batch indices when saving debug point clouds.
-            if save_requested:
-                point_cloud_dir = None
-
-        # PyTorch3D's KNN/Chamfer kernels require both inputs to share the same dtype.
-        # Keep the configured dtype when possible; fall back to fp32 only when the
-        # underlying PyTorch3D KNN implementation does not support bf16.
-        compute_dtype = torch.result_type(pred_batched, gt_batched)
-        if compute_dtype == torch.bfloat16 and not self._supports_bf16_knn(pred_batched.device):
-            compute_dtype = torch.float32
-        if compute_dtype not in {torch.float16, torch.float32, torch.float64}:
-            compute_dtype = torch.float32
-
-        pred_batched = pred_batched.to(dtype=compute_dtype)
-        gt_batched = gt_batched.to(dtype=compute_dtype)
-
-        pred_for_save = pred_batched.detach()
-        gt_for_save = gt_batched.detach()
+        assert pred_batched.shape[0] == gt_batched.shape[0], (
+            f"Batch size mismatch in Chamfer loss: Pred {pred_batched.shape[0]} vs GT {gt_batched.shape[0]}."
+        )
 
         if self.use_log_warp:
             pred_batched = apply_log_to_norm(pred_batched)
             gt_batched = apply_log_to_norm(gt_batched)
-        loss, _ = chamfer_distance(
-            gt_batched,
-            pred_batched,
-            x_lengths=gt_lengths,
-            y_lengths=pred_lengths,
-            # single_directional = True,
-        )
 
-        save_dir = self._resolve_point_cloud_directory(point_cloud_dir)
-        if save_dir is not None:
+        loss_per_batch = self._compute_distance(pred_batched, gt_batched, pred_lengths, gt_lengths)
+        loss = loss_per_batch.mean()
+
+        if point_cloud_dir is not None:
             self._save_point_clouds(
-                pred_for_save,
+                pred_batched.detach(),
                 pred_lengths,
-                gt_for_save,
+                gt_batched.detach(),
                 gt_lengths,
-                save_dir,
+                os.path.join(point_cloud_dir, self.point_cloud_dir_name),
             )
 
         return loss
-
-    def _supports_bf16_knn(self, device: torch.device) -> bool:
-        """Best-effort probe for whether PyTorch3D's KNN supports bf16 on the given device."""
-        if device.type == "cuda":
-            cached = self.__class__._pytorch3d_bf16_knn_cuda_supported
-        else:
-            cached = self.__class__._pytorch3d_bf16_knn_cpu_supported
-
-        if cached is not None:
-            return bool(cached)
-
-        supported = True
-        try:
-            with torch.no_grad():
-                x = torch.randn((1, 8, 3), device=device, dtype=torch.bfloat16)
-                y = torch.randn((1, 8, 3), device=device, dtype=torch.bfloat16)
-                lengths = torch.full((1,), 8, device=device, dtype=torch.long)
-                chamfer_distance(x, y, x_lengths=lengths, y_lengths=lengths)
-        except RuntimeError:
-            supported = False
-
-        if device.type == "cuda":
-            self.__class__._pytorch3d_bf16_knn_cuda_supported = supported
-        else:
-            self.__class__._pytorch3d_bf16_knn_cpu_supported = supported
-
-        return supported
-
-    def _resolve_point_cloud_directory(self, base_dir: Optional[str]) -> Optional[str]:
-        if not self.save_point_clouds or base_dir is None:
-            return None
-        return os.path.join(base_dir, self.point_cloud_subdir)
 
     def _save_point_clouds(
         self,
