@@ -38,7 +38,7 @@ def build_lightning_model(cfg: NBVExperimentConfig) -> NBVTrainer:
         weight_decay=cfg.weight_decay,
         log_dir=cfg.log_dir,
         use_epoch_seed=cfg.use_epoch_seed,
-        enable_random_baseline=True,
+        enable_random_baseline=False,
     )
 
 
