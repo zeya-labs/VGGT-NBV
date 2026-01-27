@@ -190,10 +190,10 @@ def square_distance(src, dst, sqrt=False):
     return torch.sum((src[:, :, None] - dst[:, None]) ** 2, dim=-1)
 
 
-def calc_emd(output, gt, eps=0.005, iterations=50):
+def calc_emd(output, gt, eps=0.005, iterations=50, sqrt_eps=1e-12):
     emd_loss = emd.emdModule()
     dist, _ = emd_loss(output, gt, eps, iterations)
-    emd_out = torch.sqrt(dist).mean(1)
+    emd_out = torch.sqrt(dist.clamp_min(sqrt_eps)).mean(1)
     return emd_out
 
 

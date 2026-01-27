@@ -10,6 +10,7 @@ TEMP/
 /models/
 color_ball/
 .gradio/
+*.json
 
 # Python
 __pycache__/

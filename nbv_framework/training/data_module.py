@@ -6,6 +6,7 @@ from typing import Optional
 
 import lightning.pytorch as pl
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 
 from nbv_framework.datasets.data_loaders import create_train_loader, create_val_loader
 from nbv_framework.datasets.mixed_dataset import MixedDataset
@@ -42,10 +43,15 @@ class NBVDataModule(pl.LightningDataModule):
             self.test_dataset = self._build_test_dataset()
 
     def train_dataloader(self) -> DataLoader:
+        # sampler = DistributedSampler(
+        #     self.train_dataset, 
+        #     shuffle=False
+        # )
         return create_train_loader(
             self.train_dataset,
             batch_size=self.cfg.batch_size,
             num_workers=self.cfg.num_workers,
+            # sampler=sampler,
         )
 
     def val_dataloader(self) -> Optional[DataLoader]:

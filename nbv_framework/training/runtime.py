@@ -42,7 +42,7 @@ def build_lightning_model(cfg: NBVExperimentConfig) -> NBVTrainer:
     )
 
 
-def build_trainer(cfg: NBVExperimentConfig, profiler: Profiler) -> Trainer:
+def build_trainer(cfg: NBVExperimentConfig, profiler: Profiler = None) -> Trainer:
     """Configure the PyTorch Lightning Trainer from Hydra config."""
     trainer_conf = OmegaConf.to_container(cfg.trainer, resolve=True)  # type: ignore[arg-type]
     callbacks = [

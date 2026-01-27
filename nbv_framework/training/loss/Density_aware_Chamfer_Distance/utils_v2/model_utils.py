@@ -132,14 +132,14 @@ def calc_cd(output, gt, calc_f1=False, return_raw=False, normalize=False, separa
         res.extend([dist1, dist2, idx1, idx2])
     return res
 
-def calc_emd(output, gt, eps=0.005, iterations=50):
+def calc_emd(output, gt, eps=0.005, iterations=50, sqrt_eps=1e-12):
     """点云之间的地球移动距离。"""
     # 使用本地封装的地球移动距离实现。
     # eps 与 iterations 控制数值精度与迭代次数。
     emd_loss = emd()
     dist, _ = emd_loss(output, gt, eps, iterations)
-    # 地球移动距离返回每点的平方距离。
-    emd_out = torch.sqrt(dist).mean(1)
+    # 地球移动距离返回每点的平方距离，加入 sqrt_eps 避免 sqrt(0) 梯度发散。
+    emd_out = torch.sqrt(dist.clamp_min(sqrt_eps)).mean(1)
     return emd_out
 
 def knn(x, k):
