@@ -4,7 +4,14 @@
 包含数据加载、可视化、评估等辅助功能。
 """
 
-from .mesh_utils import load_mesh_as_pytorch3d, normalize_mesh, load_and_normalize_mesh
+from .mesh_utils import (
+    load_mesh_as_pytorch3d,
+    normalize_mesh,
+    load_and_normalize_mesh,
+    load_and_normalize_mesh_to_device,
+    load_and_normalize_mesh_cpu,
+    load_meshes_as_batch,
+)
 from .textures import TextureGenerator
 from .visualization import visualize_reconstruction, plot_training_curves
 from .evaluation import evaluate_nbv_policy
@@ -21,6 +28,9 @@ __all__ = [
     "load_mesh_as_pytorch3d",
     "normalize_mesh",
     "load_and_normalize_mesh",
+    "load_and_normalize_mesh_to_device",
+    "load_and_normalize_mesh_cpu",
+    "load_meshes_as_batch",
     "TextureGenerator",
     "visualize_reconstruction",
     "plot_training_curves",

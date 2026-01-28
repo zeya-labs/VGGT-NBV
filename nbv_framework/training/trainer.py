@@ -38,6 +38,7 @@ from ..utils.camera_utils import (
     position_to_pose_tensor,
     normalize_depth_for_visualization,
 )
+from ..utils.mesh_utils import load_meshes_as_batch
 from ..utils.render_utils import render_mesh_views
 from ..utils.mapanything_views import _compute_pose_quats_and_trans_for_across_views_in_ref_view
 from ..models.direct_reconstruction import build_recon_from_point_maps
@@ -66,7 +67,8 @@ class NBVTrainer(LightningModule):
                  weight_decay: float = 1e-5,
                  log_dir: str = "runs/nbv_experiment",
                  use_epoch_seed: bool = False,
-                 enable_random_baseline: bool = True):
+                 enable_random_baseline: bool = True,
+                 mesh_load_workers: int = 4):
         """
         初始化训练器
 
@@ -103,6 +105,7 @@ class NBVTrainer(LightningModule):
         self.enable_random_baseline = enable_random_baseline
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
+        self.mesh_load_workers = mesh_load_workers
 
         self.min_initial_views = min_initial_views
         self.max_initial_views = max_initial_views
@@ -117,6 +120,8 @@ class NBVTrainer(LightningModule):
         self._last_predicted_relative_position: Optional[torch.Tensor] = None
         self._last_next_camera_pose: Optional[torch.Tensor] = None
         self._last_new_point_maps_render: Optional[torch.Tensor] = None
+        
+        self.log_freq = 20
 
     # def configure_model(self):
     #     """
@@ -315,15 +320,25 @@ class NBVTrainer(LightningModule):
             trimmed[key] = value.index_select(1, selection_device).contiguous()
         return trimmed
 
-    def _parse_mesh_paths(self, meta: Any) -> Optional[List[Optional[str]]]:
+    def _parse_mesh_metadata(
+        self,
+        meta: Any,
+    ) -> Tuple[Optional[List[Optional[str]]], Optional[List[Optional[str]]]]:
         if not isinstance(meta, list):
-            return None
+            return None, None
         mesh_paths: List[Optional[str]] = []
+        normalize_methods: List[Optional[str]] = []
         for entry in meta:
             if isinstance(entry, dict):
                 mesh_paths.append(entry.get("mesh_path"))
+                normalize_methods.append(entry.get("normalize_method"))
             else:
                 mesh_paths.append(None)
+                normalize_methods.append(None)
+        return mesh_paths, normalize_methods
+
+    def _parse_mesh_paths(self, meta: Any) -> Optional[List[Optional[str]]]:
+        mesh_paths, _ = self._parse_mesh_metadata(meta)
         return mesh_paths
 
     def _render_inputs(
@@ -405,7 +420,14 @@ class NBVTrainer(LightningModule):
         camera_poses_batch = inputs.get("camera_poses")
 
         gt_mesh_data = targets.get("gt_mesh_data", {})
+        mesh_paths, normalize_methods = self._parse_mesh_metadata(meta)
         mesh_batch = mesh_data.get("normalized")
+        mesh_batch = load_meshes_as_batch(
+            mesh_paths=mesh_paths,
+            normalize_methods=normalize_methods,
+            device=camera_poses_batch.device,
+            num_workers=self.mesh_load_workers,
+        )
         initial_images, gt_mesh_data = self._render_inputs(
             initial_images=initial_images,
             camera_poses_batch=camera_poses_batch,
@@ -420,8 +442,6 @@ class NBVTrainer(LightningModule):
             depth_z=depth_z_batch,
             randomize=self.trainer.training,
         )
-
-        mesh_paths = self._parse_mesh_paths(meta)
 
         trimmed_gt_mesh_data = self._trim_gt_mesh_data(gt_mesh_data, selection)
 
@@ -807,7 +827,7 @@ class NBVTrainer(LightningModule):
             policy_inference.next_camera_pose,
         )
 
-        step_output_dir = resolve_step_output_dir(self)
+        step_output_dir = resolve_step_output_dir(self) if self.trainer.global_step % self.log_freq == 0 and self.trainer.is_global_zero else None
 
         policy_eval = self._evaluate_candidate_pose(
             pose=policy_inference.next_camera_pose,
@@ -828,22 +848,25 @@ class NBVTrainer(LightningModule):
             mesh_batch=prepared.mesh_batch,
             mesh_paths=prepared.mesh_paths,
         )
+        
+        loss_dict = None
+        
+        if self.trainer.global_step % self.log_freq == 0:
+            loss_dict = self._build_loss_dict(
+                policy_eval.loss_components,
+                random_baseline,
+                prepared.active_view_count,
+            )
 
-        loss_dict = self._build_loss_dict(
-            policy_eval.loss_components,
-            random_baseline,
-            prepared.active_view_count,
-        )
-
-        log_step_outputs(
-            self,
-            prepared=prepared,
-            policy_inference=policy_inference,
-            policy_eval=policy_eval,
-            random_baseline=random_baseline,
-            loss_dict=loss_dict,
-            step_output_dir=step_output_dir,
-        )
+            log_step_outputs(
+                self,
+                prepared=prepared,
+                policy_inference=policy_inference,
+                policy_eval=policy_eval,
+                random_baseline=random_baseline,
+                loss_dict=loss_dict,
+                step_output_dir=step_output_dir,
+            )
 
         return total_loss, loss_dict, new_images, prepared.initial_images
 

@@ -5,9 +5,12 @@ from __future__ import annotations
 import hydra
 from hydra.core.config_store import ConfigStore
 from nbv_framework.utils.logging_utils import setup_logging
-import torch
 from rich.console import Console
-import sys, os
+import os
+
+import torch
+# torch.autograd.set_detect_anomaly(True) # 当检查每一步计算的梯度是否出现异常（NaN 或 Inf）
+# torch.multiprocessing.set_sharing_strategy('file_system')
 
 from lightning.pytorch import seed_everything
 from lightning.pytorch.profilers import PyTorchProfiler
@@ -40,7 +43,7 @@ def main(cfg: NBVExperimentConfig) -> None:
         record_shapes=True,    # 看 Tensor 形状
         with_stack=True        # 能定位到具体代码行
     )
-    trainer = build_trainer(cfg, profiler=profiler)
+    trainer = build_trainer(cfg) #, profiler=profiler)
     
     trainer.fit(model=model, datamodule=datamodule, ckpt_path=cfg.resume_checkpoint or None)
 

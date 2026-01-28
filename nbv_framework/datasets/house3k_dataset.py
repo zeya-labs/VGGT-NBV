@@ -387,8 +387,8 @@ class House3KDataset(BaseDataset):
         )
 
         gt_supervision = dict(gt_mesh_data)
-        original_mesh = gt_supervision.pop("original_mesh", None)
-        normalized_mesh = gt_supervision.pop("normalized_mesh", None)
+        gt_supervision.pop("original_mesh", None)
+        gt_supervision.pop("normalized_mesh", None)
         gt_supervision.pop("mesh_path", None)
 
         metadata = {
@@ -411,10 +411,10 @@ class House3KDataset(BaseDataset):
             "targets": {
                 "gt_mesh_data": gt_supervision,
             },
-            "mesh": {
-                "original": original_mesh,
-                "normalized": normalized_mesh,
-            },
+            # "mesh": {
+            #     "original": original_mesh,
+            #     "normalized": normalized_mesh,
+            # },
             "meta": metadata,
         }
 

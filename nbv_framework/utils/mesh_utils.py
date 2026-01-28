@@ -4,10 +4,11 @@ Mesh 工具函数
 提供 mesh 的加载、归一化与点采样功能。
 """
 
-from typing import Dict, List
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Optional, Sequence
 
 import torch
-from pytorch3d.structures import Meshes
+from pytorch3d.structures import Meshes, join_meshes_as_batch
 from pytorch3d.io import load_objs_as_meshes, load_ply
 from pytorch3d.ops import sample_points_from_meshes
 
@@ -97,7 +98,6 @@ def normalize_mesh(mesh: Meshes, method: str = "quantile") -> Meshes:
         elif method in {'mean', 'mean_radius'}:
             scale = torch.mean(distances)
         elif method == 'quantile':
-            # 95% 分位数，去除离群点影响
             scale = torch.quantile(distances, q=0.95)
         elif method == 'centered':
             pass
@@ -105,10 +105,11 @@ def normalize_mesh(mesh: Meshes, method: str = "quantile") -> Meshes:
             raise ValueError(f"不支持的归一化方法: {method}")
 
         # 应用缩放
-        if scale > 1e-8 and method != 'centered':
-            verts_centered = verts_centered / scale
+        eps = 1e-8
+        scale = torch.clamp(scale, min=eps)
+        verts_normalized = verts_centered / scale
         
-        new_verts_list.append(verts_centered)
+        new_verts_list.append(verts_normalized) 
 
     # 3. 重建 Meshes 对象
     # 使用原始的 faces 和 textures，但使用新的顶点位置
@@ -153,3 +154,44 @@ def load_and_normalize_mesh(
         "normalize_method": normalize_method,
         "num_samples": num_samples,
     }
+
+
+def load_and_normalize_mesh_to_device(
+    mesh_path: str,
+    normalize_method: Optional[str],
+    device: torch.device,
+) -> Meshes:
+    method = str(normalize_method) if normalize_method else "mean"
+    mesh = normalize_mesh(load_mesh_as_pytorch3d(mesh_path), method)
+    return mesh.to(device)
+
+
+def load_and_normalize_mesh_cpu(
+    mesh_path: str,
+    normalize_method: Optional[str],
+) -> Meshes:
+    method = str(normalize_method) if normalize_method else "mean"
+    return normalize_mesh(load_mesh_as_pytorch3d(mesh_path), method)
+
+
+def load_meshes_as_batch(
+    mesh_paths: Sequence[Optional[str]],
+    normalize_methods: Optional[Sequence[Optional[str]]],
+    device: torch.device,
+    num_workers: int = 0,
+) -> Meshes:
+    use_parallel = num_workers > 1 and len(mesh_paths) > 1
+    if use_parallel:
+        max_workers = min(num_workers, len(mesh_paths))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(load_and_normalize_mesh_cpu, mesh_path, normalize_method)
+                for mesh_path, normalize_method in zip(mesh_paths, normalize_methods)
+            ]
+            meshes = [future.result().to(device) for future in futures]
+    else:
+        meshes = [
+            load_and_normalize_mesh_to_device(mesh_path, normalize_method, device)
+            for mesh_path, normalize_method in zip(mesh_paths, normalize_methods)
+        ]
+    return join_meshes_as_batch(meshes)

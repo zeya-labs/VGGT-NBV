@@ -68,8 +68,8 @@ class ReconstructionLoss(nn.Module):
 
     @staticmethod
     def _to_float(x: torch.Tensor) -> float:
-        """Detach and convert to Python float for logging."""
-        return float(x.detach())
+        """Detach for logging."""
+        return x.detach()
 
     @staticmethod
     def _add_loss(

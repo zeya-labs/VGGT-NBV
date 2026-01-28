@@ -42,6 +42,7 @@ class NBVExperimentConfig:
     learning_rate: float = 1e-5
     batch_size: int = 1
     num_workers: int = 16
+    mesh_load_workers: int = 4
     max_epochs: int = 1000
     normalize_method: str = "mean"
     num_samples: int = 32768
@@ -49,7 +50,6 @@ class NBVExperimentConfig:
     use_epoch_seed: bool = False
 
     # Dataset / camera knobs
-    synthetic_data_root: str = "./models/synthetic_data"
     min_initial_views: int = 2
     max_initial_views: int = 2
     randomize_initial_views: bool = True
