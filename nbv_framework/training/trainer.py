@@ -7,13 +7,15 @@ from __future__ import annotations
 
 import logging
 import math
+import hashlib
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import torch
 import torch.optim as optim
 from lightning.pytorch import LightningModule
 from lightning_fabric.utilities.apply_func import apply_to_collection
-from pytorch3d.structures import Meshes
+from pytorch3d.structures import Meshes, join_meshes_as_batch
 from pytorch3d.transforms import quaternion_to_matrix
 
 from mapanything.utils.geometry import (
@@ -118,10 +120,137 @@ class NBVTrainer(LightningModule):
 
         # Debug tensors for gradient attribution (filled during training_step).
         self._last_predicted_relative_position: Optional[torch.Tensor] = None
+
+        # Render cache version for precomputed meshes / renders.
+        self._render_cache_version = 1
+        
         self._last_next_camera_pose: Optional[torch.Tensor] = None
         self._last_new_point_maps_render: Optional[torch.Tensor] = None
         
         self.log_freq = 20
+
+    def _render_cache_root(self) -> Path:
+        repo_root = Path(__file__).resolve().parents[2]
+        return repo_root / "models" / ".cache"
+
+    def _render_cache_key(
+        self,
+        *,
+        mesh_path: str,
+        normalize_method: Optional[str],
+        camera_poses: torch.Tensor,
+    ) -> str:
+        raster_settings = self.renderer.rasterizer.raster_settings
+        render_signature = (
+            f"v{self._render_cache_version}|"
+            f"img{getattr(self.renderer, 'image_size', None)}|"
+            f"fov{getattr(self.renderer, 'default_fov', None)}|"
+            f"fpp{raster_settings.faces_per_pixel}|"
+            f"blur{raster_settings.blur_radius}|"
+            f"pc{raster_settings.perspective_correct}|"
+            f"cull{raster_settings.cull_backfaces}"
+        )
+        hasher = hashlib.sha1()
+        hasher.update(str(mesh_path).encode("utf-8"))
+        hasher.update(b"|")
+        hasher.update(str(normalize_method).encode("utf-8"))
+        hasher.update(b"|")
+        hasher.update(render_signature.encode("utf-8"))
+        hasher.update(b"|")
+        cam_bytes = (
+            camera_poses.detach()
+            .to(dtype=torch.float32)
+            .cpu()
+            .contiguous()
+            .numpy()
+            .tobytes()
+        )
+        hasher.update(cam_bytes)
+        return hasher.hexdigest()
+
+    def _build_render_cache_paths(
+        self,
+        *,
+        mesh_paths: Optional[Sequence[Optional[str]]],
+        normalize_methods: Optional[Sequence[Optional[str]]],
+        camera_poses_batch: Optional[torch.Tensor],
+    ) -> Optional[List[Path]]:
+        if mesh_paths is None or camera_poses_batch is None:
+            return None
+        if len(mesh_paths) != camera_poses_batch.shape[0]:
+            return None
+        cache_root = self._render_cache_root()
+        cache_paths: List[Path] = []
+        for idx, mesh_path in enumerate(mesh_paths):
+            if not mesh_path:
+                return None
+            normalize_method = None
+            if normalize_methods is not None and idx < len(normalize_methods):
+                normalize_method = normalize_methods[idx]
+            key = self._render_cache_key(
+                mesh_path=mesh_path,
+                normalize_method=normalize_method,
+                camera_poses=camera_poses_batch[idx],
+            )
+            cache_paths.append(cache_root / f"{key}.pt")
+        return cache_paths
+
+    def _load_render_cache_item(self, path: Path) -> Optional[Dict[str, Any]]:
+        if not path.is_file():
+            return None
+        try:
+            item = torch.load(path, map_location="cpu", weights_only=False)
+        except Exception:
+            logger.warning("Failed to load render cache: %s", path)
+            return None
+        if not isinstance(item, dict):
+            return None
+        if item.get("version") != self._render_cache_version:
+            return None
+        if "mesh" not in item or "initial_images" not in item or "gt_mesh_data" not in item:
+            return None
+        if not isinstance(item["mesh"], Meshes):
+            return None
+        gt_mesh_data = item.get("gt_mesh_data", {})
+        required_keys = ("gt_point_maps", "gt_valid_masks", "depth_z", "depth_z_viz")
+        if not all(key in gt_mesh_data for key in required_keys):
+            return None
+        return item
+
+    def _save_render_cache_batch(
+        self,
+        *,
+        cache_paths: Sequence[Path],
+        mesh_batch: Meshes,
+        initial_images: Optional[torch.Tensor],
+        gt_mesh_data: Dict[str, torch.Tensor],
+    ) -> None:
+        if initial_images is None:
+            return
+        required_keys = ("gt_point_maps", "gt_valid_masks", "depth_z", "depth_z_viz")
+        if any(gt_mesh_data.get(key) is None for key in required_keys):
+            return
+        if not getattr(self.trainer, "is_global_zero", True):
+            return
+        cache_root = self._render_cache_root()
+        cache_root.mkdir(parents=True, exist_ok=True)
+        for idx, path in enumerate(cache_paths):
+            if path.exists():
+                continue
+            item = {
+                "version": self._render_cache_version,
+                "mesh": mesh_batch[idx].to("cpu"),
+                "initial_images": initial_images[idx].detach().to("cpu"),
+                "gt_mesh_data": {
+                    "gt_point_maps": gt_mesh_data["gt_point_maps"][idx].detach().to("cpu"),
+                    "gt_valid_masks": gt_mesh_data["gt_valid_masks"][idx].detach().to("cpu"),
+                    "depth_z": gt_mesh_data["depth_z"][idx].detach().to("cpu"),
+                    "depth_z_viz": gt_mesh_data["depth_z_viz"][idx].detach().to("cpu"),
+                },
+            }
+            tmp_path = path.with_suffix(".tmp")
+            torch.save(item, tmp_path)
+            tmp_path.replace(path)
 
     # def configure_model(self):
     #     """
@@ -246,7 +375,7 @@ class NBVTrainer(LightningModule):
         absolute_position = reference_position + predicted_relative_position_world
         dist = torch.norm(absolute_position, dim=-1, keepdim=True)
         
-        min_r, max_r = 2.7, 4.0 
+        min_r, max_r = 1.3, 2.0 
         
         clamped_dist = torch.clamp(dist, min=min_r, max=max_r)
         
@@ -343,7 +472,6 @@ class NBVTrainer(LightningModule):
 
     def _render_inputs(
         self,
-        *,
         initial_images: Optional[torch.Tensor],
         camera_poses_batch: torch.Tensor,
         gt_mesh_data: Dict[str, torch.Tensor],
@@ -421,19 +549,65 @@ class NBVTrainer(LightningModule):
 
         gt_mesh_data = targets.get("gt_mesh_data", {})
         mesh_paths, normalize_methods = self._parse_mesh_metadata(meta)
-        mesh_batch = mesh_data.get("normalized")
-        mesh_batch = load_meshes_as_batch(
+        cache_paths = self._build_render_cache_paths(
             mesh_paths=mesh_paths,
             normalize_methods=normalize_methods,
-            device=camera_poses_batch.device,
-            num_workers=self.mesh_load_workers,
-        )
-        initial_images, gt_mesh_data = self._render_inputs(
-            initial_images=initial_images,
             camera_poses_batch=camera_poses_batch,
-            gt_mesh_data=gt_mesh_data,
-            mesh_batch=mesh_batch,
         )
+        cache_items: Optional[List[Dict[str, Any]]] = None
+        if cache_paths:
+            cache_items = []
+            for path in cache_paths:
+                item = self._load_render_cache_item(path)
+                if item is None:
+                    cache_items = None
+                    break
+                cache_items.append(item)
+
+        if cache_items is not None:
+            device = camera_poses_batch.device
+            meshes = [item["mesh"].to(device) for item in cache_items]
+            mesh_batch = join_meshes_as_batch(meshes)
+            initial_images = torch.stack(
+                [item["initial_images"] for item in cache_items], dim=0
+            ).to(device)
+            if initial_images.is_floating_point() and initial_images.dtype != self.dtype:
+                initial_images = initial_images.to(dtype=self.dtype)
+            cached_gt = [item["gt_mesh_data"] for item in cache_items]
+            gt_mesh_data = dict(gt_mesh_data)
+            gt_mesh_data["gt_point_maps"] = torch.stack(
+                [item["gt_point_maps"] for item in cached_gt], dim=0
+            ).to(device)
+            gt_mesh_data["gt_valid_masks"] = torch.stack(
+                [item["gt_valid_masks"] for item in cached_gt], dim=0
+            ).to(device, dtype=torch.bool)
+            gt_mesh_data["depth_z"] = torch.stack(
+                [item["depth_z"] for item in cached_gt], dim=0
+            ).to(device)
+            gt_mesh_data["depth_z_viz"] = torch.stack(
+                [item["depth_z_viz"] for item in cached_gt], dim=0
+            ).to(device)
+        else:
+            mesh_batch = mesh_data.get("normalized")
+            mesh_batch = load_meshes_as_batch(
+                mesh_paths=mesh_paths,
+                normalize_methods=normalize_methods,
+                device=camera_poses_batch.device,
+                num_workers=self.mesh_load_workers,
+            )
+            initial_images, gt_mesh_data = self._render_inputs(
+                initial_images=initial_images,
+                camera_poses_batch=camera_poses_batch,
+                gt_mesh_data=gt_mesh_data,
+                mesh_batch=mesh_batch,
+            )
+            if cache_paths:
+                self._save_render_cache_batch(
+                    cache_paths=cache_paths,
+                    mesh_batch=mesh_batch,
+                    initial_images=initial_images,
+                    gt_mesh_data=gt_mesh_data,
+                )
         depth_z_batch = gt_mesh_data.get("depth_z")
 
         initial_images, camera_poses_batch, depth_z_batch, selection, active_view_count = self._select_initial_views(
@@ -827,7 +1001,7 @@ class NBVTrainer(LightningModule):
             policy_inference.next_camera_pose,
         )
 
-        step_output_dir = resolve_step_output_dir(self) if self.trainer.global_step % self.log_freq == 0 and self.trainer.is_global_zero else None
+        step_output_dir = resolve_step_output_dir(self) 
 
         policy_eval = self._evaluate_candidate_pose(
             pose=policy_inference.next_camera_pose,
@@ -840,18 +1014,18 @@ class NBVTrainer(LightningModule):
 
         total_loss = policy_eval.total_loss
         new_images = policy_eval.new_images
-
-        random_baseline = self._maybe_compute_random_baseline(
+        
+        loss_dict = None
+        
+        if True: #self.trainer.global_step % self.log_freq == 0:
+            random_baseline = self._maybe_compute_random_baseline(
             initial_images=prepared.initial_images,
             camera_poses_batch=prepared.camera_poses,
             gt_mesh_data=prepared.trimmed_gt_mesh_data,
             mesh_batch=prepared.mesh_batch,
             mesh_paths=prepared.mesh_paths,
-        )
-        
-        loss_dict = None
-        
-        if self.trainer.global_step % self.log_freq == 0:
+            )
+            
             loss_dict = self._build_loss_dict(
                 policy_eval.loss_components,
                 random_baseline,
@@ -911,6 +1085,8 @@ class NBVTrainer(LightningModule):
             prog_bar=True,
             sync_dist=self.world_size > 1,
         )
+        if loss_dict is None:
+            return loss
         for key, value in loss_dict.items():
             if key == "total_loss":
                 continue

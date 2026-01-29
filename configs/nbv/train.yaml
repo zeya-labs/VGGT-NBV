@@ -3,10 +3,10 @@ defaults:
   - _self_
 
 experiment_name: dataset-house3k
-batch_size: 16
-max_meshes: 3000
-learning_rate: 5e-4
-max_epochs: 1000
+batch_size: 4
+max_meshes: 20
+learning_rate: 1e-5
+max_epochs: 500
 seed: 42
 
 output_dir: ${hydra:runtime.cwd}/runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
@@ -41,7 +41,7 @@ trainer:
   benchmark: true
   max_epochs: ${max_epochs}
   accumulate_grad_batches: 1
-  num_sanity_val_steps: 0
+  num_sanity_val_steps: 2
   gradient_clip_val: 1.0
-  limit_val_batches: 0.0
+  limit_val_batches: 1.0
   log_every_n_steps: 1

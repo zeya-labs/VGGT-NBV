@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
+import threading
 
 import torch
 from pytorch3d.structures import Meshes
@@ -14,6 +15,30 @@ from nbv_framework.training.loss.reconstruction import ReconstructionLoss
 from nbv_framework.utils.camera_utils import position_to_pose_tensor
 from nbv_framework.utils.mesh_utils import load_and_normalize_mesh, load_mesh_as_pytorch3d
 from nbv_framework.utils.render_utils import render_mesh_views
+
+_MESH_SAMPLE_CACHE: dict[tuple[str, str, int], dict] = {}
+_MESH_SAMPLE_CACHE_LOCK = threading.Lock()
+
+
+def _load_and_normalize_mesh_cached(
+    mesh_path: Path,
+    normalize_method: str,
+    num_samples: int,
+) -> dict:
+    cache_key = (str(mesh_path.resolve()), normalize_method, num_samples)
+    with _MESH_SAMPLE_CACHE_LOCK:
+        cached = _MESH_SAMPLE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    mesh_data = load_and_normalize_mesh(
+        str(mesh_path),
+        normalize_method=normalize_method,
+        num_samples=num_samples,
+    )
+    with _MESH_SAMPLE_CACHE_LOCK:
+        _MESH_SAMPLE_CACHE[cache_key] = mesh_data
+    return mesh_data
 
 
 @dataclass(frozen=True)
@@ -99,7 +124,7 @@ def compute_chamfer_record(
     mesh_path: Path,
     cameras: List[CameraInput],
     output_dir: Path,
-    image_size: int = 256,
+    image_size: int = 512,
     fov: float = 60.0,
 ) -> ChamferRecord:
     if not cameras:
@@ -107,9 +132,9 @@ def compute_chamfer_record(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    mesh_data = load_and_normalize_mesh(
-        str(mesh_path),
-        normalize_method="quantile",
+    mesh_data = _load_and_normalize_mesh_cached(
+        mesh_path,
+        normalize_method="unit_sphere",
         num_samples=32768,
     )
     normalized_mesh = mesh_data["normalized_mesh"]
@@ -117,6 +142,10 @@ def compute_chamfer_record(
 
     normalized_mesh = normalized_mesh.to(device)
     gt_points = gt_points.to(device)
+    if gt_points.ndim == 2:
+        gt_points = gt_points.unsqueeze(0)
+    elif gt_points.ndim != 3:
+        raise ValueError(f"gt_points must be [B, N, 3] or [N, 3], got {tuple(gt_points.shape)}")
 
     camera_poses = _camera_poses_from_inputs(cameras, device=device)
 

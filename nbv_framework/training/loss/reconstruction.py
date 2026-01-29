@@ -30,8 +30,8 @@ class ReconstructionLoss(nn.Module):
         point_source: str = "vggt",
         confidence_threshold: float = 0.0, # 百分之
         black_pixel_threshold: float = 0.1,
-        pose_outer_radius: float = 3.5,
-        pose_inner_radius: float = 2.5,
+        pose_outer_radius: float = 2.0,
+        pose_inner_radius: float = 1.3,
         pose_floor_margin: float = 1.0,
         use_log_warp_for_chamfer: bool = False,
     ) -> None:

@@ -20,7 +20,12 @@ logger = logging.getLogger(__name__)
 
 def resolve_step_output_dir(trainer) -> Optional[str]:
     if not trainer.trainer.training:
-        return None
+        return os.path.join(
+        trainer.log_dir,
+        "images_val",
+        f"step_{trainer.global_step:06d}",
+        f"rank_{trainer.global_rank:02d}",
+        )
     return os.path.join(
         trainer.log_dir,
         "images",
@@ -53,16 +58,15 @@ def log_step_outputs(
         initial_images=prepared.initial_images,
         initial_depth_z=prepared.depth_z,
     )
-    if trainer.trainer.training and step_output_dir is not None:
+    if step_output_dir is not None:
         save_pre_images_grid(
             trainer,
             initial_images=prepared.initial_images,
             new_images=policy_eval.new_images,
             step_output_dir=step_output_dir,
         )
-    if trainer.trainer.training:
-        log_training_metrics(trainer, loss_dict, prepared.active_view_count)
-        log_random_baseline(trainer, random_baseline, step_output_dir)
+    log_training_metrics(trainer, loss_dict, prepared.active_view_count)
+    log_random_baseline(trainer, random_baseline, step_output_dir)
 
 
 def log_camera_pose_stats(

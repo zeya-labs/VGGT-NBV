@@ -44,10 +44,11 @@ class NBVExperimentConfig:
     num_workers: int = 16
     mesh_load_workers: int = 4
     max_epochs: int = 1000
-    normalize_method: str = "mean"
+    normalize_method: str = "unit_sphere"
     num_samples: int = 32768
     weight_decay: float = 0
     use_epoch_seed: bool = False
+    enable_random_baseline: bool = False
 
     # Dataset / camera knobs
     min_initial_views: int = 2
@@ -56,9 +57,12 @@ class NBVExperimentConfig:
     image_size: int = 518
     up_axis: str = "Y"
     max_meshes: int = 20
-    camera_radius: float = 2.6
+    camera_radius: float = 1.6
     camera_radius_variation: float = 0.0
     camera_radius_mode: str = "random"
+    pose_outer_radius: float = 2.0
+    pose_inner_radius: float = 1.3
+    pose_floor_margin: float = 1.0
     train_repeat_factor: int = 1
     val_repeat_factor: int = 1
     # View sampling modes:

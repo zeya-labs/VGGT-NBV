@@ -42,7 +42,7 @@ class CameraSpec(BaseModel):
 class ComputeRequest(BaseModel):
     mesh_path: str
     cameras: List[CameraSpec]
-    image_size: int = 256
+    image_size: int = 512
     fov: float = 60.0
 
 

@@ -279,7 +279,7 @@ async function calculate() {
     return;
   }
 
-  const imageSize = Number.parseInt(imageSizeInput.value, 10) || 256;
+  const imageSize = Number.parseInt(imageSizeInput.value, 10) || 512;
   const fov = Number.parseFloat(fovInput.value) || 60;
 
   setStatus("Calculating... this may take a while.");

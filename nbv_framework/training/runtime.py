@@ -38,7 +38,7 @@ def build_lightning_model(cfg: NBVExperimentConfig) -> NBVTrainer:
         weight_decay=cfg.weight_decay,
         log_dir=cfg.log_dir,
         use_epoch_seed=cfg.use_epoch_seed,
-        enable_random_baseline=True,
+        enable_random_baseline=cfg.enable_random_baseline,
         mesh_load_workers=cfg.mesh_load_workers,
     )
 
@@ -105,5 +105,8 @@ def _build_components(
     loss_fn = ReconstructionLoss(
         renderer=renderer,
         pose_up_axis=cfg.up_axis,
+        pose_outer_radius=cfg.pose_outer_radius,
+        pose_inner_radius=cfg.pose_inner_radius,
+        pose_floor_margin=cfg.pose_floor_margin,
     )
     return mapanything, policy, renderer, loss_fn
