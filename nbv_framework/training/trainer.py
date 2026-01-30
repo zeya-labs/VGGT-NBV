@@ -7,43 +7,39 @@ from __future__ import annotations
 
 import logging
 import math
-import hashlib
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import torch
 import torch.optim as optim
 from lightning.pytorch import LightningModule
 from lightning_fabric.utilities.apply_func import apply_to_collection
-from pytorch3d.structures import Meshes, join_meshes_as_batch
-from pytorch3d.transforms import quaternion_to_matrix
-
-from mapanything.utils.geometry import (
-    normalize_pose_translations,
-    quaternion_to_rotation_matrix,
-    rotation_matrix_to_quaternion,
-    transform_pose_using_quats_and_trans_2_to_1,
-)
+from pytorch3d.structures import Meshes
 
 if TYPE_CHECKING:
     from ..models import MapAnythingWrapper, BaseNBVPolicy
 from ..rendering import DifferentiableRenderer
 from .logging import log_step_outputs, resolve_step_output_dir
 from .loss import ReconstructionLoss
-from .step_types import (
+from ..pipeline.types import (
     PoseEvaluationResult,
     PolicyInferenceOutput,
     PreparedBatch,
     RandomBaselineOutput,
 )
-from ..utils.camera_utils import (
-    position_to_pose_tensor,
-    normalize_depth_for_visualization,
-)
 from ..utils.mesh_utils import load_meshes_as_batch
-from ..utils.render_utils import render_mesh_views
-from ..utils.mapanything_views import _compute_pose_quats_and_trans_for_across_views_in_ref_view
-from ..models.direct_reconstruction import build_recon_from_point_maps
+from ..data.batch_utils import parse_mesh_metadata, trim_gt_mesh_data
+from ..cache.render_cache import RenderCache
+from ..geometry.pose_ops import (
+    compute_pose_for_across_views_in_ref_view,
+    compute_policy_pose,
+    compute_pose_scale_factor,
+)
+from ..pipeline.step_ops import (
+    compute_random_baseline,
+    evaluate_candidate_pose,
+    render_inputs,
+    select_initial_views,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -121,136 +117,12 @@ class NBVTrainer(LightningModule):
         # Debug tensors for gradient attribution (filled during training_step).
         self._last_predicted_relative_position: Optional[torch.Tensor] = None
 
-        # Render cache version for precomputed meshes / renders.
-        self._render_cache_version = 1
+        self.render_cache = RenderCache(renderer=self.renderer)
         
         self._last_next_camera_pose: Optional[torch.Tensor] = None
         self._last_new_point_maps_render: Optional[torch.Tensor] = None
         
         self.log_freq = 20
-
-    def _render_cache_root(self) -> Path:
-        repo_root = Path(__file__).resolve().parents[2]
-        return repo_root / "models" / ".cache"
-
-    def _render_cache_key(
-        self,
-        *,
-        mesh_path: str,
-        normalize_method: Optional[str],
-        camera_poses: torch.Tensor,
-    ) -> str:
-        raster_settings = self.renderer.rasterizer.raster_settings
-        render_signature = (
-            f"v{self._render_cache_version}|"
-            f"img{getattr(self.renderer, 'image_size', None)}|"
-            f"fov{getattr(self.renderer, 'default_fov', None)}|"
-            f"fpp{raster_settings.faces_per_pixel}|"
-            f"blur{raster_settings.blur_radius}|"
-            f"pc{raster_settings.perspective_correct}|"
-            f"cull{raster_settings.cull_backfaces}"
-        )
-        hasher = hashlib.sha1()
-        hasher.update(str(mesh_path).encode("utf-8"))
-        hasher.update(b"|")
-        hasher.update(str(normalize_method).encode("utf-8"))
-        hasher.update(b"|")
-        hasher.update(render_signature.encode("utf-8"))
-        hasher.update(b"|")
-        cam_bytes = (
-            camera_poses.detach()
-            .to(dtype=torch.float32)
-            .cpu()
-            .contiguous()
-            .numpy()
-            .tobytes()
-        )
-        hasher.update(cam_bytes)
-        return hasher.hexdigest()
-
-    def _build_render_cache_paths(
-        self,
-        *,
-        mesh_paths: Optional[Sequence[Optional[str]]],
-        normalize_methods: Optional[Sequence[Optional[str]]],
-        camera_poses_batch: Optional[torch.Tensor],
-    ) -> Optional[List[Path]]:
-        if mesh_paths is None or camera_poses_batch is None:
-            return None
-        if len(mesh_paths) != camera_poses_batch.shape[0]:
-            return None
-        cache_root = self._render_cache_root()
-        cache_paths: List[Path] = []
-        for idx, mesh_path in enumerate(mesh_paths):
-            if not mesh_path:
-                return None
-            normalize_method = None
-            if normalize_methods is not None and idx < len(normalize_methods):
-                normalize_method = normalize_methods[idx]
-            key = self._render_cache_key(
-                mesh_path=mesh_path,
-                normalize_method=normalize_method,
-                camera_poses=camera_poses_batch[idx],
-            )
-            cache_paths.append(cache_root / f"{key}.pt")
-        return cache_paths
-
-    def _load_render_cache_item(self, path: Path) -> Optional[Dict[str, Any]]:
-        if not path.is_file():
-            return None
-        try:
-            item = torch.load(path, map_location="cpu", weights_only=False)
-        except Exception:
-            logger.warning("Failed to load render cache: %s", path)
-            return None
-        if not isinstance(item, dict):
-            return None
-        if item.get("version") != self._render_cache_version:
-            return None
-        if "mesh" not in item or "initial_images" not in item or "gt_mesh_data" not in item:
-            return None
-        if not isinstance(item["mesh"], Meshes):
-            return None
-        gt_mesh_data = item.get("gt_mesh_data", {})
-        required_keys = ("gt_point_maps", "gt_valid_masks", "depth_z", "depth_z_viz")
-        if not all(key in gt_mesh_data for key in required_keys):
-            return None
-        return item
-
-    def _save_render_cache_batch(
-        self,
-        *,
-        cache_paths: Sequence[Path],
-        mesh_batch: Meshes,
-        initial_images: Optional[torch.Tensor],
-        gt_mesh_data: Dict[str, torch.Tensor],
-    ) -> None:
-        if initial_images is None:
-            return
-        required_keys = ("gt_point_maps", "gt_valid_masks", "depth_z", "depth_z_viz")
-        if any(gt_mesh_data.get(key) is None for key in required_keys):
-            return
-        if not getattr(self.trainer, "is_global_zero", True):
-            return
-        cache_root = self._render_cache_root()
-        cache_root.mkdir(parents=True, exist_ok=True)
-        for idx, path in enumerate(cache_paths):
-            if path.exists():
-                continue
-            item = {
-                "version": self._render_cache_version,
-                "mesh": mesh_batch[idx].to("cpu"),
-                "initial_images": initial_images[idx].detach().to("cpu"),
-                "gt_mesh_data": {
-                    "gt_point_maps": gt_mesh_data["gt_point_maps"][idx].detach().to("cpu"),
-                    "gt_valid_masks": gt_mesh_data["gt_valid_masks"][idx].detach().to("cpu"),
-                    "depth_z": gt_mesh_data["depth_z"][idx].detach().to("cpu"),
-                    "depth_z_viz": gt_mesh_data["depth_z_viz"][idx].detach().to("cpu"),
-                },
-            }
-            tmp_path = path.with_suffix(".tmp")
-            torch.save(item, tmp_path)
-            tmp_path.replace(path)
 
     # def configure_model(self):
     #     """
@@ -286,189 +158,20 @@ class NBVTrainer(LightningModule):
         )
 
     def _compute_pose_for_across_views_in_ref_view(
-            self,
-            views: List[Dict[str, Any]],
-        ) -> torch.Tensor:
-            """
-            计算跨视角策略评估时的相机位姿，均转换到参考视角坐标系下。
-            
-            Args:
-                views: 包含视图信息的字典列表。
-                
-            Returns:
-                torch.Tensor: 形状为 (B, S, 7) 的张量。
-                            S 为视图数量 (num_views)。
-                            最后一维 7 为 [tx, ty, tz, qx, qy, qz, qw]。
-            """
-            # 1. 获取基础维度信息
-            num_views = len(views)
-            batch_size_per_view = views[0]["img"].shape[0]
-            device = views[0]["img"].device
-            dtype = views[0]["img"].dtype
-
-            # 2. 构造全为 True 的掩码
-            # 我们希望计算所有 View 的位姿，不进行随机 Dropout
-            per_sample_cam_input_mask = torch.ones(
-                batch_size_per_view * num_views, 
-                dtype=torch.bool, 
-                device=device
-            )
-
-            # 3. 调用核心函数计算相对位姿
-            # pose_quats_flat: (B*S, 4)
-            # pose_trans_flat: (B*S, 3)
-            # 这些位姿都已经转换到了 View 0 的坐标系下（View 0 为 Identity）
-            (
-                pose_quats_flat, 
-                pose_trans_flat, 
-                _
-            ) = _compute_pose_quats_and_trans_for_across_views_in_ref_view(
-                views=views,
-                num_views=num_views,
-                device=device,
-                dtype=dtype,
-                batch_size_per_view=batch_size_per_view,
-                per_sample_cam_input_mask=per_sample_cam_input_mask,
-            )
-
-            # 4. 拼接平移和四元数 -> (B*S, 7)
-            # 顺序：[Translation (3), Quaternion (4)] -> [tx, ty, tz, qx, qy, qz, qw]
-            pose_flat_7d = torch.cat([pose_trans_flat, pose_quats_flat], dim=-1)
-
-            # 5. 重塑维度
-            # 原始数据排列顺序是 view-major: [View0_Batch..., View1_Batch..., ...]
-            # 先变为 (S, B, 7)
-            pose_sb7 = pose_flat_7d.view(num_views, batch_size_per_view, 7)
-            
-            # 转置为 batch-major: (B, S, 7)
-            pose_bs7 = pose_sb7.transpose(0, 1).contiguous()
-
-            return pose_bs7
+        self,
+        views: List[Dict[str, Any]],
+    ) -> torch.Tensor:
+        return compute_pose_for_across_views_in_ref_view(views)
 
     def _compute_policy_pose(
         self,
         policy_output: torch.Tensor,
         camera_poses_batch: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """根据策略输出计算绝对位姿及相关中间量。"""
-        reference_position = camera_poses_batch[:, 0, :3]
-        # 使用 MapAnything 同步的位姿归一化尺度，将策略输出从归一化坐标恢复到原始尺度
-        # scale_factor = self._compute_pose_scale_factor(camera_poses_batch).unsqueeze(-1)
-        predicted_relative_position = policy_output[:, :3]
-        # absolute_position = reference_position + predicted_relative_position
-        # 策略网络看到的 across-view extrinsics 是以 view0 为参考系的相对位姿；
-        # 因此策略输出的相对平移更自然地处在 view0(相机0)坐标系下，而不是世界坐标系。
-        # 将其旋转回世界坐标，再与世界系下的 reference_position 相加，避免“加在错误坐标系”
-        # 导致视角跑飞（常见表现：渲染纯黑、Chamfer 爆炸、梯度尖峰）。
-        if camera_poses_batch.ndim != 3 or camera_poses_batch.shape[-1] != 7:
-            raise ValueError(
-                f"camera_poses_batch expected shape [B, S, 7], got {tuple(camera_poses_batch.shape)}"
-            )
-        ref_quat_xyzw = camera_poses_batch[:, 0, 3:]
-        quat_wxyz = ref_quat_xyzw[:, [3, 0, 1, 2]]
-        rotation_w2c_row = quaternion_to_matrix(quat_wxyz)  # [B, 3, 3]
-        rotation_c2w_row = rotation_w2c_row.transpose(1, 2)
-        predicted_relative_position_world = torch.bmm(
-            predicted_relative_position.unsqueeze(1),
-            rotation_c2w_row,
-        ).squeeze(1)
-        absolute_position = reference_position + predicted_relative_position_world
-        dist = torch.norm(absolute_position, dim=-1, keepdim=True)
-        
-        min_r, max_r = 1.3, 2.0 
-        
-        clamped_dist = torch.clamp(dist, min=min_r, max=max_r)
-        
-        absolute_position = absolute_position * (clamped_dist / (dist + 1e-8))
-        
-        next_camera_pose = position_to_pose_tensor(absolute_position)
-        return next_camera_pose, predicted_relative_position, absolute_position
+        return compute_policy_pose(policy_output, camera_poses_batch)
 
     def _compute_pose_scale_factor(self, camera_poses_batch: torch.Tensor) -> torch.Tensor:
-        """模仿 MapAnything：将所有视角变换到 view0 坐标系后，按跨视角平均范数归一化平移，返回归一化因子。
-
-        输入 camera_poses_batch 采用本项目通用的 world->camera 约定 [x,y,z,qx,qy,qz,qw]，
-        先转换到 cam2world (OpenCV, scalar-last) 再复用 MapAnything 的相对位姿计算。
-        """
-        if camera_poses_batch.ndim != 3 or camera_poses_batch.shape[-1] != 7:
-            raise ValueError(
-                f"camera_poses_batch expected shape [B, S, 7], got {tuple(camera_poses_batch.shape)}"
-            )
-        positions_world = camera_poses_batch[..., :3]  # camera centers in world
-        quats_world_to_cam = camera_poses_batch[..., 3:]  # world->cam rotation, xyzw
-
-        B, S, _ = positions_world.shape
-        # world->cam rotation matrix
-        R_wc = quaternion_to_rotation_matrix(quats_world_to_cam.reshape(-1, 4)).view(B, S, 3, 3)
-        # cam2world rotation
-        R_cw = R_wc.transpose(-1, -2)
-        quats_cam2world = rotation_matrix_to_quaternion(R_cw.reshape(-1, 3, 3)).view(B, S, 4)
-        trans_cam2world = positions_world  # cam center in world frame
-
-        ref_quat = quats_cam2world[:, 0]  # [B, 4]
-        ref_trans = trans_cam2world[:, 0]  # [B, 3]
-
-        ref_quat_exp = ref_quat.unsqueeze(1).expand(-1, S, -1).reshape(-1, 4)
-        ref_trans_exp = ref_trans.unsqueeze(1).expand(-1, S, -1).reshape(-1, 3)
-        quats_flat = quats_cam2world.reshape(-1, 4)
-        trans_flat = trans_cam2world.reshape(-1, 3)
-
-        _, rel_trans_flat = transform_pose_using_quats_and_trans_2_to_1(
-            ref_quat_exp,
-            ref_trans_exp,
-            quats_flat,
-            trans_flat,
-        )
-        rel_trans = rel_trans_flat.view(B, S, 3)
-
-        _, norm_factor = normalize_pose_translations(rel_trans, return_norm_factor=True)
-        logger.info(
-            "Pose scale factor stats — mean: %.4f, min: %.4f, max: %.4f",
-            norm_factor.mean().item(),
-            norm_factor.min().item(),
-            norm_factor.max().item(),
-        )
-        return norm_factor
-
-    def _trim_gt_mesh_data(
-        self,
-        gt_mesh_data: Dict[str, torch.Tensor],
-        selection: torch.Tensor,
-    ) -> Dict[str, torch.Tensor]:
-        """根据采样到的初始视图索引截取 GT 数据，避免后续函数重复实现。"""
-        trimmed = dict(gt_mesh_data)
-        if selection is None:
-            return trimmed
-
-        selection_device = selection
-        for key in ("gt_point_maps", "gt_valid_masks", "depth_z", "depth_z_viz"):
-            value = trimmed.get(key)
-            if value is None:
-                continue
-            selection_device = selection.to(value.device)
-            trimmed[key] = value.index_select(1, selection_device).contiguous()
-        return trimmed
-
-    def _parse_mesh_metadata(
-        self,
-        meta: Any,
-    ) -> Tuple[Optional[List[Optional[str]]], Optional[List[Optional[str]]]]:
-        if not isinstance(meta, list):
-            return None, None
-        mesh_paths: List[Optional[str]] = []
-        normalize_methods: List[Optional[str]] = []
-        for entry in meta:
-            if isinstance(entry, dict):
-                mesh_paths.append(entry.get("mesh_path"))
-                normalize_methods.append(entry.get("normalize_method"))
-            else:
-                mesh_paths.append(None)
-                normalize_methods.append(None)
-        return mesh_paths, normalize_methods
-
-    def _parse_mesh_paths(self, meta: Any) -> Optional[List[Optional[str]]]:
-        mesh_paths, _ = self._parse_mesh_metadata(meta)
-        return mesh_paths
+        return compute_pose_scale_factor(camera_poses_batch)
 
     def _render_inputs(
         self,
@@ -477,66 +180,14 @@ class NBVTrainer(LightningModule):
         gt_mesh_data: Dict[str, torch.Tensor],
         mesh_batch: Optional[Meshes],
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        needs_images = initial_images is None
-        gt_point_maps = gt_mesh_data.get("gt_point_maps")
-        gt_valid_masks = gt_mesh_data.get("gt_valid_masks")
-        needs_points = gt_point_maps is None
-        needs_depth = gt_mesh_data.get("depth_z") is None
-        needs_mask = gt_valid_masks is None or (needs_depth and gt_valid_masks is None)
-
-        if not (needs_images or needs_points or needs_depth or needs_mask):
-            return initial_images, gt_mesh_data
-
-        if (needs_images or needs_points or needs_depth or needs_mask) and mesh_batch is None:
-            raise ValueError("mesh_batch is required to render initial views on GPU.")
-
-        render_out = None
-        if needs_images or needs_points or needs_depth or needs_mask:
-            with torch.no_grad():
-                render_out = render_mesh_views(
-                    renderer=self.renderer,
-                    mesh_batch=mesh_batch,
-                    camera_poses=camera_poses_batch,
-                    out_rgb=needs_images,
-                    out_points=needs_points,
-                    out_mask=needs_mask,
-                    out_depth=needs_depth,
-                )
-
-            if needs_images:
-                initial_images = render_out.get("rgb")
-                if initial_images is None:
-                    raise RuntimeError("Renderer did not return rgb output.")
-                if initial_images.is_floating_point() and initial_images.dtype != self.dtype:
-                    initial_images = initial_images.to(dtype=self.dtype)
-
-            if needs_points:
-                gt_point_maps = render_out.get("points")
-                if gt_point_maps is None:
-                    raise RuntimeError("Renderer did not return point maps.")
-                # if gt_point_maps.is_floating_point() and gt_point_maps.dtype != self.dtype:
-                #     gt_point_maps = gt_point_maps.to(dtype=self.dtype)
-                gt_mesh_data["gt_point_maps"] = gt_point_maps
-
-            if needs_mask:
-                gt_valid_masks = render_out.get("mask")
-                if gt_valid_masks is None:
-                    raise RuntimeError("Renderer did not return masks.")
-                gt_valid_masks = gt_valid_masks.to(dtype=torch.bool)
-                gt_mesh_data["gt_valid_masks"] = gt_valid_masks
-
-        if needs_depth:
-            depth_z = render_out.get("depth")
-            if depth_z is None:
-                raise RuntimeError("Renderer did not return depth output.")
-            # if depth_z.is_floating_point() and depth_z.dtype != self.dtype:
-            #     depth_z = depth_z.to(dtype=self.dtype)
-            gt_mesh_data["depth_z"] = depth_z
-            gt_mesh_data["depth_z_viz"] = normalize_depth_for_visualization(
-                depth_z, gt_valid_masks
-            )
-            
-        return initial_images, gt_mesh_data
+        return render_inputs(
+            renderer=self.renderer,
+            initial_images=initial_images,
+            camera_poses_batch=camera_poses_batch,
+            gt_mesh_data=gt_mesh_data,
+            mesh_batch=mesh_batch,
+            dtype=self.dtype,
+        )
 
     def _prepare_batch(self, batch: Dict[str, torch.Tensor]) -> PreparedBatch:
         inputs = batch.get("inputs", {})
@@ -548,45 +199,23 @@ class NBVTrainer(LightningModule):
         camera_poses_batch = inputs.get("camera_poses")
 
         gt_mesh_data = targets.get("gt_mesh_data", {})
-        mesh_paths, normalize_methods = self._parse_mesh_metadata(meta)
-        cache_paths = self._build_render_cache_paths(
+        mesh_paths, normalize_methods = parse_mesh_metadata(meta)
+        cache_paths = self.render_cache.build_paths(
             mesh_paths=mesh_paths,
             normalize_methods=normalize_methods,
             camera_poses_batch=camera_poses_batch,
         )
-        cache_items: Optional[List[Dict[str, Any]]] = None
+        cache_payload = None
         if cache_paths:
-            cache_items = []
-            for path in cache_paths:
-                item = self._load_render_cache_item(path)
-                if item is None:
-                    cache_items = None
-                    break
-                cache_items.append(item)
+            cache_payload = self.render_cache.load_batch(
+                cache_paths=cache_paths,
+                device=camera_poses_batch.device,
+                dtype=self.dtype,
+                base_gt_mesh_data=gt_mesh_data,
+            )
 
-        if cache_items is not None:
-            device = camera_poses_batch.device
-            meshes = [item["mesh"].to(device) for item in cache_items]
-            mesh_batch = join_meshes_as_batch(meshes)
-            initial_images = torch.stack(
-                [item["initial_images"] for item in cache_items], dim=0
-            ).to(device)
-            if initial_images.is_floating_point() and initial_images.dtype != self.dtype:
-                initial_images = initial_images.to(dtype=self.dtype)
-            cached_gt = [item["gt_mesh_data"] for item in cache_items]
-            gt_mesh_data = dict(gt_mesh_data)
-            gt_mesh_data["gt_point_maps"] = torch.stack(
-                [item["gt_point_maps"] for item in cached_gt], dim=0
-            ).to(device)
-            gt_mesh_data["gt_valid_masks"] = torch.stack(
-                [item["gt_valid_masks"] for item in cached_gt], dim=0
-            ).to(device, dtype=torch.bool)
-            gt_mesh_data["depth_z"] = torch.stack(
-                [item["depth_z"] for item in cached_gt], dim=0
-            ).to(device)
-            gt_mesh_data["depth_z_viz"] = torch.stack(
-                [item["depth_z_viz"] for item in cached_gt], dim=0
-            ).to(device)
+        if cache_payload is not None:
+            mesh_batch, initial_images, gt_mesh_data = cache_payload
         else:
             mesh_batch = mesh_data.get("normalized")
             mesh_batch = load_meshes_as_batch(
@@ -602,11 +231,12 @@ class NBVTrainer(LightningModule):
                 mesh_batch=mesh_batch,
             )
             if cache_paths:
-                self._save_render_cache_batch(
+                self.render_cache.save_batch(
                     cache_paths=cache_paths,
                     mesh_batch=mesh_batch,
                     initial_images=initial_images,
                     gt_mesh_data=gt_mesh_data,
+                    is_global_zero=getattr(self.trainer, "is_global_zero", True),
                 )
         depth_z_batch = gt_mesh_data.get("depth_z")
 
@@ -617,7 +247,7 @@ class NBVTrainer(LightningModule):
             randomize=self.trainer.training,
         )
 
-        trimmed_gt_mesh_data = self._trim_gt_mesh_data(gt_mesh_data, selection)
+        trimmed_gt_mesh_data = trim_gt_mesh_data(gt_mesh_data, selection)
 
         return PreparedBatch(
             initial_images=initial_images,
@@ -673,6 +303,9 @@ class NBVTrainer(LightningModule):
             self._last_predicted_relative_position = None
             self._last_next_camera_pose = None
 
+    def _set_last_new_point_maps_render(self, value: Optional[torch.Tensor]) -> None:
+        self._last_new_point_maps_render = value
+
     def _build_loss_dict(
         self,
         loss_components: Dict[str, float],
@@ -681,27 +314,27 @@ class NBVTrainer(LightningModule):
     ) -> Dict[str, float]:
         logged_loss_keys = (
             "total_loss",
-            "chamfer_loss",
+            # "chamfer_loss",
             "weighted_chamfer_loss",
-            "chamfer_pred_points_mean",
-            "chamfer_pred_points_min",
-            "chamfer_pred_points_zero_frac",
-            "chamfer_pred_points_last_view_mean",
-            "chamfer_pred_points_last_view_min",
-            "chamfer_pred_points_last_view_zero_frac",
-            "confidence_loss",
-            "weighted_confidence_loss",
-            "viewpoint_loss",
-            "weighted_viewpoint_loss",
-            "pose_penalty_loss",
+            # "chamfer_pred_points_mean",
+            # "chamfer_pred_points_min",
+            # "chamfer_pred_points_zero_frac",
+            # "chamfer_pred_points_last_view_mean",
+            # "chamfer_pred_points_last_view_min",
+            # "chamfer_pred_points_last_view_zero_frac",
+            # "confidence_loss",
+            # "weighted_confidence_loss",
+            # "viewpoint_loss",
+            # "weighted_viewpoint_loss",
+            # "pose_penalty_loss",
             "weighted_pose_penalty_loss",
         )
         loss_dict = {
-            key: float(loss_components[key]) for key in logged_loss_keys if key in loss_components
+            key: loss_components[key] for key in logged_loss_keys if key in loss_components
         }
         if random_baseline is not None:
-            loss_dict["random_chamfer_loss"] = float(random_baseline.chamfer_loss)
-        loss_dict["num_initial_views"] = float(active_view_count)
+            loss_dict["random_chamfer_loss"] = random_baseline.chamfer_loss
+        # loss_dict["num_initial_views"] = float(active_view_count)
         return loss_dict
 
     def _maybe_compute_random_baseline(
@@ -715,7 +348,9 @@ class NBVTrainer(LightningModule):
     ) -> Optional[RandomBaselineOutput]:
         if not self.trainer.training or not self.enable_random_baseline:
             return None
-        random_chamfer, random_images, random_position_norm_mean = self._compute_random_baseline(
+        random_chamfer, random_images, random_position_norm_mean = compute_random_baseline(
+            renderer=self.renderer,
+            loss_fn=self.loss_fn,
             initial_images=initial_images,
             camera_poses_batch=camera_poses_batch,
             gt_mesh_data=gt_mesh_data,
@@ -739,195 +374,16 @@ class NBVTrainer(LightningModule):
         point_cloud_dir: Optional[str],
         mesh_paths: Optional[Sequence[Optional[str]]] = None,
     ) -> PoseEvaluationResult:
-        """统一执行渲染、重建与损失计算，便于策略预测与随机基线共用。"""
-
-        gt_point_maps = gt_mesh_data.get("gt_point_maps")
-        gt_valid_masks = gt_mesh_data.get("gt_valid_masks")
-
-        new_render = self.renderer(
-            gt_mesh=mesh_batch,
-            camera_poses=pose,
-            out_depth=True,
-            out_points=True,
-            out_mask=True,
-        )
-        new_images = new_render["rgb"]
-        new_depth_z = new_render["depth"]
-        new_point_maps_render = new_render["points"].permute(0, 2, 3, 1).unsqueeze(1)
-        new_valid_masks = new_render["mask"]
-        
-        # print(new_images, new_depth_z)
-        # print(new_point_maps_render,new_valid_masks)
-        # tensor[4, 3, 518, 518] n=3219888 (12Mb) x∈[0., 1.276] μ=0.088 σ=0.213 grad SliceBackward0 cuda:0 tensor[4, 1, 518, 518] n=1073296 (4.1Mb) x∈[0., 5.213] μ=0.661 σ=1.383 grad SliceBackward0 cuda:0
-        # tensor[4, 1, 518, 518, 3] n=3219888 (12Mb) x∈[-1.595, 1.793] μ=0.025 σ=0.299 grad UnsqueezeBackward0 cuda:0 tensor[4, 1, 518, 518] bool n=1073296 (1.0Mb) x∈[False, True] μ=0.190 σ=0.392 cuda:0
-
-        # 用 depth_z + 可微 pose + 固定内参反投影得到 new world point maps
-        # fov_degrees = float(getattr(self.renderer, "default_fov_degrees", 60.0))
-        # if self._depth_backproject_xy_signs is None:
-        #     self._depth_backproject_xy_signs = infer_depth_backprojection_xy_signs(
-        #         depth_z=new_depth_z,
-        #         camera_poses=pose.unsqueeze(1).detach(),
-        #         reference_world_points=new_point_maps_render,
-        #         fov_degrees=fov_degrees,
-        #         valid_masks=new_valid_masks,
-        #     )
-        #     logger.info(
-        #         "Inferred depth backprojection xy_signs=%s (fov=%.2f)",
-        #         self._depth_backproject_xy_signs,
-        #         fov_degrees,
-        #     )
-
-        # new_point_maps = camera_depth_z_to_world_points(
-        #     depth_z=new_depth_z.detach(),
-        #     camera_poses=pose.unsqueeze(1),
-        #     fov_degrees=fov_degrees,
-        #     valid_masks=new_valid_masks,
-        #     xy_signs=self._depth_backproject_xy_signs,
-        # )
-
-        # if self.training and self.trainer.is_global_zero:
-        #     with torch.no_grad():
-        #         diff_l2 = (new_point_maps - new_point_maps_render).norm(dim=-1)  # [B, S, H, W]
-        #         if new_valid_masks.any():
-        #             diff_valid = diff_l2[new_valid_masks]
-        #             self.log(
-        #                 "Backprojection/new_view_l2_mean",
-        #                 diff_valid.mean(),
-        #                 on_step=True,
-        #                 on_epoch=False,
-        #                 prog_bar=False,
-        #                 sync_dist=False,
-        #             )
-        #             self.log(
-        #                 "Backprojection/new_view_l2_max",
-        #                 diff_valid.max(),
-        #                 on_step=True,
-        #                 on_epoch=False,
-        #                 prog_bar=False,
-        #                 sync_dist=False,
-        #             )
-        
-        try:
-            new_point_maps_render.retain_grad()
-            self._last_new_point_maps_render = new_point_maps_render
-        except RuntimeError:
-            self._last_new_point_maps_render = None
-
-        updated_point_maps = torch.cat([gt_point_maps, new_point_maps_render], dim=1).contiguous()
-        updated_valid_masks = torch.cat([gt_valid_masks, new_valid_masks], dim=1).contiguous()
-
-        updated_gt_mesh_data = dict(gt_mesh_data)
-        updated_gt_mesh_data["gt_point_maps"] = torch.cat(
-            [gt_point_maps, new_point_maps_render], dim=1
-        ).contiguous()
-        updated_gt_mesh_data["gt_valid_masks"] = updated_valid_masks
-
-        depth_z_batch = gt_mesh_data.get("depth_z")
-        updated_depth_z = None
-        if depth_z_batch is not None:
-            depth_z_batch_local = depth_z_batch
-            updated_depth_z = torch.cat([depth_z_batch_local, new_depth_z.unsqueeze(-1)], dim=1).contiguous()
-            updated_gt_mesh_data["depth_z"] = updated_depth_z
-
-        combined_images_batch = torch.cat([initial_images, new_images.unsqueeze(1)], dim=1)
-        combined_camera_poses = torch.cat([camera_poses_batch, pose.unsqueeze(1)], dim=1)
-
-        recon_data = build_recon_from_point_maps(
-            point_maps=updated_point_maps,
-            camera_poses=combined_camera_poses,
-            valid_masks=updated_valid_masks,
-            depth_z=updated_depth_z,
-        )
-
-        total_loss, loss_components = self.loss_fn(
-            recon_data,
-            updated_gt_mesh_data,
-            combined_images_batch,
-            combined_camera_poses,
-            return_components=True,
+        return evaluate_candidate_pose(
+            renderer=self.renderer,
+            loss_fn=self.loss_fn,
+            pose=pose,
+            initial_images=initial_images,
+            camera_poses_batch=camera_poses_batch,
+            gt_mesh_data=gt_mesh_data,
+            mesh_batch=mesh_batch,
             point_cloud_dir=point_cloud_dir,
-        )
-
-        return PoseEvaluationResult(
-            total_loss=total_loss,
-            loss_components=loss_components,
-            new_images=new_images,
-            gt_mesh_data=updated_gt_mesh_data,
-            depth_z=updated_depth_z,
-        )
-
-    def _sample_random_positions(self, batch_size: int, device: torch.device) -> torch.Tensor:
-        """在姿态约束内随机采样相机位置，保证 pose_penalty_loss=0。"""
-        inner_radius = float(getattr(self.loss_fn, "pose_inner_radius", 1.5))
-        outer_radius = float(getattr(self.loss_fn, "pose_outer_radius", inner_radius + 1.0))
-
-        floor_margin = float(getattr(self.loss_fn, "pose_floor_margin", 1.0))
-        up_axis = getattr(self.loss_fn, "pose_up_axis", "Y").upper()
-        axis_index = {"X": 0, "Y": 1, "Z": 2}.get(up_axis, 1)
-        min_height = -floor_margin
-
-        dtype = torch.float32
-        positions = torch.zeros(batch_size, 3, device=device, dtype=dtype)
-        filled = 0
-        attempts = 0
-        while filled < batch_size and attempts < 20:
-            remaining = batch_size - filled
-            sample_count = max(remaining * 2, 4)
-            directions = torch.randn(sample_count, 3, device=device, dtype=dtype)
-            directions = directions / directions.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-            radii = torch.rand(sample_count, 1, device=device, dtype=dtype)
-            radii = radii * (outer_radius - inner_radius) + inner_radius
-            samples = directions * radii
-            valid_mask = samples[:, axis_index] >= min_height
-            valid_samples = samples[valid_mask]
-            if valid_samples.numel() == 0:
-                attempts += 1
-                continue
-            take = min(valid_samples.size(0), remaining)
-            positions[filled:filled + take] = valid_samples[:take]
-            filled += take
-            attempts += 1
-
-        if filled < batch_size:
-            fallback = torch.randn(batch_size - filled, 3, device=device, dtype=dtype)
-            fallback = fallback / fallback.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-            radius = (inner_radius + outer_radius) * 0.5
-            fallback = fallback * radius
-            fallback[:, axis_index] = torch.clamp(fallback[:, axis_index], min=min_height + 1e-4)
-            positions[filled:] = fallback
-
-        return positions
-
-    def _compute_random_baseline(
-        self,
-        *,
-        initial_images: torch.Tensor,
-        camera_poses_batch: torch.Tensor,
-        gt_mesh_data: Dict[str, torch.Tensor],
-        mesh_batch,
-        mesh_paths: Optional[Sequence[Optional[str]]] = None,
-    ) -> Tuple[float, torch.Tensor, float]:
-        """生成符合姿态约束的随机位姿并计算其 Chamfer 损失。"""
-        device = initial_images.device
-        random_positions = self._sample_random_positions(initial_images.shape[0], device=device)
-        random_pose = position_to_pose_tensor(random_positions)
-        position_norm_mean = random_positions.norm(dim=1).mean().item()
-
-        with torch.no_grad():
-            result = self._evaluate_candidate_pose(
-                pose=random_pose,
-                initial_images=initial_images,
-                camera_poses_batch=camera_poses_batch,
-                gt_mesh_data=gt_mesh_data,
-                mesh_batch=mesh_batch,
-                point_cloud_dir=None,
-                mesh_paths=mesh_paths,
-            )
-
-        return (
-            float(result.loss_components.get("chamfer_loss", 0.0)),
-            result.new_images,
-            position_norm_mean,
+            on_new_point_maps=self._set_last_new_point_maps_render,
         )
 
     def _select_initial_views(
@@ -938,39 +394,17 @@ class NBVTrainer(LightningModule):
         depth_z: Optional[torch.Tensor] = None,
         randomize: bool,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], torch.Tensor, int]:
-        """选取训练/验证需要的初始视图子集。"""
-
-        min_views = max(self.min_initial_views, 1)
-        max_views = min(self.max_initial_views, initial_images.shape[1])
-
-        total_views = initial_images.shape[1]
-        should_randomize = randomize and self.randomize_initial_views
-
-        if should_randomize:
-            sampled = torch.randint(
-                low=min_views,
-                high=max_views + 1,
-                size=(1,),
-                device=initial_images.device,
-            )
-            num_views = int(sampled.item())
-        else:
-            num_views = max_views
-
-        if should_randomize:
-            perm = torch.randperm(total_views, device=initial_images.device, dtype=torch.long)
-        else:
-            perm = torch.arange(total_views, device=initial_images.device, dtype=torch.long)
-        selection = perm[:num_views]
-        selection, _ = torch.sort(selection)
-        initial_images = initial_images.index_select(1, selection)
-        camera_poses = camera_poses.index_select(1, selection)
-        if depth_z is not None:
-            depth_z = depth_z.index_select(1, selection)
-
+        initial_images, camera_poses, depth_z, selection, num_views = select_initial_views(
+            initial_images,
+            camera_poses,
+            depth_z=depth_z,
+            randomize=randomize,
+            min_initial_views=self.min_initial_views,
+            max_initial_views=self.max_initial_views,
+            randomize_initial_views=self.randomize_initial_views,
+        )
         self._last_initial_view_count = num_views
         self._last_initial_view_indices = selection.detach().cpu()
-
         return initial_images, camera_poses, depth_z, selection, num_views
 
     def _process_batch(
@@ -1064,40 +498,11 @@ class NBVTrainer(LightningModule):
         self.world_size = self.trainer.world_size
 
     def training_step(self, batch: Dict, batch_idx: int):
-        loss, loss_dict, _, _ = self._process_batch(batch)
-        self.log(
-            "train/total_loss",
-            loss,
-            on_step=True,
-            on_epoch=False,
-            prog_bar=True,
-            sync_dist=self.world_size > 1,
-        )
+        loss, _, _, _ = self._process_batch(batch)
         return loss
 
     def validation_step(self, batch: Dict, batch_idx: int):
-        loss, loss_dict, _, _ = self._process_batch(batch)
-        self.log(
-            "val/total_loss",
-            loss,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            sync_dist=self.world_size > 1,
-        )
-        if loss_dict is None:
-            return loss
-        for key, value in loss_dict.items():
-            if key == "total_loss":
-                continue
-            self.log(
-                f"val/{key}",
-                float(value),
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                sync_dist=self.world_size > 1,
-            )
+        loss, _, _, _ = self._process_batch(batch)
         return loss
 
     def on_before_optimizer_step(self, optimizer) -> None:
@@ -1218,32 +623,32 @@ class NBVTrainer(LightningModule):
         self._last_predicted_relative_position = None
         self._last_next_camera_pose = None
 
-def transfer_batch_to_device(self, batch: Dict[str, Any], device: torch.device, dataloader_idx: int):
-    
-    def move_item(x):
-        # 处理 Tensor：只移动设备，不改变精度(保持 float32 以保证几何计算稳定)
-        if isinstance(x, torch.Tensor):
-            # non_blocking=True 是一个小优化，允许数据传输和GPU计算重叠
-            return x.to(device, non_blocking=True)
-            
-        # 处理 PyTorch3D Meshes：调用其内部的 .to() 方法
-        if isinstance(x, Meshes):
-            return x.to(device)
-            
-        return x
+    def transfer_batch_to_device(self, batch: Dict[str, Any], device: torch.device, dataloader_idx: int):
+        
+        def move_item(x):
+            # 处理 Tensor：只移动设备，不改变精度(保持 float32 以保证几何计算稳定)
+            if isinstance(x, torch.Tensor):
+                # non_blocking=True 是一个小优化，允许数据传输和GPU计算重叠
+                return x.to(device, non_blocking=True)
+                
+            # 处理 PyTorch3D Meshes：调用其内部的 .to() 方法
+            if isinstance(x, Meshes):
+                return x.to(device)
+                
+            return x
 
-    moved: Dict[str, Any] = {}
-    # 只处理这三个 key，meta 信息保持原样留在 CPU
-    data_keys = {"inputs", "targets", "mesh"}
-    
-    for key, value in batch.items():
-        if key in data_keys:
-            moved[key] = apply_to_collection(
-                value,
-                dtype=(torch.Tensor, Meshes),
-                function=move_item,
-            )
-        else:
-            moved[key] = value
-            
-    return moved
+        moved: Dict[str, Any] = {}
+        # 只处理这三个 key，meta 信息保持原样留在 CPU
+        data_keys = {"inputs", "targets", "mesh"}
+        
+        for key, value in batch.items():
+            if key in data_keys:
+                moved[key] = apply_to_collection(
+                    value,
+                    dtype=(torch.Tensor, Meshes),
+                    function=move_item,
+                )
+            else:
+                moved[key] = value
+                
+        return moved

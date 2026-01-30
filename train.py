@@ -35,15 +35,16 @@ def main(cfg: NBVExperimentConfig) -> None:
 
     schedule = torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=0)
     profiler = PyTorchProfiler(
-        dirpath=".",           # 保存路径
-        filename="perf_logs",  # 文件名前缀
+        dirpath="perf_logs",   # 保存路径
+        filename="training_trace",  # 文件名前缀
         export_to_chrome=True,
         schedule=schedule,
         profile_memory=True,   # 看显存是不是瓶颈
         record_shapes=True,    # 看 Tensor 形状
         with_stack=True        # 能定位到具体代码行
     )
-    trainer = build_trainer(cfg) #, profiler=profiler)
+    trainer = build_trainer(cfg)
+    # trainer = build_trainer(cfg, profiler=profiler)
     
     trainer.fit(model=model, datamodule=datamodule, ckpt_path=cfg.resume_checkpoint or None)
 

@@ -1,10 +1,12 @@
 defaults:
   - nbv_schema
+  - override hydra/job_logging: disabled
+  - override hydra/hydra_logging: disabled
   - _self_
 
 experiment_name: dataset-house3k
-batch_size: 4
-max_meshes: 20
+batch_size: 16
+max_meshes: 800
 learning_rate: 1e-5
 max_epochs: 500
 seed: 42

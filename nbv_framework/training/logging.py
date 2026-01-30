@@ -8,7 +8,7 @@ import torch
 import torchvision
 from lightning.pytorch.loggers import WandbLogger
 
-from .step_types import (
+from ..pipeline.types import (
     PolicyInferenceOutput,
     PoseEvaluationResult,
     PreparedBatch,
@@ -18,7 +18,62 @@ from .step_types import (
 logger = logging.getLogger(__name__)
 
 
-def resolve_step_output_dir(trainer) -> Optional[str]:
+def _stage_prefix(trainer) -> str:
+    return "train" if trainer.trainer.training else "val"
+
+
+def _log_on_step(trainer) -> bool:
+    return trainer.trainer.training
+
+
+def _log_on_epoch(trainer) -> bool:
+    return not trainer.trainer.training
+
+
+def _prefix_key(prefix: str, key: str) -> str:
+    if key.startswith(f"{prefix}/"):
+        return key
+    return f"{prefix}/{key}"
+
+
+def _log_scalar(
+    trainer,
+    *,
+    key: str,
+    value: torch.Tensor | float,
+    prefix: str,
+    prog_bar: bool = False,
+) -> None:
+    trainer.log(
+        _prefix_key(prefix, key),
+        value,
+        on_step=_log_on_step(trainer),
+        on_epoch=_log_on_epoch(trainer),
+        prog_bar=prog_bar,
+        sync_dist=trainer.world_size > 1,
+    )
+
+
+def _log_metrics_dict(
+    trainer,
+    *,
+    metrics: Dict[str, float],
+    prefix: str,
+    prog_bar: bool = False,
+) -> None:
+    if not metrics:
+        return
+    prefixed = {_prefix_key(prefix, key): value for key, value in metrics.items()}
+    trainer.log_dict(
+        prefixed,
+        on_step=_log_on_step(trainer),
+        on_epoch=_log_on_epoch(trainer),
+        prog_bar=prog_bar,
+        sync_dist=trainer.world_size > 1,
+    )
+
+
+def resolve_step_output_dir(trainer) -> str:
     if not trainer.trainer.training:
         return os.path.join(
         trainer.log_dir,
@@ -28,7 +83,7 @@ def resolve_step_output_dir(trainer) -> Optional[str]:
         )
     return os.path.join(
         trainer.log_dir,
-        "images",
+        "images_train",
         f"step_{trainer.global_step:06d}",
         f"rank_{trainer.global_rank:02d}",
     )
@@ -44,20 +99,23 @@ def log_step_outputs(
     loss_dict: Dict[str, float],
     step_output_dir: Optional[str],
 ) -> None:
-    step_index = trainer.global_step if trainer.trainer.training else None
+    prefix = _stage_prefix(trainer)
+    step_index = trainer.global_step
     log_camera_pose_stats(
         trainer,
         policy_inference.next_camera_pose,
         policy_inference.predicted_relative_position,
         step_index,
+        prefix=prefix,
     )
-    log_view_diagnostics(
-        trainer,
-        new_images=policy_eval.new_images,
-        new_depth_z=policy_eval.depth_z,
-        initial_images=prepared.initial_images,
-        initial_depth_z=prepared.depth_z,
-    )
+    # log_view_diagnostics(
+    #     trainer,
+    #     new_images=policy_eval.new_images,
+    #     new_depth_z=policy_eval.depth_z,
+    #     initial_images=prepared.initial_images,
+    #     initial_depth_z=prepared.depth_z,
+    #     prefix=prefix,
+    # )
     if step_output_dir is not None:
         save_pre_images_grid(
             trainer,
@@ -65,7 +123,7 @@ def log_step_outputs(
             new_images=policy_eval.new_images,
             step_output_dir=step_output_dir,
         )
-    log_training_metrics(trainer, loss_dict, prepared.active_view_count)
+    log_loss_metrics(trainer, loss_dict, prefix=prefix)
     log_random_baseline(trainer, random_baseline, step_output_dir)
 
 
@@ -74,6 +132,8 @@ def log_camera_pose_stats(
     next_camera_pose: torch.Tensor,
     predicted_relative_position: torch.Tensor,
     step_index: Optional[int],
+    *,
+    prefix: str,
 ) -> None:
     """Record camera pose stats for debugging."""
     if step_index is None:
@@ -83,81 +143,67 @@ def log_camera_pose_stats(
     quaternions = next_camera_pose[:, 3:]
 
     position_norms = torch.norm(positions, dim=1)
-    trainer.log(
-        "Camera_pose/position_norm_mean",
-        position_norms.mean(),
-        on_step=True,
-        on_epoch=False,
-        prog_bar=False,
-        sync_dist=trainer.world_size > 1,
+    _log_scalar(
+        trainer,
+        key="camera_pose/position_norm_mean",
+        value=position_norms.mean(),
+        prefix=prefix,
     )
     if position_norms.numel() > 1:
-        trainer.log(
-            "Camera_pose/position_norm_std",
-            position_norms.std(),
-            on_step=True,
-            on_epoch=False,
-            prog_bar=False,
-            sync_dist=trainer.world_size > 1,
+        _log_scalar(
+            trainer,
+            key="camera_pose/position_norm_std",
+            value=position_norms.std(),
+            prefix=prefix,
         )
 
     if quaternions.numel() > 0:
         qw_abs = quaternions[:, 3].abs()
-        trainer.log(
-            "Camera_pose/quaternion_w_abs_mean",
-            qw_abs.mean(),
-            on_step=True,
-            on_epoch=False,
-            prog_bar=False,
-            sync_dist=trainer.world_size > 1,
+        _log_scalar(
+            trainer,
+            key="camera_pose/quaternion_w_abs_mean",
+            value=qw_abs.mean(),
+            prefix=prefix,
         )
 
     relative_position_norms = torch.norm(predicted_relative_position, dim=1)
-    trainer.log(
-        "Camera_pose/relative_position_norm_mean",
-        relative_position_norms.mean(),
-        on_step=True,
-        on_epoch=False,
-        prog_bar=False,
-        sync_dist=trainer.world_size > 1,
+    _log_scalar(
+        trainer,
+        key="camera_pose/relative_position_norm_mean",
+        value=relative_position_norms.mean(),
+        prefix=prefix,
     )
     if relative_position_norms.numel() > 1:
-        trainer.log(
-            "Camera_pose/relative_position_norm_std",
-            relative_position_norms.std(),
-            on_step=True,
-            on_epoch=False,
-            prog_bar=False,
-            sync_dist=trainer.world_size > 1,
+        _log_scalar(
+            trainer,
+            key="camera_pose/relative_position_norm_std",
+            value=relative_position_norms.std(),
+            prefix=prefix,
         )
 
 
-def log_training_metrics(trainer, loss_dict: Dict[str, float], active_view_count: int) -> None:
-    """Record scalar metrics for training."""
-    metrics: Dict[str, float] = {
-        "train/num_initial_views": float(active_view_count),
-    }
-    if "chamfer_loss" in loss_dict:
-        metrics["train/chamfer_loss"] = loss_dict["chamfer_loss"]
-    if "pose_penalty_loss" in loss_dict:
-        metrics["train/pose_penalty_loss"] = loss_dict["pose_penalty_loss"]
-    # for key in (
-    #     "chamfer_pred_points_mean",
-    #     "chamfer_pred_points_min",
-    #     "chamfer_pred_points_zero_frac",
-    #     "chamfer_pred_points_last_view_mean",
-    #     "chamfer_pred_points_last_view_min",
-    #     "chamfer_pred_points_last_view_zero_frac",
-    # ):
-    #     if key in loss_dict:
-    #         metrics[f"train/{key}"] = loss_dict[key]
-    trainer.log_dict(
-        metrics,
-        on_step=True,
-        on_epoch=False,
-        prog_bar=False,
-        sync_dist=trainer.world_size > 1,
-    )
+def log_loss_metrics(
+    trainer,
+    loss_dict: Optional[Dict[str, float]],
+    *,
+    prefix: str,
+) -> None:
+    if not loss_dict:
+        return
+
+    metrics: Dict[str, float] = {key: float(value) for key, value in loss_dict.items()}
+
+    total_loss = metrics.pop("total_loss", None)
+    if total_loss is not None:
+        _log_scalar(
+            trainer,
+            key="total_loss",
+            value=total_loss,
+            prefix=prefix,
+            prog_bar=True,
+        )
+
+    _log_metrics_dict(trainer, metrics=metrics, prefix=prefix, prog_bar=False)
 
 
 def log_random_baseline(
@@ -169,21 +215,17 @@ def log_random_baseline(
     if random_baseline is None:
         return
 
-    trainer.log(
-        "train/random_baseline_chamfer_loss",
-        float(random_baseline.chamfer_loss),
-        on_step=True,
-        on_epoch=False,
-        prog_bar=False,
-        sync_dist=trainer.world_size > 1,
+    _log_scalar(
+        trainer,
+        key="random_baseline_chamfer_loss",
+        value=float(random_baseline.chamfer_loss),
+        prefix="train",
     )
-    trainer.log(
-        "train/random_baseline_position_norm_mean",
-        float(random_baseline.position_norm_mean),
-        on_step=True,
-        on_epoch=False,
-        prog_bar=False,
-        sync_dist=trainer.world_size > 1,
+    _log_scalar(
+        trainer,
+        key="random_baseline_position_norm_mean",
+        value=float(random_baseline.position_norm_mean),
+        prefix="train",
     )
     if not trainer.trainer.is_global_zero:
         return
@@ -266,10 +308,9 @@ def log_view_diagnostics(
     new_depth_z: Optional[torch.Tensor],
     initial_images: Optional[torch.Tensor] = None,
     initial_depth_z: Optional[torch.Tensor] = None,
+    prefix: str,
 ) -> None:
     """Record rendered view diagnostics to catch black/empty views."""
-    if not trainer.trainer.training:
-        return
     if new_images.numel() == 0 and (initial_images is None or initial_images.numel() == 0):
         return
 
@@ -287,17 +328,16 @@ def log_view_diagnostics(
 
             metrics.update(
                 {
-                    "render/new_view_intensity_mean": mean_intensity,
-                    "render/new_view_intensity_min": min_val,
-                    "render/new_view_intensity_max": max_val,
+                    _prefix_key(prefix, "render/new_view_intensity_mean"): mean_intensity,
+                    _prefix_key(prefix, "render/new_view_intensity_min"): min_val,
+                    _prefix_key(prefix, "render/new_view_intensity_max"): max_val,
                 }
             )
-            if black_frac is not None:
-                metrics["render/new_view_black_frac"] = black_frac
+            metrics[_prefix_key(prefix, "render/new_view_black_frac")] = black_frac
 
             if new_depth_z is not None and torch.is_tensor(new_depth_z) and new_depth_z.numel() > 0:
                 depth_nonzero = (new_depth_z.abs() > 1e-6).float()
-                metrics["render/new_view_valid_frac"] = depth_nonzero.mean()
+                metrics[_prefix_key(prefix, "render/new_view_valid_frac")] = depth_nonzero.mean()
 
         if initial_images is not None and initial_images.numel() > 0:
             init_mean = initial_images.mean()
@@ -310,13 +350,13 @@ def log_view_diagnostics(
 
             metrics.update(
                 {
-                    "render/initial_view_intensity_mean": init_mean,
-                    "render/initial_view_intensity_min": init_min,
-                    "render/initial_view_intensity_max": init_max,
+                    _prefix_key(prefix, "render/initial_view_intensity_mean"): init_mean,
+                    _prefix_key(prefix, "render/initial_view_intensity_min"): init_min,
+                    _prefix_key(prefix, "render/initial_view_intensity_max"): init_max,
                 }
             )
             if init_black_frac is not None:
-                metrics["render/initial_view_black_frac"] = init_black_frac
+                metrics[_prefix_key(prefix, "render/initial_view_black_frac")] = init_black_frac
 
             if (
                 initial_depth_z is not None
@@ -324,13 +364,13 @@ def log_view_diagnostics(
                 and initial_depth_z.numel() > 0
             ):
                 init_depth_nonzero = (initial_depth_z.abs() > 1e-6).float()
-                metrics["render/initial_view_valid_frac"] = init_depth_nonzero.mean()
+                metrics[_prefix_key(prefix, "render/initial_view_valid_frac")] = init_depth_nonzero.mean()
 
         if metrics:
             trainer.log_dict(
                 metrics,
-                on_step=True,
-                on_epoch=False,
+                on_step=_log_on_step(trainer),
+                on_epoch=_log_on_epoch(trainer),
                 prog_bar=False,
                 sync_dist=trainer.world_size > 1,
             )

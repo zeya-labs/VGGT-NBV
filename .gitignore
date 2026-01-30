@@ -154,7 +154,5 @@ Thumbs.db
 
 # Cache
 .cache/
-cache/
-
 # Wandb
 wandb/

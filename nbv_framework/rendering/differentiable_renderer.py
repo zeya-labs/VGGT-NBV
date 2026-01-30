@@ -38,7 +38,7 @@ class DifferentiableRenderer(nn.Module):
             faces_per_pixel=4, 
             perspective_correct=False,
             clip_barycentric_coords=True,
-            cull_backfaces=True  
+            # cull_backfaces=True  
         )
         
         # --- 2. 材质与混合参数 ---

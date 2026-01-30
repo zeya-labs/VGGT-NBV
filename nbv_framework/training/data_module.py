@@ -31,7 +31,6 @@ class NBVDataModule(pl.LightningDataModule):
         self.cfg = cfg
         self.train_dataset: Optional[Dataset] = None
         self.val_dataset: Optional[Dataset] = None
-        self._warned_num_workers_cuda: bool = False
 
     def setup(self, stage: Optional[str] = None) -> None:
         if stage == 'fit' or stage is None:
