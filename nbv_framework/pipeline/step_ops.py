@@ -146,7 +146,6 @@ def evaluate_candidate_pose(
 
     if on_new_point_maps is not None:
         try:
-            new_point_maps_render.retain_grad()
             on_new_point_maps(new_point_maps_render)
         except RuntimeError:
             on_new_point_maps(None)

@@ -11,6 +11,7 @@ from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.utilities.rank_zero import rank_zero_only
 from lightning.pytorch.profilers.profiler import Profiler
+from lightning.pytorch.strategies import DDPStrategy
 
 from nbv_framework.models.mapanything_wrapper import MapAnythingWrapper
 from nbv_framework.models.nbv_policy_networks import AttentionNBVPolicy
@@ -40,12 +41,15 @@ def build_lightning_model(cfg: NBVExperimentConfig) -> NBVTrainer:
         use_epoch_seed=cfg.use_epoch_seed,
         enable_random_baseline=cfg.enable_random_baseline,
         mesh_load_workers=cfg.mesh_load_workers,
+        render_cache_enabled=cfg.render_cache_enabled,
+        render_cache_root=cfg.render_cache_root,
     )
 
 
 def build_trainer(cfg: NBVExperimentConfig, profiler: Profiler = None) -> Trainer:
     """Configure the PyTorch Lightning Trainer from Hydra config."""
     trainer_conf = OmegaConf.to_container(cfg.trainer, resolve=True)  # type: ignore[arg-type]
+    trainer_conf['strategy'] = DDPStrategy(find_unused_parameters=True)
     callbacks = [
         # TODO: 在开启val之后开启模型保存回调
         # ModelCheckpoint(

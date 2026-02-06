@@ -41,7 +41,7 @@ class NBVExperimentConfig:
     # Optimizer & trainer controls
     learning_rate: float = 1e-5
     batch_size: int = 1
-    num_workers: int = 16
+    num_workers: int = 4
     mesh_load_workers: int = 4
     max_epochs: int = 1000
     normalize_method: str = "unit_sphere"
@@ -83,6 +83,8 @@ class NBVExperimentConfig:
     output_dir: str = "./outputs"
     save_dir: str = "${output_dir}/checkpoints"
     log_dir: str = "${output_dir}/logs"
+    render_cache_enabled: bool = True
+    render_cache_root: Optional[str] = None
     wandb: WandbConfig = field(default_factory=WandbConfig)
 
     # Device / dtype get resolved at runtime

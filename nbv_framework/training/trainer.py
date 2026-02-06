@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import math
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import torch
@@ -66,7 +67,9 @@ class NBVTrainer(LightningModule):
                  log_dir: str = "runs/nbv_experiment",
                  use_epoch_seed: bool = False,
                  enable_random_baseline: bool = True,
-                 mesh_load_workers: int = 4):
+                 mesh_load_workers: int = 4,
+                 render_cache_enabled: bool = True,
+                 render_cache_root: Optional[str] = None):
         """
         初始化训练器
 
@@ -104,25 +107,31 @@ class NBVTrainer(LightningModule):
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
         self.mesh_load_workers = mesh_load_workers
+        self.render_cache_enabled = bool(render_cache_enabled)
 
         self.min_initial_views = min_initial_views
         self.max_initial_views = max_initial_views
         self.randomize_initial_views = randomize_initial_views
         self._last_initial_view_count = 0
         self._last_initial_view_indices: Optional[torch.Tensor] = None
+        self._last_batch_size: Optional[int] = None
+
+        # Grad stats captured via hooks (avoid keeping autograd graph alive).
+        self._last_predicted_relative_position_grad_norm: Optional[torch.Tensor] = None
+        self._last_next_pose_position_grad_norm: Optional[torch.Tensor] = None
+        self._last_next_pose_quaternion_grad_norm: Optional[torch.Tensor] = None
+        self._last_new_point_maps_grad_norm: Optional[torch.Tensor] = None
 
         # 深度反投影坐标轴符号约定（与渲染器一致）
         self._depth_backproject_xy_signs: Optional[Tuple[int, int]] = (-1,-1)
 
-        # Debug tensors for gradient attribution (filled during training_step).
-        self._last_predicted_relative_position: Optional[torch.Tensor] = None
-
-        self.render_cache = RenderCache(renderer=self.renderer)
+        if self.render_cache_enabled:
+            root = Path(render_cache_root) if render_cache_root else None
+            self.render_cache = RenderCache(renderer=self.renderer, root=root)
+        else:
+            self.render_cache = None
         
-        self._last_next_camera_pose: Optional[torch.Tensor] = None
-        self._last_new_point_maps_render: Optional[torch.Tensor] = None
-        
-        self.log_freq = 20
+        self.log_freq = 5
 
     # def configure_model(self):
     #     """
@@ -200,44 +209,115 @@ class NBVTrainer(LightningModule):
 
         gt_mesh_data = targets.get("gt_mesh_data", {})
         mesh_paths, normalize_methods = parse_mesh_metadata(meta)
-        cache_paths = self.render_cache.build_paths(
-            mesh_paths=mesh_paths,
-            normalize_methods=normalize_methods,
-            camera_poses_batch=camera_poses_batch,
-        )
-        cache_payload = None
-        if cache_paths:
-            cache_payload = self.render_cache.load_batch(
-                cache_paths=cache_paths,
-                device=camera_poses_batch.device,
-                dtype=self.dtype,
-                base_gt_mesh_data=gt_mesh_data,
+        cache_paths = None
+        if self.render_cache is not None:
+            cache_paths = self.render_cache.build_paths(
+                mesh_paths=mesh_paths,
+                normalize_methods=normalize_methods,
+                camera_poses_batch=camera_poses_batch,
             )
 
-        if cache_payload is not None:
-            mesh_batch, initial_images, gt_mesh_data = cache_payload
-        else:
-            mesh_batch = mesh_data.get("normalized")
+        mesh_batch = mesh_data.get("normalized")
+        if isinstance(mesh_batch, list):
+            mesh_batch = None
+
+        if mesh_batch is None:
             mesh_batch = load_meshes_as_batch(
                 mesh_paths=mesh_paths,
                 normalize_methods=normalize_methods,
                 device=camera_poses_batch.device,
                 num_workers=self.mesh_load_workers,
             )
-            initial_images, gt_mesh_data = self._render_inputs(
-                initial_images=initial_images,
-                camera_poses_batch=camera_poses_batch,
-                gt_mesh_data=gt_mesh_data,
-                mesh_batch=mesh_batch,
+
+        batch_size = camera_poses_batch.shape[0]
+        required_keys = ("gt_point_maps", "gt_valid_masks", "depth_z", "depth_z_viz")
+
+        def _as_list(value: Any) -> List[Any]:
+            if value is None:
+                return [None] * batch_size
+            if isinstance(value, list):
+                return list(value)
+            if isinstance(value, torch.Tensor) and value.shape[0] == batch_size:
+                return list(value.unbind(0))
+            return [value] * batch_size
+
+        cache_ready = [True] * batch_size
+        if initial_images is None:
+            cache_ready = [False] * batch_size
+        elif isinstance(initial_images, list):
+            for idx, item in enumerate(initial_images):
+                if item is None:
+                    cache_ready[idx] = False
+
+        for key in required_keys:
+            value = gt_mesh_data.get(key)
+            if value is None:
+                cache_ready = [False] * batch_size
+                break
+            if isinstance(value, list):
+                for idx, item in enumerate(value):
+                    if item is None:
+                        cache_ready[idx] = False
+            elif isinstance(value, torch.Tensor):
+                if value.shape[0] != batch_size:
+                    cache_ready = [False] * batch_size
+                    break
+
+        missing_indices = [idx for idx, ready in enumerate(cache_ready) if not ready]
+        rendered = False
+        if missing_indices:
+            idx_tensor = torch.as_tensor(
+                missing_indices, device=camera_poses_batch.device, dtype=torch.long
             )
-            if cache_paths:
-                self.render_cache.save_batch(
-                    cache_paths=cache_paths,
-                    mesh_batch=mesh_batch,
-                    initial_images=initial_images,
-                    gt_mesh_data=gt_mesh_data,
-                    is_global_zero=getattr(self.trainer, "is_global_zero", True),
-                )
+            subset_mesh_batch = mesh_batch[missing_indices]
+            subset_camera_poses = camera_poses_batch.index_select(0, idx_tensor)
+
+            subset_gt_mesh_data: Dict[str, Any] = {}
+            for key, value in gt_mesh_data.items():
+                if key in required_keys:
+                    continue
+                if isinstance(value, torch.Tensor) and value.shape[0] == batch_size:
+                    subset_gt_mesh_data[key] = value.index_select(0, idx_tensor)
+                elif isinstance(value, list):
+                    subset_gt_mesh_data[key] = [value[i] for i in missing_indices]
+                else:
+                    subset_gt_mesh_data[key] = value
+
+            subset_initial_images, subset_gt_mesh_data = self._render_inputs(
+                initial_images=None,
+                camera_poses_batch=subset_camera_poses,
+                gt_mesh_data=subset_gt_mesh_data,
+                mesh_batch=subset_mesh_batch,
+            )
+            rendered = True
+
+            initial_images_list = _as_list(initial_images)
+            for offset, idx in enumerate(missing_indices):
+                initial_images_list[idx] = subset_initial_images[offset]
+            initial_images = torch.stack(initial_images_list, dim=0)
+
+            for key in required_keys:
+                existing_list = _as_list(gt_mesh_data.get(key))
+                subset_value = subset_gt_mesh_data.get(key)
+                for offset, idx in enumerate(missing_indices):
+                    existing_list[idx] = subset_value[offset]
+                gt_mesh_data[key] = torch.stack(existing_list, dim=0)
+        else:
+            if isinstance(initial_images, list):
+                initial_images = torch.stack(initial_images, dim=0)
+            for key in required_keys:
+                value = gt_mesh_data.get(key)
+                if isinstance(value, list):
+                    gt_mesh_data[key] = torch.stack(value, dim=0)
+
+        if rendered and cache_paths and self.render_cache is not None:
+            self.render_cache.save_batch(
+                cache_paths=cache_paths,
+                mesh_batch=mesh_batch,
+                initial_images=initial_images,
+                gt_mesh_data=gt_mesh_data,
+                is_global_zero=getattr(self.trainer, "is_global_zero", True),
+            )
         depth_z_batch = gt_mesh_data.get("depth_z")
 
         initial_images, camera_poses_batch, depth_z_batch, selection, active_view_count = self._select_initial_views(
@@ -252,7 +332,7 @@ class NBVTrainer(LightningModule):
         return PreparedBatch(
             initial_images=initial_images,
             camera_poses=camera_poses_batch,
-            depth_z=depth_z_batch,
+            depth_z=None,
             gt_mesh_data=gt_mesh_data,
             trimmed_gt_mesh_data=trimmed_gt_mesh_data,
             mesh_batch=mesh_batch,
@@ -295,16 +375,44 @@ class NBVTrainer(LightningModule):
         if not self.trainer.training:
             return
         try:
-            predicted_relative_position.retain_grad()
-            next_camera_pose.retain_grad()
-            self._last_predicted_relative_position = predicted_relative_position
-            self._last_next_camera_pose = next_camera_pose
+            if predicted_relative_position.requires_grad:
+                def _capture_pred_rel_grad(grad: torch.Tensor) -> torch.Tensor:
+                    if grad is not None:
+                        self._last_predicted_relative_position_grad_norm = (
+                            grad.norm(dim=-1).mean().detach()
+                        )
+                    return grad
+                predicted_relative_position.register_hook(_capture_pred_rel_grad)
+
+            if next_camera_pose.requires_grad:
+                def _capture_next_pose_grad(grad: torch.Tensor) -> torch.Tensor:
+                    if grad is not None and grad.numel() > 0:
+                        grad = grad.detach()
+                        self._last_next_pose_position_grad_norm = (
+                            grad[:, :3].norm(dim=-1).mean()
+                        )
+                        self._last_next_pose_quaternion_grad_norm = (
+                            grad[:, 3:].norm(dim=-1).mean()
+                        )
+                    return grad
+                next_camera_pose.register_hook(_capture_next_pose_grad)
         except RuntimeError:
-            self._last_predicted_relative_position = None
-            self._last_next_camera_pose = None
+            self._last_predicted_relative_position_grad_norm = None
+            self._last_next_pose_position_grad_norm = None
+            self._last_next_pose_quaternion_grad_norm = None
 
     def _set_last_new_point_maps_render(self, value: Optional[torch.Tensor]) -> None:
-        self._last_new_point_maps_render = value
+        self._last_new_point_maps_grad_norm = None
+        if value is None or not value.requires_grad:
+            return
+        try:
+            def _capture_new_point_maps_grad(grad: torch.Tensor) -> torch.Tensor:
+                if grad is not None and grad.numel() > 0:
+                    self._last_new_point_maps_grad_norm = grad.norm(dim=-1).mean().detach()
+                return grad
+            value.register_hook(_capture_new_point_maps_grad)
+        except RuntimeError:
+            self._last_new_point_maps_grad_norm = None
 
     def _build_loss_dict(
         self,
@@ -407,6 +515,11 @@ class NBVTrainer(LightningModule):
         self._last_initial_view_indices = selection.detach().cpu()
         return initial_images, camera_poses, depth_z, selection, num_views
 
+    def _get_log_batch_size(self) -> Optional[int]:
+        if self._last_batch_size is None:
+            return None
+        return int(self._last_batch_size)
+
     def _process_batch(
         self,
         batch: Dict,
@@ -424,6 +537,7 @@ class NBVTrainer(LightningModule):
             initial_images: 初始视图
         """
         prepared = self._prepare_batch(batch)
+        self._last_batch_size = int(prepared.camera_poses.shape[0])
         policy_inference = self._infer_next_pose(
             initial_images=prepared.initial_images,
             camera_poses_batch=prepared.camera_poses,
@@ -451,30 +565,29 @@ class NBVTrainer(LightningModule):
         
         loss_dict = None
         
-        if True: #self.trainer.global_step % self.log_freq == 0:
-            random_baseline = self._maybe_compute_random_baseline(
+        random_baseline = self._maybe_compute_random_baseline(
             initial_images=prepared.initial_images,
             camera_poses_batch=prepared.camera_poses,
             gt_mesh_data=prepared.trimmed_gt_mesh_data,
             mesh_batch=prepared.mesh_batch,
             mesh_paths=prepared.mesh_paths,
-            )
-            
-            loss_dict = self._build_loss_dict(
-                policy_eval.loss_components,
-                random_baseline,
-                prepared.active_view_count,
-            )
+        )
+        
+        loss_dict = self._build_loss_dict(
+            policy_eval.loss_components,
+            random_baseline,
+            prepared.active_view_count,
+        )
 
-            log_step_outputs(
-                self,
-                prepared=prepared,
-                policy_inference=policy_inference,
-                policy_eval=policy_eval,
-                random_baseline=random_baseline,
-                loss_dict=loss_dict,
-                step_output_dir=step_output_dir,
-            )
+        log_step_outputs(
+            self,
+            prepared=prepared,
+            policy_inference=policy_inference,
+            policy_eval=policy_eval,
+            random_baseline=random_baseline,
+            loss_dict=loss_dict,
+            step_output_dir=step_output_dir,
+        )
 
         return total_loss, loss_dict, new_images, prepared.initial_images
 
@@ -504,6 +617,10 @@ class NBVTrainer(LightningModule):
     def validation_step(self, batch: Dict, batch_idx: int):
         loss, _, _, _ = self._process_batch(batch)
         return loss
+
+    def on_validation_epoch_start(self) -> None:
+        # Allow one validation image save per validation epoch.
+        self._val_images_saved = False
 
     def on_before_optimizer_step(self, optimizer) -> None:
         """
@@ -546,6 +663,7 @@ class NBVTrainer(LightningModule):
             on_epoch=False,
             prog_bar=True,
             logger=True,
+            batch_size=self._get_log_batch_size(),
         )
         self.log(
             "gradients/grad_rms",
@@ -554,6 +672,7 @@ class NBVTrainer(LightningModule):
             on_epoch=False,
             prog_bar=False,
             logger=True,
+            batch_size=self._get_log_batch_size(),
         )
         if clip_val is not None and float(clip_val) > 0:
             self.log(
@@ -563,21 +682,20 @@ class NBVTrainer(LightningModule):
                 on_epoch=False,
                 prog_bar=False,
                 logger=True,
+                batch_size=self._get_log_batch_size(),
             )
 
     def on_after_backward(self) -> None:
         """Log gradients w.r.t. pose tensors to pinpoint spike sources."""
         if not self.trainer.training:
-            self._last_predicted_relative_position = None
-            self._last_next_camera_pose = None
+            self._last_predicted_relative_position_grad_norm = None
+            self._last_next_pose_position_grad_norm = None
+            self._last_next_pose_quaternion_grad_norm = None
+            self._last_new_point_maps_grad_norm = None
             return
 
-        # relative_position = self._last_predicted_relative_position
-        next_camera_pose = self._last_next_camera_pose
-        new_point_maps_render = self._last_new_point_maps_render
-
-        # if relative_position is not None and relative_position.grad is not None:
-        #     rel_grad_norm = relative_position.grad.norm(dim=-1).mean()
+        # rel_grad_norm = self._last_predicted_relative_position_grad_norm
+        # if rel_grad_norm is not None:
         #     self.log(
         #         "gradients/relative_position_grad_norm",
         #         rel_grad_norm,
@@ -587,41 +705,42 @@ class NBVTrainer(LightningModule):
         #         logger=True,
         #     )
 
-        if new_point_maps_render is not None and new_point_maps_render.grad is not None:
-            points_grad = new_point_maps_render.grad
-            points_grad_norm = points_grad.norm(dim=-1).mean()
+        if self._last_new_point_maps_grad_norm is not None:
             self.log(
                 "gradients/new_point_maps_render_grad_norm",
-                points_grad_norm,
+                self._last_new_point_maps_grad_norm,
                 on_step=True,
                 on_epoch=False,
                 prog_bar=False,
                 logger=True,
+                batch_size=self._get_log_batch_size(),
             )
 
-        if next_camera_pose is not None and next_camera_pose.grad is not None:
-            pose_grad = next_camera_pose.grad
-            pos_grad_norm = pose_grad[:, :3].norm(dim=-1).mean()
-            quat_grad_norm = pose_grad[:, 3:].norm(dim=-1).mean()
+        if self._last_next_pose_position_grad_norm is not None:
             self.log(
                 "gradients/next_pose_position_grad_norm",
-                pos_grad_norm,
+                self._last_next_pose_position_grad_norm,
                 on_step=True,
                 on_epoch=False,
                 prog_bar=False,
                 logger=True,
+                batch_size=self._get_log_batch_size(),
             )
+        if self._last_next_pose_quaternion_grad_norm is not None:
             self.log(
                 "gradients/next_pose_quaternion_grad_norm",
-                quat_grad_norm,
+                self._last_next_pose_quaternion_grad_norm,
                 on_step=True,
                 on_epoch=False,
                 prog_bar=False,
                 logger=True,
+                batch_size=self._get_log_batch_size(),
             )
 
-        self._last_predicted_relative_position = None
-        self._last_next_camera_pose = None
+        self._last_predicted_relative_position_grad_norm = None
+        self._last_next_pose_position_grad_norm = None
+        self._last_next_pose_quaternion_grad_norm = None
+        self._last_new_point_maps_grad_norm = None
 
     def transfer_batch_to_device(self, batch: Dict[str, Any], device: torch.device, dataloader_idx: int):
         

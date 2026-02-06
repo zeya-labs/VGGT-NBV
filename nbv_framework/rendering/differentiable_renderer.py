@@ -34,11 +34,11 @@ class DifferentiableRenderer(nn.Module):
         # --- 1. 渲染设置 ---
         self.raster_settings = RasterizationSettings(
             image_size=image_size,
-            blur_radius=1e-5, 
-            faces_per_pixel=4, 
-            perspective_correct=False,
+            blur_radius=0, 
+            faces_per_pixel=2,  # 调大显存会显著增长
+            # perspective_correct=False,
             clip_barycentric_coords=True,
-            # cull_backfaces=True  
+            # cull_backfaces=True
         )
         
         # --- 2. 材质与混合参数 ---

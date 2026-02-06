@@ -30,8 +30,8 @@ def load_mesh_as_pytorch3d(mesh_path: str) -> Meshes:
             load_textures=True
         )
 
-        # 优化：立即将顶点转换为float32
-        verts_f32 = mesh.verts_packed().to(torch.float32)
+        verts_list = [v.to(dtype=torch.float32, device=cpu_device) for v in mesh.verts_list()]
+        faces_list = mesh.faces_list()
 
         # 如果纹理加载失败，创建默认的白色纹理
         if mesh.textures is None:
@@ -39,26 +39,25 @@ def load_mesh_as_pytorch3d(mesh_path: str) -> Meshes:
 
         # 重新创建mesh对象，确保顶点是float32
         mesh = Meshes(
-            verts=[verts_f32.to(cpu_device)],
-            faces=mesh.faces_list(),
+            verts=verts_list,
+            faces=faces_list,
             textures=mesh.textures
         )
 
     elif mesh_path.endswith('.ply'):
+        # 1. 一次性加载并转换类型（load_ply 通常返回的是 float32 或 double）
         verts, faces = load_ply(mesh_path)
+        verts = verts.to(dtype=torch.float32) # 只转类型，设备默认就是 CPU
+        
+        # 2. 构造纹理：直接在创建时处理维度
+        # 使用 unsqueeze(0) 比 [None] 语义更清晰
+        # 确保颜色也是 float32
+        textures = TexturesVertex(verts_features=torch.ones_like(verts).unsqueeze(0))
 
-        # 为 .ply 文件创建一个默认的纯白顶点颜色纹理
-        # 这是为了满足 SoftPhongShader 的要求
-        # 优化：确保顶点是float32类型
-        verts = verts.to(cpu_device, dtype=torch.float32)
-        faces = faces.to(cpu_device)
-        verts_rgb = torch.ones_like(verts, dtype=torch.float32)[None]  # (1, V, 3)
-        textures = TexturesVertex(verts_features=verts_rgb.to(cpu_device))
-
-        # 创建 Meshes 对象，这次包含了纹理信息
+        # 3. 直接组装，不要再写 .to(cpu_device)
         mesh = Meshes(
-            verts=[verts.to(cpu_device)],
-            faces=[faces.to(cpu_device)],
+            verts=[verts], 
+            faces=[faces.to(torch.int64)], # 确保 faces 是 long 类型
             textures=textures
         )
     else:

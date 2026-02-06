@@ -10,6 +10,9 @@ max_meshes: 800
 learning_rate: 1e-5
 max_epochs: 500
 seed: 42
+view_sampling_mode: "fully_random"
+normalize_method: "unit_sphere"
+render_cache_enabled: false
 
 output_dir: ${hydra:runtime.cwd}/runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
 
@@ -38,7 +41,7 @@ trainer:
   devices: auto
   enable_checkpointing: false
   strategy: auto
-  precision: 32
+  precision: bf16
   sync_batchnorm: true
   benchmark: true
   max_epochs: ${max_epochs}
@@ -46,4 +49,4 @@ trainer:
   num_sanity_val_steps: 2
   gradient_clip_val: 1.0
   limit_val_batches: 1.0
-  log_every_n_steps: 1
+  log_every_n_steps: 5

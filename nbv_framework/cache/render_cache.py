@@ -16,28 +16,55 @@ class RenderCache:
     def __init__(
         self,
         *,
-        renderer: Any,
+        renderer: Optional[Any] = None,
         root: Optional[Path] = None,
         version: int = 1,
+        render_signature: Optional[str] = None,
     ) -> None:
         self.renderer = renderer
         self.version = int(version)
         self.root = root or self._default_root()
+        self._render_signature_override = render_signature
+
+    @staticmethod
+    def build_signature(
+        *,
+        version: int,
+        image_size: Optional[int],
+        fov: Optional[float],
+        faces_per_pixel: Optional[int],
+        blur_radius: Optional[float],
+        perspective_correct: Optional[bool],
+        cull_backfaces: Optional[bool],
+    ) -> str:
+        return (
+            f"v{int(version)}|"
+            f"img{image_size}|"
+            f"fov{fov}|"
+            f"fpp{faces_per_pixel}|"
+            f"blur{blur_radius}|"
+            f"pc{perspective_correct}|"
+            f"cull{cull_backfaces}"
+        )
 
     def _default_root(self) -> Path:
         repo_root = Path(__file__).resolve().parents[2]
         return repo_root / "models" / ".cache"
 
     def _render_signature(self) -> str:
+        if self._render_signature_override is not None:
+            return self._render_signature_override
+        if self.renderer is None:
+            raise ValueError("RenderCache requires a renderer or an explicit render_signature.")
         raster_settings = self.renderer.rasterizer.raster_settings
-        return (
-            f"v{self.version}|"
-            f"img{getattr(self.renderer, 'image_size', None)}|"
-            f"fov{getattr(self.renderer, 'default_fov', None)}|"
-            f"fpp{raster_settings.faces_per_pixel}|"
-            f"blur{raster_settings.blur_radius}|"
-            f"pc{raster_settings.perspective_correct}|"
-            f"cull{raster_settings.cull_backfaces}"
+        return self.build_signature(
+            version=self.version,
+            image_size=getattr(self.renderer, "image_size", None),
+            fov=getattr(self.renderer, "default_fov", None),
+            faces_per_pixel=raster_settings.faces_per_pixel,
+            blur_radius=raster_settings.blur_radius,
+            perspective_correct=raster_settings.perspective_correct,
+            cull_backfaces=raster_settings.cull_backfaces,
         )
 
     def _cache_key(
@@ -153,6 +180,33 @@ class RenderCache:
         ).to(device)
 
         return mesh_batch, initial_images, gt_mesh_data
+
+    def load_item(
+        self,
+        *,
+        cache_path: Path,
+        base_gt_mesh_data: Dict[str, torch.Tensor],
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ) -> Optional[Tuple[Meshes, torch.Tensor, Dict[str, torch.Tensor]]]:
+        item = self._load_item(cache_path)
+        if item is None:
+            return None
+
+        target_device = device if device is not None else torch.device("cpu")
+        mesh = item["mesh"].to(target_device)
+        initial_images = item["initial_images"].to(target_device)
+        if dtype is not None and initial_images.is_floating_point() and initial_images.dtype != dtype:
+            initial_images = initial_images.to(dtype=dtype)
+
+        cached_gt = item["gt_mesh_data"]
+        gt_mesh_data = dict(base_gt_mesh_data)
+        gt_mesh_data["gt_point_maps"] = cached_gt["gt_point_maps"].to(target_device)
+        gt_mesh_data["gt_valid_masks"] = cached_gt["gt_valid_masks"].to(target_device, dtype=torch.bool)
+        gt_mesh_data["depth_z"] = cached_gt["depth_z"].to(target_device)
+        gt_mesh_data["depth_z_viz"] = cached_gt["depth_z_viz"].to(target_device)
+
+        return mesh, initial_images, gt_mesh_data
 
     def save_batch(
         self,

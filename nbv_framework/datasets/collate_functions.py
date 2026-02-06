@@ -11,15 +11,37 @@ from torch.utils.data.dataloader import default_collate
 
 def _collate_meshes(mesh_dicts: List[Dict[str, Any]]) -> Dict[str, Any]:
     """专门处理 mesh 相关字段，避免污染其余字典结构。"""
-    original_meshes = [m for m in (d.get("original") for d in mesh_dicts) if m is not None]
-    normalized_meshes = [m for m in (d.get("normalized") for d in mesh_dicts) if m is not None]
-
     batched: Dict[str, Any] = {}
-    if original_meshes:
-        batched["original"] = join_meshes_as_batch(original_meshes)
-    if normalized_meshes:
-        batched["normalized"] = join_meshes_as_batch(normalized_meshes)
+    for key in ("original", "normalized"):
+        values = [d.get(key) for d in mesh_dicts]
+        if all(v is None for v in values):
+            continue
+        if any(v is None for v in values):
+            batched[key] = values
+        else:
+            batched[key] = join_meshes_as_batch(values)
     return batched
+
+
+def _collate_optional(values: List[Any]) -> Any:
+    if all(v is None for v in values):
+        return None
+    if any(v is None for v in values):
+        return list(values)
+    first = values[0]
+    if isinstance(first, dict):
+        keys = set()
+        for item in values:
+            if isinstance(item, dict):
+                keys.update(item.keys())
+        result: Dict[str, Any] = {}
+        for key in keys:
+            sub_values = [item.get(key) if isinstance(item, dict) else None for item in values]
+            collated = _collate_optional(sub_values)
+            if collated is not None:
+                result[key] = collated
+        return result
+    return default_collate(values)
 
 
 def custom_nbv_collate_fn(batch: List[Dict]) -> Dict:
@@ -29,10 +51,10 @@ def custom_nbv_collate_fn(batch: List[Dict]) -> Dict:
 
     final_batch: Dict[str, Any] = {}
 
-    # 直接按 namespace 递归 collate
+    # 直接按 namespace 递归 collate（支持缺失/None）
     for namespace in ("inputs", "targets"):
         if namespace in batch[0]:
-            final_batch[namespace] = default_collate([sample.get(namespace, {}) for sample in batch])
+            final_batch[namespace] = _collate_optional([sample.get(namespace, {}) for sample in batch])
 
     if "meta" in batch[0]:
         final_batch["meta"] = [sample.get("meta", {}) for sample in batch]

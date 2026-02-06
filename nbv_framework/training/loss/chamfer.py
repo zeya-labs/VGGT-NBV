@@ -5,6 +5,7 @@ from typing import List, Optional, Tuple, Union, Literal
 import torch
 import torch.nn as nn
 import torch.nn.utils.rnn as rnn_utils
+from geomloss import SamplesLoss
 
 from mapanything.utils.geometry import apply_log_to_norm
 import trimesh
@@ -14,7 +15,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 dcd_dir = os.path.join(current_dir, "Density_aware_Chamfer_Distance")
 if dcd_dir not in sys.path:
     sys.path.append(dcd_dir)
-from utils_v2.model_utils import calc_dcd, calc_cd, calc_emd
+# from utils_v2.model_utils import calc_dcd, calc_cd, calc_emd
 
 MetricType = Literal["cd", "emd", "dcd"]
 CDVariant = Literal["cd_p", "cd_t"]
@@ -27,7 +28,7 @@ class ChamferDistance(nn.Module):
         save_point_clouds: bool = False,
         point_cloud_dir_name: str = "point_clouds",
         use_log_warp: bool = False, # 是否开启对对数压缩
-        distance_type: MetricType = "emd",
+        distance_type: MetricType = "geomloss",
         cd_variant: CDVariant = "cd_t",
         dcd_alpha: float = 40.0,
         dcd_n_lambda: float = 0.5,
@@ -101,19 +102,39 @@ class ChamferDistance(nn.Module):
     ) -> torch.Tensor:
         pred_batched = pred_batched.contiguous().float()
         gt_batched = gt_batched.contiguous().float()
-        if self.distance_type == "cd":
-            cd_p, cd_t = calc_cd(pred_batched, gt_batched)
-            return cd_p if self.cd_variant == "cd_p" else cd_t
-        if self.distance_type == "emd":
-            return calc_emd(pred_batched, gt_batched, eps=self.emd_eps, iterations=self.emd_iterations)
-        if self.distance_type == "dcd":
-            return calc_dcd(
-                pred_batched,
-                gt_batched,
-                alpha=self.dcd_alpha,
-                n_lambda=self.dcd_n_lambda,
-                non_reg=self.dcd_non_reg,
-            )[0]
+
+        # if self.distance_type == "cd":
+        #     cd_p, cd_t = calc_cd(pred_batched, gt_batched)
+        #     return cd_p if self.cd_variant == "cd_p" else cd_t
+
+        # if self.distance_type == "emd":
+        #     # 这里的 calc_emd 是你之前那个基于 Auction 的 CUDA 实现
+        #     return calc_emd(pred_batched, gt_batched, eps=self.emd_eps, iterations=self.emd_iterations)
+
+        if self.distance_type == "geomloss":
+            """
+            GeomLoss 实现 (Sinkhorn 算法)
+            """
+            criterion = SamplesLoss(
+                loss="sinkhorn",
+                p=1,              # 通常 EMD 对应 p=1
+                blur=0.05,     # 模糊系数
+            )
+            
+            # GeomLoss 返回的是每个 batch 的总 loss，shape 为 [B]
+            loss = criterion(pred_batched, gt_batched)
+            
+            return loss
+
+        # if self.distance_type == "dcd":
+        #     return calc_dcd(
+        #         pred_batched,
+        #         gt_batched,
+        #         alpha=self.dcd_alpha,
+        #         n_lambda=self.dcd_n_lambda,
+        #         non_reg=self.dcd_non_reg,
+        #     )[0]
+
         raise ValueError(f"Unknown distance_type: {self.distance_type}")
 
     def _compute_distance(

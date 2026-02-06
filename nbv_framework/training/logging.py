@@ -22,14 +22,6 @@ def _stage_prefix(trainer) -> str:
     return "train" if trainer.trainer.training else "val"
 
 
-def _log_on_step(trainer) -> bool:
-    return trainer.trainer.training
-
-
-def _log_on_epoch(trainer) -> bool:
-    return not trainer.trainer.training
-
-
 def _prefix_key(prefix: str, key: str) -> str:
     if key.startswith(f"{prefix}/"):
         return key
@@ -44,13 +36,13 @@ def _log_scalar(
     prefix: str,
     prog_bar: bool = False,
 ) -> None:
+    batch_size = getattr(trainer, "_last_batch_size", None)
     trainer.log(
         _prefix_key(prefix, key),
         value,
-        on_step=_log_on_step(trainer),
-        on_epoch=_log_on_epoch(trainer),
         prog_bar=prog_bar,
         sync_dist=trainer.world_size > 1,
+        batch_size=batch_size,
     )
 
 
@@ -63,18 +55,23 @@ def _log_metrics_dict(
 ) -> None:
     if not metrics:
         return
+    batch_size = getattr(trainer, "_last_batch_size", None)
     prefixed = {_prefix_key(prefix, key): value for key, value in metrics.items()}
     trainer.log_dict(
         prefixed,
-        on_step=_log_on_step(trainer),
-        on_epoch=_log_on_epoch(trainer),
         prog_bar=prog_bar,
         sync_dist=trainer.world_size > 1,
+        batch_size=batch_size,
     )
 
 
 def resolve_step_output_dir(trainer) -> str:
+    if (trainer.global_step + 1) % trainer.trainer.log_every_n_steps != 0 and trainer.trainer.training:
+        return None
     if not trainer.trainer.training:
+        if getattr(trainer, "_val_images_saved", False):
+            return None
+        trainer._val_images_saved = True
         return os.path.join(
         trainer.log_dir,
         "images_val",
@@ -373,6 +370,7 @@ def log_view_diagnostics(
                 on_epoch=_log_on_epoch(trainer),
                 prog_bar=False,
                 sync_dist=trainer.world_size > 1,
+                batch_size=getattr(trainer, "_last_batch_size", None),
             )
 
 
