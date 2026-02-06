@@ -11,11 +11,10 @@ import os
 import torch
 # torch.autograd.set_detect_anomaly(True) # 当检查每一步计算的梯度是否出现异常（NaN 或 Inf）
 
-os.environ["PYTORCH_SHARED_ALLOCATION_STRATEGY"] = "file_system"
-os.environ["TMPDIR"] = "/mnt/sdb/chenmohan/tmp"
-os.makedirs(os.environ["TMPDIR"], exist_ok=True)
 import torch.multiprocessing as mp
 mp.set_sharing_strategy('file_system')
+# os.environ["TMPDIR"] = "/mnt/sdb/chenmohan/tmp" # 可以缓解共享内存不足
+# os.makedirs(os.environ["TMPDIR"], exist_ok=True)
 
 from lightning.pytorch import seed_everything
 from lightning.pytorch.profilers import PyTorchProfiler
