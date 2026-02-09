@@ -6,7 +6,7 @@ defaults:
 
 experiment_name: dataset-house3k
 batch_size: 16
-max_meshes: 800
+max_meshes: 3000
 learning_rate: 1e-5
 max_epochs: 500
 seed: 42
@@ -39,7 +39,7 @@ hydra:
 trainer:
   accelerator: auto
   devices: auto
-  enable_checkpointing: false
+  # enable_checkpointing: false
   strategy: auto
   precision: bf16
   sync_batchnorm: true

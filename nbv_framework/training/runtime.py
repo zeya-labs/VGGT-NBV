@@ -52,14 +52,14 @@ def build_trainer(cfg: NBVExperimentConfig, profiler: Profiler = None) -> Traine
     trainer_conf['strategy'] = DDPStrategy(find_unused_parameters=True)
     callbacks = [
         # TODO: 在开启val之后开启模型保存回调
-        # ModelCheckpoint(
-        #     dirpath=cfg.save_dir,
-        #     filename="nbv-{epoch:04d}-{val/total_loss:.4f}",
-        #     save_top_k=1,
-        #     monitor="val/total_loss",
-        #     mode="min",
-        #     save_last=True,
-        # ),
+        ModelCheckpoint(
+            dirpath=cfg.save_dir,
+            filename="nbv-{epoch:04d}-{val/total_loss:.4f}",
+            save_top_k=1,
+            monitor="val/total_loss",
+            mode="min",
+            save_last=True,
+        ),
         LearningRateMonitor(logging_interval="epoch"),
     ]
     logger = None

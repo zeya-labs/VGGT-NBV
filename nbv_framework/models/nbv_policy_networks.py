@@ -19,6 +19,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import List, Dict, Tuple, Optional, Union
 import math
+import numpy as np
 
 
 class BaseNBVPolicy(nn.Module):
@@ -306,13 +307,32 @@ class SinusoidalPositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
+# 1. 引入 Fourier Feature Encoding (NeRF 风格)
+class FourierEmbedding(nn.Module):
+    def __init__(self, input_dim, mapping_size=64, scale=10):
+        super().__init__()
+        self.input_dim = input_dim
+        self.mapping_size = mapping_size
+        self.scale = scale
+        # 随机高斯矩阵 B (不可学习)
+        self.register_buffer('B', torch.randn(input_dim, mapping_size) * scale)
+
+    def forward(self, x):
+        # x: [Batch, ..., input_dim]
+        # projection: [Batch, ..., mapping_size]
+        if self.scale == 0:
+            return x
+            
+        x_proj = (2. * np.pi * x) @ self.B
+        return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
+
 class AttentionNBVPolicy(BaseNBVPolicy):
     def __init__(self, 
                  scene_feature_dim: int = 768,
                  hidden_dim: int = 768,
                  num_heads: int = 8,
                  num_layers: int = 4,
-                 dropout: float = 0.0,  # 推荐加入 dropout
+                 dropout: float = 0.1, # 稍微增加 dropout 防止过拟合
                  output_mode: str = "cartesian",
                  token_pooling_mode: str = "mean",
                  input_extrinsic_dim=7):
@@ -321,79 +341,118 @@ class AttentionNBVPolicy(BaseNBVPolicy):
         
         self.hidden_dim = hidden_dim
         
+        # --- 改进点 1: 使用 Fourier Embedding 处理相机姿态 ---
+        # 原始 7 维 -> 映射到 mapping_size * 2 维
+        fourier_mapping_size = 64
+        self.cam_fourier_embed = FourierEmbedding(input_extrinsic_dim, mapping_size=fourier_mapping_size)
+        fourier_dim = fourier_mapping_size * 2
+        
         self.camera_embedding = nn.Sequential(
-            nn.Linear(input_extrinsic_dim, hidden_dim // 2),
+            nn.Linear(fourier_dim, hidden_dim),
             nn.GELU(),
-            nn.Linear(hidden_dim // 2, hidden_dim),
-            nn.LayerNorm(hidden_dim) 
+            nn.Linear(hidden_dim, hidden_dim),
+            # 这里不需要 LayerNorm，通常 embedding 后直接加到特征上
         )
 
         # 特征投影
-        self.feature_projection = nn.Linear(scene_feature_dim, hidden_dim)
+        self.feature_projection = nn.Sequential(
+            nn.Linear(scene_feature_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim) # 投影后加 Norm 是好习惯
+        )
         
+        # --- 改进点 2: 位置编码策略 ---
+        # 既然已经有了强力的 camera_embedding (代表空间位置)，
+        # 只有在非常依赖“轨迹顺序”时才需要这个 SinusoidalPositionalEncoding。
+        # 这里保留它作为可选项，或者将其改为 Learnable PE。
         self.pos_encoder = SinusoidalPositionalEncoding(
             d_model=hidden_dim, 
             dropout=dropout, 
             max_len=5000
         )
         
-        # Transformer编码器
+        # Transformer编码器 (Pre-Norm 很好，保持)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_dim,
             nhead=num_heads,
-            dim_feedforward=hidden_dim * 4,
+            dim_feedforward=int(hidden_dim * 4), # 显式强转 int
             dropout=dropout,
+            activation='gelu', # 明确指定 gelu
             batch_first=True,
-            norm_first=True # 推荐使用 Pre-Norm
+            norm_first=True 
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers)
         
-        # 全局特征提取
+        # 全局特征提取 (Attention Pooling)
         self.global_pool = nn.MultiheadAttention(
             embed_dim=hidden_dim,
             num_heads=num_heads,
             dropout=dropout,
             batch_first=True
         )
-        self.global_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
+        
+        # 这是一个 Learnable Query Token
+        self.global_token = nn.Parameter(torch.randn(1, 1, hidden_dim))
         
         # 输出头
         self.output_head = nn.Sequential(
             nn.LayerNorm(hidden_dim),
-            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.Linear(hidden_dim, hidden_dim), # 增加一层深度
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, self.target_dim)
+            nn.Linear(hidden_dim, self.target_dim)
         )
         
         self._initialize_weights()
+
+    def _initialize_weights(self):
+        # --- 改进点 3: 更科学的初始化 ---
+        # 对 global token 使用截断正态分布
+        nn.init.trunc_normal_(self.global_token, std=0.02)
         
-        nn.init.constant_(self.global_token, 0.0)
+        # 对 Linear 层使用 Xavier / Kaiming
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.constant_(m.bias, 0)
+                nn.init.constant_(m.weight, 1.0)
 
     def forward(self, scene_features: torch.Tensor, camera_extrinsics: torch.Tensor) -> torch.Tensor:
-        # [B, S, P, D] -> [B, S, D]
-        scene_features = self._pool_tokens_if_needed(scene_features)
-        B, S, D = scene_features.shape
+        # scene_features: [B, S, D_in]
+        # camera_extrinsics: [B, S, 7]
         
-        # 1. 投影
+        scene_features = self._pool_tokens_if_needed(scene_features)
+        B, S, _ = scene_features.shape
+        
+        # 1. 视觉特征投影
         scene_tokens = self.feature_projection(scene_features) 
         
-        cam_pos_encoding = self.camera_embedding(camera_extrinsics)
+        # 2. 相机位姿编码 (Fourier -> MLP)
+        cam_fourier = self.cam_fourier_embed(camera_extrinsics) # [B, S, FourierDim]
+        cam_emb = self.camera_embedding(cam_fourier) # [B, S, Hidden]
 
-        x = scene_tokens + cam_pos_encoding
+        # 3. 融合 (相加)
+        # 这里 cam_emb 代表了严格的几何空间位置
+        x = scene_tokens + cam_emb
 
-        # 2. 添加位置编码 (无需手动处理长度，模块内自动处理)
+        # 4. 时序/序列位置编码
+        # 只有当输入的顺序隐含了有用的时序信息(Trajectory)时才加这个
+        # 如果输入是无序集合，应该注释掉这一行
         x = self.pos_encoder(x)
 
-        # 3. Transformer 编码
+        # 5. Transformer 编码
         encoded_features = self.transformer(x)
         
-        # 4. 全局 Attention 池化
+        # 6. 全局 Attention 池化
+        # Query: global_token, Key/Value: encoded_features
         global_token = self.global_token.expand(B, -1, -1)
-        global_features, _ = self.global_pool(global_token, encoded_features, encoded_features)
-        global_features = global_features.squeeze(1)
+        # 注意: MultiheadAttention 返回 (output, weights)
+        global_features, _ = self.global_pool(query=global_token, key=encoded_features, value=encoded_features)
+        global_features = global_features.squeeze(1) # [B, Hidden]
         
-        # 5. 输出
+        # 7. 输出
         nbv_raw = self.output_head(global_features)
         
         return self._activate_nbv(nbv_raw)
