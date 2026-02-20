@@ -94,7 +94,6 @@ class ReconstructionLoss(nn.Module):
         combined_images_batch: Optional[torch.Tensor],
         combined_camera_poses: Optional[torch.Tensor],
         return_components: bool = False,
-        point_cloud_dir: Optional[str] = None,# runs/.../logs/images/step_/rank_/
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, float]]]:
 
         device = combined_images_batch.device
@@ -108,7 +107,6 @@ class ReconstructionLoss(nn.Module):
             recon_data,
             gt_data,
             combined_images_batch,
-            point_cloud_dir=point_cloud_dir,
         )
         total_loss = self._add_loss(
             total_loss,
@@ -191,6 +189,22 @@ class ReconstructionLoss(nn.Module):
         if return_components:
             return total_loss, loss_components
         return total_loss
+
+    @torch.no_grad()
+    def export_point_clouds(
+        self,
+        recon_data: Dict[str, torch.Tensor],
+        gt_data: Dict[str, torch.Tensor],
+        combined_images_batch: Optional[torch.Tensor],
+        *,
+        point_cloud_dir: Optional[str],
+    ) -> None:
+        self.chamfer_regularizer.export_point_clouds(
+            recon_data,
+            gt_data,
+            combined_images_batch,
+            point_cloud_dir=point_cloud_dir,
+        )
 
 
 __all__ = ["ReconstructionLoss"]

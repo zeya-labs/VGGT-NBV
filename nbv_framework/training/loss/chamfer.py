@@ -220,7 +220,6 @@ class ChamferDistance(nn.Module):
         self,
         pred: Union[List[torch.Tensor], torch.Tensor],
         gt: Union[List[torch.Tensor], torch.Tensor],
-        point_cloud_dir: Optional[str] = None,
     ) -> torch.Tensor:
         pred_batched, pred_lengths = self._to_batched(pred, downsample=True)
         gt_batched, gt_lengths = self._to_batched(gt, downsample=False)
@@ -235,17 +234,31 @@ class ChamferDistance(nn.Module):
 
         loss_per_batch = self._compute_distance(pred_batched, gt_batched, pred_lengths, gt_lengths)
         loss = loss_per_batch.mean()
-
-        if point_cloud_dir is not None:
-            self._save_point_clouds(
-                pred_batched.detach(),
-                pred_lengths,
-                gt_batched.detach(),
-                gt_lengths,
-                os.path.join(point_cloud_dir, self.point_cloud_dir_name),
-            )
-
         return loss
+
+    @torch.no_grad()
+    def export_point_clouds(
+        self,
+        pred: Union[List[torch.Tensor], torch.Tensor],
+        gt: Union[List[torch.Tensor], torch.Tensor],
+        point_cloud_dir: str,
+    ) -> None:
+        if not self.save_point_clouds:
+            return
+        pred_batched, pred_lengths = self._to_batched(pred, downsample=True)
+        gt_batched, gt_lengths = self._to_batched(gt, downsample=False)
+        if pred_batched.shape[0] != gt_batched.shape[0]:
+            raise ValueError(
+                "Batch size mismatch when exporting point clouds: "
+                f"pred={pred_batched.shape[0]} vs gt={gt_batched.shape[0]}"
+            )
+        self._save_point_clouds(
+            pred_batched.detach(),
+            pred_lengths,
+            gt_batched.detach(),
+            gt_lengths,
+            os.path.join(point_cloud_dir, self.point_cloud_dir_name),
+        )
 
     def _save_point_clouds(
         self,

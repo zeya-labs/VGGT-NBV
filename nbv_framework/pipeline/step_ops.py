@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Callable, Dict, Optional, Sequence, Tuple
 
+from loguru import logger
 import torch
 from pytorch3d.structures import Meshes
 
@@ -179,8 +180,17 @@ def evaluate_candidate_pose(
         combined_images_batch,
         combined_camera_poses,
         return_components=True,
-        point_cloud_dir=point_cloud_dir,
     )
+    if point_cloud_dir is not None and hasattr(loss_fn, "export_point_clouds"):
+        try:
+            loss_fn.export_point_clouds(
+                recon_data,
+                updated_gt_mesh_data,
+                combined_images_batch,
+                point_cloud_dir=point_cloud_dir,
+            )
+        except Exception as exc:  # pragma: no cover - debug export should not break training
+            logger.warning("Failed to export debug point clouds to {}: {}", point_cloud_dir, exc)
 
     return PoseEvaluationResult(
         total_loss=total_loss,

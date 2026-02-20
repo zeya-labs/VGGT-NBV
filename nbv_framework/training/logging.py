@@ -71,7 +71,9 @@ def _log_metrics_dict(
     )
 
 
-def resolve_step_output_dir(trainer) -> str:
+def resolve_step_output_dir(trainer) -> Optional[str]:
+    if not trainer.trainer.is_global_zero:
+        return None
     if (trainer.global_step + 1) % trainer.trainer.log_every_n_steps != 0 and trainer.trainer.training:
         return None
     if not trainer.trainer.training:

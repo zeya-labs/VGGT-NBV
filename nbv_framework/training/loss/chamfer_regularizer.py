@@ -38,7 +38,6 @@ class ChamferRegularizer:
         recon_data: Dict[str, torch.Tensor],
         gt_data: Dict[str, torch.Tensor],
         combined_images_batch: Optional[torch.Tensor],
-        point_cloud_dir: Optional[str] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         pred_points_list, confidence_mask = self.extractor(
             recon_data=recon_data,
@@ -53,8 +52,38 @@ class ChamferRegularizer:
         chamfer_loss_value = self.chamfer(
             pred_points_list,
             gt_points_tensor,
-            point_cloud_dir=point_cloud_dir,
         )
 
         weighted_loss = self.weight * chamfer_loss_value
         return weighted_loss, chamfer_loss_value, confidence_mask
+
+    @torch.no_grad()
+    def export_point_clouds(
+        self,
+        recon_data: Dict[str, torch.Tensor],
+        gt_data: Dict[str, torch.Tensor],
+        combined_images_batch: Optional[torch.Tensor],
+        point_cloud_dir: Optional[str],
+    ) -> None:
+        if not point_cloud_dir:
+            return
+        if not self.chamfer.save_point_clouds:
+            return
+        if "gt_valid_masks" not in gt_data:
+            return
+        gt_points_tensor = gt_data.get("gt_points")
+        if gt_points_tensor is None:
+            return
+
+        pred_points_list, _ = self.extractor(
+            recon_data=recon_data,
+            combined_images_batch=combined_images_batch,
+            confidence_threshold=self.confidence_threshold,
+            source=self.point_source,
+            gt_valid_masks=gt_data["gt_valid_masks"],
+        )
+        self.chamfer.export_point_clouds(
+            pred_points_list,
+            gt_points_tensor,
+            point_cloud_dir=point_cloud_dir,
+        )
