@@ -28,6 +28,9 @@ class NBVExperimentConfig:
     # High-level job controls
     mode: str = "train"
     resume_checkpoint: Optional[str] = None
+    # PyTorch 2.6 changed torch.load default to weights_only=True, which can
+    # break loading older Lightning checkpoints that store OmegaConf objects.
+    checkpoint_weights_only: bool = False
     auto_resume: bool = True
     seed: int = 42
 
@@ -48,7 +51,6 @@ class NBVExperimentConfig:
     num_samples: int = 32768
     weight_decay: float = 0
     use_epoch_seed: bool = False
-    enable_random_baseline: bool = False
 
     # Dataset / camera knobs
     min_initial_views: int = 2
@@ -65,6 +67,11 @@ class NBVExperimentConfig:
     pose_floor_margin: float = 1.0
     train_repeat_factor: int = 1
     val_repeat_factor: int = 1
+    test_repeat_factor: int = 1
+    test_batch_size: int = 16
+    test_chamfer_metrics: List[str] = field(default_factory=lambda: ["geomloss", "cd", "dcd", "emd"])
+    train_ratio: float = 0.8
+    val_ratio: float = 0.1
     # View sampling modes:
     # - "fixed": 每次都采样同一组视角
     # - "deterministic_per_call": 单次调用随机但可重现；不同进程/worker/batch 会打散，跨 epoch 保持一致

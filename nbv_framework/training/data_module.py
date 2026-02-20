@@ -8,7 +8,7 @@ import lightning.pytorch as pl
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 
-from nbv_framework.datasets.data_loaders import create_train_loader, create_val_loader
+from nbv_framework.datasets.data_loaders import create_train_loader, create_val_loader, create_test_loader
 from nbv_framework.datasets.mixed_dataset import MixedDataset
 from nbv_framework.datasets.repeated_dataset import RepeatedDataset
 from nbv_framework.training.config import NBVExperimentConfig
@@ -43,7 +43,7 @@ class NBVDataModule(pl.LightningDataModule):
 
     def train_dataloader(self) -> DataLoader:
         # sampler = DistributedSampler(
-        #     self.train_dataset, 
+        #     self.train_dataset,
         #     shuffle=False
         # )
         return create_train_loader(
@@ -57,6 +57,14 @@ class NBVDataModule(pl.LightningDataModule):
         return create_val_loader(
             self.val_dataset,
             batch_size=self.cfg.batch_size,
+            num_workers=self.cfg.num_workers,
+        )
+
+    def test_dataloader(self) -> Optional[DataLoader]:
+        test_batch_size = int(getattr(self.cfg, "test_batch_size", 1))
+        return create_test_loader(
+            self.test_dataset,
+            batch_size=test_batch_size,
             num_workers=self.cfg.num_workers,
         )
 
@@ -86,6 +94,17 @@ class NBVDataModule(pl.LightningDataModule):
             dataset = RepeatedDataset(dataset, repeat_factor)
         return dataset
 
+    def _build_test_dataset(self) -> Optional[Dataset]:
+        dataset = MixedDataset(
+            dataset_configs=[self._house3k_config(split="test")],
+            seed=self.cfg.seed,
+        )
+
+        repeat_factor = max(1, int(getattr(self.cfg, "test_repeat_factor", 1)))
+        if repeat_factor > 1:
+            dataset = RepeatedDataset(dataset, repeat_factor)
+        return dataset
+
     def _house3k_config(self, split: str) -> dict:
         data_root = (
             "/mnt/sdb/chenmohan/VGGT-NBV/models/House3K_obj"
@@ -101,6 +120,8 @@ class NBVDataModule(pl.LightningDataModule):
             "split": split,
             "max_meshes": self.cfg.max_meshes,
             "up_axis": self.cfg.up_axis,
+            "train_ratio": getattr(self.cfg, "train_ratio", 0.8),
+            "val_ratio": getattr(self.cfg, "val_ratio", 0.2),
             "camera_radius": getattr(self.cfg, "camera_radius", 2.6),
             "camera_radius_variation": getattr(self.cfg, "camera_radius_variation", 0.0),
             "camera_radius_mode": getattr(self.cfg, "camera_radius_mode", "random"),

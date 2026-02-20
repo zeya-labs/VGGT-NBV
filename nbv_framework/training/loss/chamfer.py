@@ -15,9 +15,17 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 dcd_dir = os.path.join(current_dir, "Density_aware_Chamfer_Distance")
 if dcd_dir not in sys.path:
     sys.path.append(dcd_dir)
-# from utils_v2.model_utils import calc_dcd, calc_cd, calc_emd
 
-MetricType = Literal["cd", "emd", "dcd"]
+try:
+    from utils_v2.model_utils import calc_dcd, calc_cd, calc_emd  # type: ignore
+    _HAS_DCD = True
+except Exception:
+    calc_dcd = None  # type: ignore[assignment]
+    calc_cd = None  # type: ignore[assignment]
+    calc_emd = None  # type: ignore[assignment]
+    _HAS_DCD = False
+
+MetricType = Literal["cd", "emd", "dcd", "geomloss"]
 CDVariant = Literal["cd_p", "cd_t"]
 
 class ChamferDistance(nn.Module):
@@ -48,14 +56,14 @@ class ChamferDistance(nn.Module):
         self.dcd_non_reg = dcd_non_reg
         self.emd_eps = emd_eps
         self.emd_iterations = emd_iterations
-        
+
     def configure_distance(
         self,
         distance_type: Optional[MetricType] = None,
     ) -> None:
         if distance_type is not None:
             self.distance_type = distance_type
-            
+
     @staticmethod
     def _sample_points(points: torch.Tensor, target: int) -> torch.Tensor:
         if points.shape[0] <= target:
@@ -103,13 +111,16 @@ class ChamferDistance(nn.Module):
         pred_batched = pred_batched.contiguous().float()
         gt_batched = gt_batched.contiguous().float()
 
-        # if self.distance_type == "cd":
-        #     cd_p, cd_t = calc_cd(pred_batched, gt_batched)
-        #     return cd_p if self.cd_variant == "cd_p" else cd_t
+        if self.distance_type == "cd":
+            if calc_cd is None:
+                raise RuntimeError("calc_cd is not available. Please check DCD utilities.")
+            cd_p, cd_t = calc_cd(pred_batched, gt_batched)
+            return cd_p if self.cd_variant == "cd_p" else cd_t
 
-        # if self.distance_type == "emd":
-        #     # 这里的 calc_emd 是你之前那个基于 Auction 的 CUDA 实现
-        #     return calc_emd(pred_batched, gt_batched, eps=self.emd_eps, iterations=self.emd_iterations)
+        if self.distance_type == "emd":
+            if calc_emd is None:
+                raise RuntimeError("calc_emd is not available. Please check EMD utilities.")
+            return calc_emd(pred_batched, gt_batched, eps=self.emd_eps, iterations=self.emd_iterations)
 
         if self.distance_type == "geomloss":
             """
@@ -120,20 +131,22 @@ class ChamferDistance(nn.Module):
                 p=1,              # 通常 EMD 对应 p=1
                 blur=0.05,     # 模糊系数
             )
-            
+
             # GeomLoss 返回的是每个 batch 的总 loss，shape 为 [B]
             loss = criterion(pred_batched, gt_batched)
-            
+
             return loss
 
-        # if self.distance_type == "dcd":
-        #     return calc_dcd(
-        #         pred_batched,
-        #         gt_batched,
-        #         alpha=self.dcd_alpha,
-        #         n_lambda=self.dcd_n_lambda,
-        #         non_reg=self.dcd_non_reg,
-        #     )[0]
+        if self.distance_type == "dcd":
+            if calc_dcd is None:
+                raise RuntimeError("calc_dcd is not available. Please check DCD utilities.")
+            return calc_dcd(
+                pred_batched,
+                gt_batched,
+                alpha=self.dcd_alpha,
+                n_lambda=self.dcd_n_lambda,
+                non_reg=self.dcd_non_reg,
+            )[0]
 
         raise ValueError(f"Unknown distance_type: {self.distance_type}")
 
@@ -167,7 +180,7 @@ class ChamferDistance(nn.Module):
         """
         将输入统一为 (B, N, 3) 和长度张量。
         若需要，按 max_points_per_cloud 随机下采样。
-        
+
         返回：
             batched: (B, N, 3) 张量，包含所有点云。
             lengths: (B,) 张量，记录每个点云的有效点数。

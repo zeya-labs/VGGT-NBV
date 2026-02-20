@@ -25,13 +25,6 @@ class PolicyInferenceOutput:
     predicted_relative_position: torch.Tensor
 
 
-@dataclass
-class RandomBaselineOutput:
-    chamfer_loss: float
-    images: torch.Tensor
-    position_norm_mean: float
-
-
 class PoseEvaluationResult(NamedTuple):
     total_loss: torch.Tensor
     loss_components: Dict[str, float]

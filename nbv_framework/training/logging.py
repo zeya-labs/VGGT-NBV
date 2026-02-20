@@ -12,7 +12,6 @@ from ..pipeline.types import (
     PolicyInferenceOutput,
     PoseEvaluationResult,
     PreparedBatch,
-    RandomBaselineOutput,
 )
 
 logger = logging.getLogger(__name__)
@@ -92,7 +91,6 @@ def log_step_outputs(
     prepared: PreparedBatch,
     policy_inference: PolicyInferenceOutput,
     policy_eval: PoseEvaluationResult,
-    random_baseline: Optional[RandomBaselineOutput],
     loss_dict: Dict[str, float],
     step_output_dir: Optional[str],
 ) -> None:
@@ -121,7 +119,6 @@ def log_step_outputs(
             step_output_dir=step_output_dir,
         )
     log_loss_metrics(trainer, loss_dict, prefix=prefix)
-    log_random_baseline(trainer, random_baseline, step_output_dir)
 
 
 def log_camera_pose_stats(
@@ -201,39 +198,6 @@ def log_loss_metrics(
         )
 
     _log_metrics_dict(trainer, metrics=metrics, prefix=prefix, prog_bar=False)
-
-
-def log_random_baseline(
-    trainer,
-    random_baseline: Optional[RandomBaselineOutput],
-    step_output_dir: Optional[str],
-) -> None:
-    """Log random baseline diagnostics."""
-    if random_baseline is None:
-        return
-
-    _log_scalar(
-        trainer,
-        key="random_baseline_chamfer_loss",
-        value=float(random_baseline.chamfer_loss),
-        prefix="train",
-    )
-    _log_scalar(
-        trainer,
-        key="random_baseline_position_norm_mean",
-        value=float(random_baseline.position_norm_mean),
-        prefix="train",
-    )
-    if not trainer.trainer.is_global_zero:
-        return
-    if random_baseline.images is None or step_output_dir is None:
-        return
-
-    random_image_dir = os.path.join(step_output_dir, "random_baseline")
-    os.makedirs(random_image_dir, exist_ok=True)
-    save_path = os.path.join(random_image_dir, "random_view.png")
-    random_images_cpu = random_baseline.images.detach().cpu()
-    torchvision.utils.save_image(random_images_cpu, save_path)
 
 
 def save_pre_images_grid(

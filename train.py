@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import hydra
 from hydra.core.config_store import ConfigStore
+from hydra.utils import to_absolute_path
 from nbv_framework.utils.logging_utils import setup_logging
-from rich.console import Console
 import os
 
 import torch
@@ -36,6 +36,7 @@ def main(cfg: NBVExperimentConfig) -> None:
     seed_everything(cfg.seed, workers=True)
     model = build_lightning_model(cfg)
     datamodule = build_datamodule(cfg)
+    checkpoint_weights_only = bool(getattr(cfg, "checkpoint_weights_only", False))
 
     schedule = torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=0)
     profiler = PyTorchProfiler(
@@ -49,8 +50,50 @@ def main(cfg: NBVExperimentConfig) -> None:
     )
     trainer = build_trainer(cfg)
     # trainer = build_trainer(cfg, profiler=profiler)
-    
-    trainer.fit(model=model, datamodule=datamodule, ckpt_path=cfg.resume_checkpoint or None)
+
+    resume_ckpt = to_absolute_path(cfg.resume_checkpoint) if cfg.resume_checkpoint else None
+
+    mode = str(cfg.mode).lower().strip()
+    if mode in {"train"}:
+        trainer.fit(
+            model=model,
+            datamodule=datamodule,
+            ckpt_path=resume_ckpt or None,
+            weights_only=checkpoint_weights_only,
+        )
+        return
+
+    if mode in {"test"}:
+        if not resume_ckpt:
+            raise ValueError("mode=test requires resume_checkpoint pointing to a .ckpt file.")
+        trainer.test(
+            model=model,
+            datamodule=datamodule,
+            ckpt_path=resume_ckpt,
+            weights_only=checkpoint_weights_only,
+        )
+        return
+
+    if mode in {"train_test"}:
+        trainer.fit(
+            model=model,
+            datamodule=datamodule,
+            ckpt_path=resume_ckpt or None,
+            weights_only=checkpoint_weights_only,
+        )
+        ckpt_path = resume_ckpt or "last"
+        trainer.test(
+            model=model,
+            datamodule=datamodule,
+            ckpt_path=ckpt_path,
+            weights_only=checkpoint_weights_only,
+        )
+        return
+
+    raise ValueError(
+        "Unknown mode="
+        f"{cfg.mode!r}. Supported: train, test, train_test"
+    )
 
 if __name__ == "__main__":
     main()

@@ -5,10 +5,13 @@ defaults:
   - _self_
 
 experiment_name: dataset-house3k
+mode: "test"
+resume_checkpoint: "runs/2026-02-09/18-04-33/checkpoints/nbv-epoch=0065-val/total_loss=0.6380.ckpt"
+checkpoint_weights_only: false
 batch_size: 16
 max_meshes: 3000
 learning_rate: 1e-5
-max_epochs: 500
+max_epochs: 100
 seed: 42
 view_sampling_mode: "fully_random"
 normalize_method: "unit_sphere"
