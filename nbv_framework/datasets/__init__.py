@@ -1,11 +1,11 @@
 """
 NBV框架数据集模块
 
-该模块提供了用于Next Best View任务的各种数据集实现，包括：
+该模块提供用于 Next Best View 任务的数据集基础设施，包括：
 - 基础数据集抽象类
-- 具体的数据集实现（合成数据集、ShapeNet、ModelNet等）
+- 具体数据集实现
 - 数据加载器和批处理函数
-- 数据集工厂类用于统一创建接口
+- 数据集工厂类
 """
 
 # 基础数据集类
@@ -36,7 +36,6 @@ from .collate_functions import (
 __all__ = [
     # 数据集类
     "BaseDataset",
-    "SyntheticDataset", 
     "MixedDataset",
     "RepeatedDataset",
     

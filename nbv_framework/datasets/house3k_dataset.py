@@ -215,25 +215,6 @@ class House3KDataset(BaseDataset):
         """获取网格文件路径"""
         return data_item["obj_path"]
     
-    def _get_image_paths(self, data_item: Dict) -> List[str]:
-        """
-        House3K 不提供预渲染图像路径，保留该接口以满足基类约束。
-        """
-        return []
-
-    def set_epoch(self, epoch: int) -> None:
-        """更新 epoch，保持 BaseDataset 的行为。"""
-        super().set_epoch(epoch)
-    
-    def _get_camera_poses_path(self, data_item: Dict) -> Optional[str]:
-        """
-        获取相机位姿文件路径
-        
-        House3K数据集没有相机位姿文件，返回None
-        相机位姿将在运行时动态生成
-        """
-        return None
-    
     def _resolve_view_seed(self, model_name: str, idx: int) -> Optional[int]:
         mode = self.view_sampling_mode
         base_seed = self.seed

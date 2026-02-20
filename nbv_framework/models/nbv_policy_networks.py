@@ -1,66 +1,53 @@
-"""
-NBV策略网络统一框架
-1. BasicNBVPolicy - 基础策略网络
-2. AttentionNBVPolicy - 注意力机制策略网络
-3. IterativeNBVPolicy - 迭代细化策略网络
-4. MultiScaleNBVPolicy - 多尺度特征融合策略网络
-5. HybridNBVPolicy - 混合架构策略网络
-6. GeometryAwareNBVPolicy - 几何感知策略网络
+"""NBV policy networks.
 
-所有网络统一接收[B, S, P, scene_feature_dim]格式的场景特征，其中：
-- B: batch size
-- S: sequence length (多视角特征数量)
-- P: token数量（相机/注册/patch等）
-- scene_feature_dim: 场景特征维度（VGGT特征维度或其他自定义维度）
+Only the attention-based policy is kept as the supported architecture.
 """
+
+from __future__ import annotations
+
+import math
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Tuple, Optional
-import math
-import numpy as np
 
 
 class BaseNBVPolicy(nn.Module):
-    """
-    NBV策略网络基类
-    
-    提供通用的功能和接口定义
-    """
-    
+    """Shared utilities for NBV policy heads."""
+
     def __init__(
         self,
         output_mode: str = "cartesian",
         token_pooling_mode: str = "mean",
         position_bounds: Optional[Tuple[float, float]] = None,
-    ):
+    ) -> None:
         super().__init__()
         self.output_mode = output_mode
-        self.token_pooling_mode = token_pooling_mode  # 处理[B, S, P, 768]时的token池化方式
+        self.token_pooling_mode = token_pooling_mode
+
         if position_bounds is None:
-            position_bounds = (-3.0,3.0)
+            position_bounds = (-3.0, 3.0)
         if position_bounds[0] >= position_bounds[1]:
             raise ValueError(
                 f"Invalid position_bounds: {position_bounds}. Expected (min, max) with min < max"
             )
         self.position_bounds = position_bounds
-        
-        if output_mode == "spherical":
-            self.target_dim = 7  # theta, phi, radius + qx, qy, qz, qw (球面位置+四元数旋转)
-        elif output_mode == "cartesian":
-            self.target_dim = 7  # x, y, z, qx, qy, qz, qw (笛卡尔位置+四元数旋转)
+
+        if output_mode in {"spherical", "cartesian"}:
+            self.target_dim = 7
         elif output_mode == "euler":
-            self.target_dim = 6  # x, y, z, roll, pitch, yaw (笛卡尔位置+欧拉角旋转)
+            self.target_dim = 6
         elif output_mode == "position_only":
-            self.target_dim = 3  # x, y, z (仅笛卡尔位置，姿态自动确定)
+            self.target_dim = 3
         else:
-            raise ValueError(f"Unknown output_mode: {output_mode}. Supported: spherical, cartesian, euler, position_only")
+            raise ValueError(
+                f"Unknown output_mode: {output_mode}. "
+                "Supported: spherical, cartesian, euler, position_only"
+            )
 
     def _pool_tokens_if_needed(self, scene_features: torch.Tensor) -> torch.Tensor:
-        """如果输入为[B, S, P, D]，按token维度P进行池化，返回[B, S, D]。
-        支持: mean/max/camera(取camera token索引0)。
-        """
+        """Pool [B, S, P, D] to [B, S, D] when token dimension exists."""
         if scene_features.dim() == 4:
             if self.token_pooling_mode == "mean":
                 return scene_features.mean(dim=2)
@@ -68,796 +55,175 @@ class BaseNBVPolicy(nn.Module):
                 return scene_features.max(dim=2)[0]
             if self.token_pooling_mode == "camera":
                 return scene_features[:, :, 0, :]
-            raise ValueError(f"Unknown token_pooling_mode: {self.token_pooling_mode}. Supported: mean, max, camera")
-        return scene_features
-    
-    def _activate_nbv(self, nbv: torch.Tensor) -> torch.Tensor:
-        """激活NBV预测，约束输出范围"""
-        if self.output_mode == "spherical":
-            # 球面位置: theta, phi, radius
-            theta = torch.sigmoid(nbv[:, 0]) * 2 * math.pi  # [0, 2π]
-            phi = torch.sigmoid(nbv[:, 1]) * math.pi        # [0, π]
-            radius = torch.sigmoid(nbv[:, 2]) * 2 + 1       # [1, 3]
-            position = torch.stack([theta, phi, radius], dim=1)
-            
-            # 四元数旋转: qx, qy, qz, qw
-            quaternion = F.normalize(nbv[:, 3:], p=2, dim=1)
-            
-            return torch.cat([position, quaternion], dim=1)
-            
-        elif self.output_mode == "cartesian":
-            # 笛卡尔位置: x, y, z
-            position = nbv[:, :3]
-            # 四元数旋转: qx, qy, qz, qw
-            quaternion = F.normalize(nbv[:, 3:], p=2, dim=1)
-            return torch.cat([position, quaternion], dim=1)
-            
-        elif self.output_mode == "euler":
-            # 笛卡尔位置: x, y, z
-            position = nbv[:, :3]
-            # 欧拉角旋转: roll, pitch, yaw (弧度)
-            roll = torch.tanh(nbv[:, 3]) * math.pi    # [-π, π]
-            pitch = torch.tanh(nbv[:, 4]) * math.pi/2 # [-π/2, π/2]
-            yaw = torch.tanh(nbv[:, 5]) * math.pi     # [-π, π]
-            rotation = torch.stack([roll, pitch, yaw], dim=1)
-            
-            return torch.cat([position, rotation], dim=1)
-            
-        elif self.output_mode == "position_only":
-            # 仅笛卡尔位置: x, y, z (姿态将由其他方式自动确定)
-            # lower, upper = self.position_bounds
-            # 强制限制在[min, max]区间，避免训练过程中位置发散
-            # position = torch.tanh(nbv[:, :3])
-            # midpoint = (upper + lower) * 0.5
-            # half_range = (upper - lower) * 0.5
-            # position = position * half_range + midpoint
-
-            # position = torch.clamp(nbv[:, :3], min=lower, max=upper)
-            
-            position = nbv[:, :3]
-            return position
-    
-    def _initialize_weights(self):
-        """初始化网络权重"""
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Parameter):
-                nn.init.xavier_uniform_(m)
-    
-    def spherical_to_cartesian(self, spherical_pose: torch.Tensor) -> torch.Tensor:
-        """将球坐标转换为笛卡尔坐标"""
-        theta, phi, radius = spherical_pose[:, 0], spherical_pose[:, 1], spherical_pose[:, 2]
-        
-        x = radius * torch.sin(phi) * torch.cos(theta)
-        y = radius * torch.sin(phi) * torch.sin(theta)
-        z = radius * torch.cos(phi)
-        
-        return torch.stack([x, y, z], dim=1)
-    
-    def euler_to_quaternion(self, euler_angles: torch.Tensor) -> torch.Tensor:
-        """将欧拉角转换为四元数 (roll, pitch, yaw) -> (qx, qy, qz, qw)"""
-        roll, pitch, yaw = euler_angles[:, 0], euler_angles[:, 1], euler_angles[:, 2]
-        
-        # 计算半角
-        cr, cp, cy = torch.cos(roll * 0.5), torch.cos(pitch * 0.5), torch.cos(yaw * 0.5)
-        sr, sp, sy = torch.sin(roll * 0.5), torch.sin(pitch * 0.5), torch.sin(yaw * 0.5)
-        
-        # 四元数分量
-        qx = sr * cp * cy - cr * sp * sy
-        qy = cr * sp * cy + sr * cp * sy
-        qz = cr * cp * sy - sr * sp * cy
-        qw = cr * cp * cy + sr * sp * sy
-        
-        return torch.stack([qx, qy, qz, qw], dim=1)
-    
-    def quaternion_to_euler(self, quaternion: torch.Tensor) -> torch.Tensor:
-        """将四元数转换为欧拉角 (qx, qy, qz, qw) -> (roll, pitch, yaw)"""
-        qx, qy, qz, qw = quaternion[:, 0], quaternion[:, 1], quaternion[:, 2], quaternion[:, 3]
-        
-        # 归一化四元数
-        norm = torch.sqrt(qx**2 + qy**2 + qz**2 + qw**2)
-        qx, qy, qz, qw = qx/norm, qy/norm, qz/norm, qw/norm
-        
-        # 计算欧拉角
-        roll = torch.atan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx * qx + qy * qy))
-        pitch = torch.asin(2 * (qw * qy - qz * qx))
-        yaw = torch.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
-        
-        return torch.stack([roll, pitch, yaw], dim=1)
-
-class BasicNBVPolicy(BaseNBVPolicy):
-    """
-    基础NBV策略网络
-    
-    接收[B, S, 768]场景特征，通过简单的池化和MLP输出相机位姿
-    """
-    
-    def __init__(self, 
-                 scene_feature_dim: int = 768,
-                 hidden_dim: int = 256,
-                 num_layers: int = 3,
-                 pooling_mode: str = "mean",
-                 output_mode: str = "cartesian",
-                 token_pooling_mode: str = "mean"):
-        """
-        初始化基础NBV策略网络
-        
-        Args:
-            scene_feature_dim: 场景特征维度
-            hidden_dim: 隐藏层维度
-            num_layers: MLP层数
-            pooling_mode: 池化模式 "mean", "max", "attention"
-            output_mode: 输出模式 "spherical" 或 "cartesian"
-        """
-        super().__init__(output_mode, token_pooling_mode)
-        
-        self.scene_feature_dim = scene_feature_dim
-        self.hidden_dim = hidden_dim
-        self.num_layers = num_layers
-        self.pooling_mode = pooling_mode
-        
-        # 特征池化
-        if pooling_mode == "attention":
-            self.attention_pool = nn.MultiheadAttention(
-                embed_dim=scene_feature_dim,
-                num_heads=8,
-                batch_first=True
+            raise ValueError(
+                f"Unknown token_pooling_mode: {self.token_pooling_mode}. "
+                "Supported: mean, max, camera"
             )
-            self.pool_query = nn.Parameter(torch.randn(1, 1, scene_feature_dim))
-        
-        # 输入归一化
-        self.input_norm = nn.LayerNorm(scene_feature_dim)
-        
-        # MLP网络
-        layers = []
-        for i in range(num_layers):
-            if i == 0:
-                layers.extend([
-                    nn.Linear(scene_feature_dim, hidden_dim),
-                    nn.ReLU(),
-                    nn.Dropout(0.1)
-                ])
-            else:
-                layers.extend([
-                    nn.Linear(hidden_dim, hidden_dim),
-                    nn.ReLU(),
-                    nn.Dropout(0.1)
-                ])
-        
-        self.backbone = nn.Sequential(*layers)
-        
-        # 输出头
-        self.output_head = nn.Linear(hidden_dim, self.target_dim)
-        
-        self._initialize_weights()
-    
-    def forward(self, scene_features: torch.Tensor) -> torch.Tensor:
-        """
-        前向传播
-        
-        Args:
-            scene_features: 场景特征 [B, S, 768]
-            
-        Returns:
-            camera_pose: 相机位姿 [B, target_dim]
-        """
-        scene_features = self._pool_tokens_if_needed(scene_features)  # [B, S, D]
-        B, S, D = scene_features.shape
-        
-        # 归一化
-        x = self.input_norm(scene_features)  # [B, S, D]
-        
-        # 特征池化
-        if self.pooling_mode == "mean":
-            pooled_features = x.mean(dim=1)  # [B, D]
-        elif self.pooling_mode == "max":
-            pooled_features = x.max(dim=1)[0]  # [B, D]
-        elif self.pooling_mode == "attention":
-            query = self.pool_query.expand(B, -1, -1)  # [B, 1, D]
-            pooled_features, _ = self.attention_pool(query, x, x)  # [B, 1, D]
-            pooled_features = pooled_features.squeeze(1)  # [B, D]
-        
-        # MLP处理
-        features = self.backbone(pooled_features)  # [B, hidden_dim]
-        
-        # 输出预测
-        nbv_raw = self.output_head(features)  # [B, target_dim]
-        
-        return self._activate_nbv(nbv_raw)
+        return scene_features
+
+    def _activate_nbv(self, nbv: torch.Tensor) -> torch.Tensor:
+        """Apply output-space constraints."""
+        if self.output_mode == "spherical":
+            theta = torch.sigmoid(nbv[:, 0]) * 2 * math.pi
+            phi = torch.sigmoid(nbv[:, 1]) * math.pi
+            radius = torch.sigmoid(nbv[:, 2]) * 2 + 1
+            position = torch.stack([theta, phi, radius], dim=1)
+            quaternion = F.normalize(nbv[:, 3:], p=2, dim=1)
+            return torch.cat([position, quaternion], dim=1)
+
+        if self.output_mode == "cartesian":
+            position = nbv[:, :3]
+            quaternion = F.normalize(nbv[:, 3:], p=2, dim=1)
+            return torch.cat([position, quaternion], dim=1)
+
+        if self.output_mode == "euler":
+            position = nbv[:, :3]
+            roll = torch.tanh(nbv[:, 3]) * math.pi
+            pitch = torch.tanh(nbv[:, 4]) * (math.pi / 2)
+            yaw = torch.tanh(nbv[:, 5]) * math.pi
+            rotation = torch.stack([roll, pitch, yaw], dim=1)
+            return torch.cat([position, rotation], dim=1)
+
+        # position_only
+        return nbv[:, :3]
 
 
 class SinusoidalPositionalEncoding(nn.Module):
-    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
-        """
-        Args:
-            d_model: 隐层维度 (hidden_dim)
-            dropout: Dropout 比率
-            max_len: 预计算的最大长度 (设大一点没关系，不占多少内存)
-        """
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000) -> None:
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
 
-        # 1. 计算位置编码矩阵
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        
-        # 2. 计算分母的 div_term (10000^(2i/d_model))
-        # 使用 log 空间计算以提高数值稳定性
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        
-        # 3. 填充 sin 和 cos
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        
-        # 4. 增加 batch 维度: [1, max_len, d_model]
         pe = pe.unsqueeze(0)
-        
-        # 5. 注册为 buffer (不会被优化器更新，但会随模型保存/加载，且会自动跟随 .to(device))
-        self.register_buffer('pe', pe)
+        self.register_buffer("pe", pe)
 
-    def forward(self, x):
-        """
-        x: [Batch, Seq_Len, d_model]
-        """
-        # 动态截取当前序列长度对应的位置编码
-        x = x + self.pe[:, :x.size(1), :]
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.pe[:, : x.size(1), :]
         return self.dropout(x)
 
 
-# 1. 引入 Fourier Feature Encoding (NeRF 风格)
 class FourierEmbedding(nn.Module):
-    def __init__(self, input_dim, mapping_size=64, scale=10):
+    def __init__(self, input_dim: int, mapping_size: int = 64, scale: float = 10.0) -> None:
         super().__init__()
         self.input_dim = input_dim
         self.mapping_size = mapping_size
-        self.scale = scale
-        # 随机高斯矩阵 B (不可学习)
-        self.register_buffer('B', torch.randn(input_dim, mapping_size) * scale)
+        self.scale = float(scale)
+        self.register_buffer("B", torch.randn(input_dim, mapping_size) * self.scale)
 
-    def forward(self, x):
-        # x: [Batch, ..., input_dim]
-        # projection: [Batch, ..., mapping_size]
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.scale == 0:
             return x
-            
-        x_proj = (2. * np.pi * x) @ self.B
+
+        x_proj = (2.0 * math.pi * x) @ self.B
         return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
 
+
 class AttentionNBVPolicy(BaseNBVPolicy):
-    def __init__(self, 
-                 scene_feature_dim: int = 768,
-                 hidden_dim: int = 768,
-                 num_heads: int = 8,
-                 num_layers: int = 4,
-                 dropout: float = 0.1, # 稍微增加 dropout 防止过拟合
-                 output_mode: str = "cartesian",
-                 token_pooling_mode: str = "mean",
-                 input_extrinsic_dim=7):
-        
+    """Attention-based NBV policy conditioned on scene features and camera extrinsics."""
+
+    def __init__(
+        self,
+        scene_feature_dim: int = 768,
+        hidden_dim: int = 768,
+        num_heads: int = 8,
+        num_layers: int = 4,
+        dropout: float = 0.1,
+        output_mode: str = "cartesian",
+        token_pooling_mode: str = "mean",
+        input_extrinsic_dim: int = 7,
+    ) -> None:
         super().__init__(output_mode, token_pooling_mode)
-        
         self.hidden_dim = hidden_dim
-        
-        # --- 改进点 1: 使用 Fourier Embedding 处理相机姿态 ---
-        # 原始 7 维 -> 映射到 mapping_size * 2 维
+
         fourier_mapping_size = 64
         self.cam_fourier_embed = FourierEmbedding(input_extrinsic_dim, mapping_size=fourier_mapping_size)
         fourier_dim = fourier_mapping_size * 2
-        
+
         self.camera_embedding = nn.Sequential(
             nn.Linear(fourier_dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
-            # 这里不需要 LayerNorm，通常 embedding 后直接加到特征上
         )
 
-        # 特征投影
         self.feature_projection = nn.Sequential(
             nn.Linear(scene_feature_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim) # 投影后加 Norm 是好习惯
+            nn.LayerNorm(hidden_dim),
         )
-        
-        # --- 改进点 2: 位置编码策略 ---
-        # 既然已经有了强力的 camera_embedding (代表空间位置)，
-        # 只有在非常依赖“轨迹顺序”时才需要这个 SinusoidalPositionalEncoding。
-        # 这里保留它作为可选项，或者将其改为 Learnable PE。
+
         self.pos_encoder = SinusoidalPositionalEncoding(
-            d_model=hidden_dim, 
-            dropout=dropout, 
-            max_len=5000
+            d_model=hidden_dim,
+            dropout=dropout,
+            max_len=5000,
         )
-        
-        # Transformer编码器 (Pre-Norm 很好，保持)
+
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_dim,
             nhead=num_heads,
-            dim_feedforward=int(hidden_dim * 4), # 显式强转 int
+            dim_feedforward=hidden_dim * 4,
             dropout=dropout,
-            activation='gelu', # 明确指定 gelu
+            activation="gelu",
             batch_first=True,
-            norm_first=True 
+            norm_first=True,
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers)
-        
-        # 全局特征提取 (Attention Pooling)
+
         self.global_pool = nn.MultiheadAttention(
             embed_dim=hidden_dim,
             num_heads=num_heads,
             dropout=dropout,
-            batch_first=True
+            batch_first=True,
         )
-        
-        # 这是一个 Learnable Query Token
         self.global_token = nn.Parameter(torch.randn(1, 1, hidden_dim))
-        
-        # 输出头
+
         self.output_head = nn.Sequential(
             nn.LayerNorm(hidden_dim),
-            nn.Linear(hidden_dim, hidden_dim), # 增加一层深度
+            nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, self.target_dim)
+            nn.Linear(hidden_dim, self.target_dim),
         )
-        
+
         self._initialize_weights()
 
-    def _initialize_weights(self):
-        # --- 改进点 3: 更科学的初始化 ---
-        # 对 global token 使用截断正态分布
+    def _initialize_weights(self) -> None:
         nn.init.trunc_normal_(self.global_token, std=0.02)
-        
-        # 对 Linear 层使用 Xavier / Kaiming
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.LayerNorm):
-                nn.init.constant_(m.bias, 0)
-                nn.init.constant_(m.weight, 1.0)
+
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.constant_(module.bias, 0)
+                nn.init.constant_(module.weight, 1.0)
 
     def forward(self, scene_features: torch.Tensor, camera_extrinsics: torch.Tensor) -> torch.Tensor:
-        # scene_features: [B, S, D_in]
-        # camera_extrinsics: [B, S, 7]
-        
         scene_features = self._pool_tokens_if_needed(scene_features)
-        B, S, _ = scene_features.shape
-        
-        # 1. 视觉特征投影
-        scene_tokens = self.feature_projection(scene_features) 
-        
-        # 2. 相机位姿编码 (Fourier -> MLP)
-        cam_fourier = self.cam_fourier_embed(camera_extrinsics) # [B, S, FourierDim]
-        cam_emb = self.camera_embedding(cam_fourier) # [B, S, Hidden]
+        batch_size, _, _ = scene_features.shape
 
-        # 3. 融合 (相加)
-        # 这里 cam_emb 代表了严格的几何空间位置
+        scene_tokens = self.feature_projection(scene_features)
+
+        cam_fourier = self.cam_fourier_embed(camera_extrinsics)
+        cam_emb = self.camera_embedding(cam_fourier)
+
         x = scene_tokens + cam_emb
-
-        # 4. 时序/序列位置编码
-        # 只有当输入的顺序隐含了有用的时序信息(Trajectory)时才加这个
-        # 如果输入是无序集合，应该注释掉这一行
         x = self.pos_encoder(x)
-
-        # 5. Transformer 编码
         encoded_features = self.transformer(x)
-        
-        # 6. 全局 Attention 池化
-        # Query: global_token, Key/Value: encoded_features
-        global_token = self.global_token.expand(B, -1, -1)
-        # 注意: MultiheadAttention 返回 (output, weights)
-        global_features, _ = self.global_pool(query=global_token, key=encoded_features, value=encoded_features)
-        global_features = global_features.squeeze(1) # [B, Hidden]
-        
-        # 7. 输出
+
+        global_token = self.global_token.expand(batch_size, -1, -1)
+        global_features, _ = self.global_pool(
+            query=global_token,
+            key=encoded_features,
+            value=encoded_features,
+        )
+        global_features = global_features.squeeze(1)
+
         nbv_raw = self.output_head(global_features)
-        
         return self._activate_nbv(nbv_raw)
 
 
-class IterativeNBVPolicy(BaseNBVPolicy):
-    """
-    迭代细化NBV策略网络
-    
-    通过多次迭代逐步精化NBV预测
-    """
-    
-    def __init__(self,
-                 scene_feature_dim: int = 768,
-                 hidden_dim: int = 512,
-                 trunk_depth: int = 4,
-                 num_heads: int = 8,
-                 output_mode: str = "cartesian",
-                 num_iterations: int = 4,
-                 token_pooling_mode: str = "mean"):
-        """
-        初始化迭代细化NBV策略网络
-        """
-        super().__init__(output_mode, token_pooling_mode)
-        
-        self.scene_feature_dim = scene_feature_dim
-        self.hidden_dim = hidden_dim
-        self.num_iterations = num_iterations
-        
-        # 场景特征编码器
-        self.scene_encoder = AttentionNBVPolicy(
-            scene_feature_dim, hidden_dim, num_heads, trunk_depth, output_mode
-        )
-        
-        # 学习的空NBV token
-        self.empty_nbv_token = nn.Parameter(torch.zeros(1, 1, self.target_dim))
-        self.embed_nbv = nn.Linear(self.target_dim, hidden_dim)
-        
-        # 调制模块
-        self.nbv_modulation = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(hidden_dim, 3 * hidden_dim)
-        )
-        
-        # 自适应层归一化
-        self.adaln_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
-        
-        # Trunk网络
-        self.trunk = nn.Sequential(*[
-            nn.TransformerEncoderLayer(
-                d_model=hidden_dim,
-                nhead=num_heads,
-                dim_feedforward=hidden_dim * 4,
-                dropout=0.1,
-                batch_first=True
-            ) for _ in range(trunk_depth)
-        ])
-        
-        # NBV预测分支
-        self.nbv_branch = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim // 2, self.target_dim)
-        )
-        
-        self._initialize_weights()
-    
-    def _modulate(self, x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-        """调制函数"""
-        return x * (1 + scale) + shift
-    
-    def forward(self, scene_features: torch.Tensor, num_iterations: Optional[int] = None) -> List[torch.Tensor]:
-        """
-        迭代细化前向传播
-        
-        Args:
-            scene_features: 场景特征 [B, S, 768]
-            num_iterations: 迭代次数
-            
-        Returns:
-            nbv_predictions: NBV预测列表
-        """
-        if num_iterations is None:
-            num_iterations = self.num_iterations
-        
-        scene_features = self._pool_tokens_if_needed(scene_features)  # [B, S, D]
-        B = scene_features.shape[0]
-        
-        # 场景特征编码
-        encoded_scene = self.scene_encoder.feature_projection(scene_features)  # [B, S, hidden_dim]
-        encoded_scene = self.scene_encoder.transformer(encoded_scene)
-        
-        # 全局场景特征
-        global_token = self.scene_encoder.global_token.expand(B, -1, -1)
-        scene_global, _ = self.scene_encoder.global_pool(global_token, encoded_scene, encoded_scene)
-        scene_tokens = scene_global  # [B, 1, hidden_dim]
-        
-        pred_nbv = None
-        nbv_predictions = []
-        
-        for _ in range(num_iterations):
-            # NBV输入
-            if pred_nbv is None:
-                nbv_input = self.embed_nbv(self.empty_nbv_token.expand(B, -1, -1))
-            else:
-                pred_nbv_detached = pred_nbv.detach()
-                nbv_input = self.embed_nbv(pred_nbv_detached.unsqueeze(1))
-            
-            # 生成调制参数
-            shift, scale, gate = self.nbv_modulation(nbv_input).chunk(3, dim=-1)
-            
-            # 自适应层归一化和调制
-            scene_modulated = gate * self._modulate(self.adaln_norm(scene_tokens), shift, scale)
-            scene_modulated = scene_modulated + scene_tokens
-            
-            # Trunk处理
-            processed_tokens = self.trunk(scene_modulated)
-            
-            # 预测NBV增量
-            nbv_delta = self.nbv_branch(processed_tokens.squeeze(1))
-            
-            if pred_nbv is None:
-                pred_nbv = nbv_delta
-            else:
-                pred_nbv = pred_nbv + nbv_delta
-            
-            # 激活约束
-            activated_nbv = self._activate_nbv(pred_nbv)
-            nbv_predictions.append(activated_nbv)
-        
-        return nbv_predictions
-
-
-class MultiScaleNBVPolicy(BaseNBVPolicy):
-    """
-    多尺度特征融合NBV策略网络
-    
-    从不同尺度的特征中预测NBV
-    """
-    
-    def __init__(self,
-                 scene_feature_dim: int = 768,
-                 feature_scales: List[int] = [512, 1024, 1536, 2048],
-                 hidden_dim: int = 512,
-                 output_mode: str = "cartesian",
-                 token_pooling_mode: str = "mean"):
-        """
-        初始化多尺度NBV策略网络
-        """
-        super().__init__(output_mode, token_pooling_mode)
-        
-        self.scene_feature_dim = scene_feature_dim
-        self.feature_scales = feature_scales
-        self.hidden_dim = hidden_dim
-        
-        # 序列特征编码器
-        self.sequence_encoder = AttentionNBVPolicy(
-            scene_feature_dim, hidden_dim, num_layers=2
-        )
-        
-        # 多尺度投影层
-        self.scale_projectors = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(hidden_dim, scale),
-                nn.ReLU(),
-                nn.Dropout(0.1),
-                nn.LayerNorm(scale)
-            ) for scale in feature_scales
-        ])
-        
-        # 特征金字塔融合
-        self.pyramid_fusion = self._build_pyramid_fusion()
-        
-        # 输出头
-        self.output_head = nn.Sequential(
-            nn.Linear(feature_scales[-1], feature_scales[-1] // 2),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(feature_scales[-1] // 2, self.target_dim)
-        )
-        
-        self._initialize_weights()
-    
-    def _build_pyramid_fusion(self):
-        """构建特征金字塔融合模块"""
-        fusion_modules = nn.ModuleList()
-        
-        for i in range(len(self.feature_scales) - 1):
-            in_dim = self.feature_scales[i]
-            out_dim = self.feature_scales[i + 1]
-            
-            fusion_module = nn.Sequential(
-                nn.Linear(in_dim, out_dim),
-                nn.ReLU(),
-                nn.LayerNorm(out_dim)
-            )
-            fusion_modules.append(fusion_module)
-        
-        return fusion_modules
-    
-    def forward(self, scene_features: torch.Tensor) -> torch.Tensor:
-        """
-        多尺度特征融合前向传播
-        
-        Args:
-            scene_features: 场景特征 [B, S, 768]
-            
-        Returns:
-            nbv_prediction: NBV预测 [B, target_dim]
-        """
-        scene_features = self._pool_tokens_if_needed(scene_features)  # [B, S, D]
-        B, S, D = scene_features.shape
-        
-        # 序列特征编码
-        encoded_features = self.sequence_encoder.feature_projection(scene_features)
-        encoded_features = self.sequence_encoder.transformer(encoded_features)
-        
-        # 全局特征提取
-        global_token = self.sequence_encoder.global_token.expand(B, -1, -1)
-        global_features, _ = self.sequence_encoder.global_pool(
-            global_token, encoded_features, encoded_features
-        )
-        global_features = global_features.squeeze(1)  # [B, hidden_dim]
-        
-        # 多尺度投影
-        scale_features = []
-        for projector in self.scale_projectors:
-            scale_feature = projector(global_features)
-            scale_features.append(scale_feature)
-        
-        # 特征金字塔融合
-        fused_feature = scale_features[0]
-        for i, fusion_module in enumerate(self.pyramid_fusion):
-            next_scale_feature = scale_features[i + 1]
-            upsampled_feature = fusion_module(fused_feature)
-            fused_feature = upsampled_feature + next_scale_feature
-        
-        # 输出预测
-        nbv_raw = self.output_head(fused_feature)
-        
-        return self._activate_nbv(nbv_raw)
-
-
-class HybridNBVPolicy(BaseNBVPolicy):
-    """
-    混合架构NBV策略网络
-    
-    结合迭代细化和多尺度特征融合的优势
-    """
-    
-    def __init__(self,
-                 scene_feature_dim: int = 768,
-                 hidden_dim: int = 512,
-                 feature_scales: List[int] = [1024, 1536, 2048],
-                 num_iterations: int = 3,
-                 output_mode: str = "cartesian",
-                 token_pooling_mode: str = "mean"):
-        """
-        初始化混合架构NBV策略网络
-        """
-        super().__init__(output_mode, token_pooling_mode)
-        
-        self.scene_feature_dim = scene_feature_dim
-        self.hidden_dim = hidden_dim
-        
-        # 多尺度特征提取
-        self.multi_scale_extractor = MultiScaleNBVPolicy(
-            scene_feature_dim, feature_scales, hidden_dim, output_mode, token_pooling_mode
-        )
-        
-        # 迭代细化模块
-        self.iterative_refiner = IterativeNBVPolicy(
-            scene_feature_dim, hidden_dim, trunk_depth=2,
-            num_iterations=num_iterations, output_mode=output_mode, token_pooling_mode=token_pooling_mode
-        )
-        
-        # 预测融合器
-        self.prediction_fusion = nn.Sequential(
-            nn.Linear(self.target_dim * 2, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, self.target_dim)
-        )
-        
-        self._initialize_weights()
-    
-    def forward(self, scene_features: torch.Tensor) -> torch.Tensor:
-        """
-        混合架构前向传播
-        
-        Args:
-            scene_features: 场景特征 [B, S, 768]
-            
-        Returns:
-            nbv_prediction: 最终NBV预测 [B, target_dim]
-        """
-        # 多尺度预测
-        multi_scale_pred = self.multi_scale_extractor(scene_features)
-        
-        # 迭代细化预测
-        iterative_preds = self.iterative_refiner(scene_features)
-        final_iterative_pred = iterative_preds[-1]
-        
-        # 融合两种预测
-        combined_pred = torch.cat([multi_scale_pred, final_iterative_pred], dim=1)
-        fused_pred = self.prediction_fusion(combined_pred)
-        
-        return self._activate_nbv(fused_pred)
-
-
-class GeometryAwareNBVPolicy(BaseNBVPolicy):
-    """
-    几何感知NBV策略网络
-    
-    结合场景特征和几何信息进行NBV预测
-    """
-    
-    def __init__(self,
-                 scene_feature_dim: int = 768,
-                 geometry_feature_dim: int = 7,
-                 hidden_dim: int = 512,
-                 output_mode: str = "cartesian",
-                 token_pooling_mode: str = "mean"):
-        """
-        初始化几何感知NBV策略网络
-        
-        Args:
-            scene_feature_dim: 场景特征维度
-            geometry_feature_dim: 几何特征维度 (深度特征3 + 点云特征4)
-            hidden_dim: 隐藏层维度
-            output_mode: 输出模式
-        """
-        super().__init__(output_mode, token_pooling_mode)
-        
-        self.scene_feature_dim = scene_feature_dim
-        self.geometry_feature_dim = geometry_feature_dim
-        self.hidden_dim = hidden_dim
-        
-        # 场景特征编码器
-        self.scene_encoder = AttentionNBVPolicy(
-            scene_feature_dim, hidden_dim, num_layers=3
-        )
-        
-        # 几何特征编码器
-        self.geometry_encoder = nn.Sequential(
-            nn.Linear(geometry_feature_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.LayerNorm(hidden_dim // 2)
-        )
-        
-        # 跨模态注意力融合
-        self.cross_attention = nn.MultiheadAttention(
-            embed_dim=hidden_dim,
-            num_heads=8,
-            batch_first=True
-        )
-        
-        # 融合网络
-        self.fusion_network = nn.Sequential(
-            nn.Linear(hidden_dim + hidden_dim // 2, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim // 2, self.target_dim)
-        )
-        
-        self._initialize_weights()
-    
-    def forward(self, scene_features: torch.Tensor, geometry_features: torch.Tensor) -> torch.Tensor:
-        """
-        几何感知前向传播
-        
-        Args:
-            scene_features: 场景特征 [B, S, 768]
-            geometry_features: 几何特征 [B, geometry_feature_dim]
-            
-        Returns:
-            nbv_prediction: NBV预测 [B, target_dim]
-        """
-        scene_features = self._pool_tokens_if_needed(scene_features)  # [B, S, D]
-        B = scene_features.shape[0]
-        
-        # 场景特征编码
-        encoded_scene = self.scene_encoder.feature_projection(scene_features)
-        encoded_scene = self.scene_encoder.transformer(encoded_scene)
-        
-        # 全局场景特征
-        global_token = self.scene_encoder.global_token.expand(B, -1, -1)
-        scene_global, _ = self.scene_encoder.global_pool(global_token, encoded_scene, encoded_scene)
-        scene_global = scene_global.squeeze(1)  # [B, hidden_dim]
-        
-        # 几何特征编码
-        geometry_encoded = self.geometry_encoder(geometry_features)  # [B, hidden_dim//2]
-        
-        # 跨模态注意力
-        scene_attended = scene_global.unsqueeze(1)  # [B, 1, hidden_dim]
-        attended_scene, _ = self.cross_attention(scene_attended, scene_attended, scene_attended)
-        attended_scene = attended_scene.squeeze(1)  # [B, hidden_dim]
-        
-        # 融合特征
-        combined_features = torch.cat([attended_scene, geometry_encoded], dim=1)
-        
-        # 预测NBV
-        nbv_raw = self.fusion_network(combined_features)
-        
-        return self._activate_nbv(nbv_raw)
+__all__ = ["BaseNBVPolicy", "AttentionNBVPolicy"]

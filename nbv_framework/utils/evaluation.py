@@ -16,7 +16,7 @@ from ..utils.camera_utils import position_to_pose_tensor
 from ..utils.render_utils import render_mesh_views
 
 if TYPE_CHECKING:
-    from ..models import BaseNBVPolicy, MapAnythingWrapper
+    from ..models import AttentionNBVPolicy, MapAnythingWrapper
 
 
 
@@ -63,15 +63,11 @@ def _extract_scene_features(
 
 
 def _predict_next_pose(
-    policy_network: "BaseNBVPolicy",
+    policy_network: "AttentionNBVPolicy",
     scene_features: torch.Tensor,
     camera_poses: torch.Tensor,
 ) -> torch.Tensor:
-    # AttentionNBVPolicy needs camera extrinsics while legacy policies only need scene features.
-    try:
-        prediction = policy_network(scene_features, camera_poses)
-    except TypeError:
-        prediction = policy_network(scene_features)
+    prediction = policy_network(scene_features, camera_poses)
 
     if isinstance(prediction, list):
         if not prediction:
@@ -149,7 +145,7 @@ def _rollout_single_sample(
     gt_mesh_data: Dict[str, torch.Tensor],
     max_views: int,
     chamfer_loss: ChamferDistance,
-    policy_network: "BaseNBVPolicy" | None,
+    policy_network: "AttentionNBVPolicy" | None,
 ) -> Dict[str, float]:
     current_images = initial_images
     current_camera_poses = initial_camera_poses
@@ -208,7 +204,7 @@ def _rollout_single_sample(
 
 
 def evaluate_nbv_policy(
-    policy_network: "BaseNBVPolicy",
+    policy_network: "AttentionNBVPolicy",
     vggt_wrapper: "MapAnythingWrapper",
     renderer: DifferentiableRenderer,
     test_data: List[Dict],
@@ -255,7 +251,7 @@ def evaluate_nbv_policy(
 
 
 def compare_with_baselines(
-    policy_network: "BaseNBVPolicy",
+    policy_network: "AttentionNBVPolicy",
     vggt_wrapper: "MapAnythingWrapper",
     renderer: DifferentiableRenderer,
     test_data: List[Dict],

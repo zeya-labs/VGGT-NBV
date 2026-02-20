@@ -16,7 +16,7 @@ from lightning_fabric.utilities.apply_func import apply_to_collection
 from pytorch3d.structures import Meshes
 
 if TYPE_CHECKING:
-    from ..models import MapAnythingWrapper, BaseNBVPolicy
+    from ..models import AttentionNBVPolicy, MapAnythingWrapper
 from ..rendering import DifferentiableRenderer
 from .logging import log_step_outputs, resolve_step_output_dir
 from .loss import ReconstructionLoss
@@ -42,7 +42,7 @@ class NBVTrainer(
 
     def __init__(self,
                  vggt_wrapper: MapAnythingWrapper,
-                 policy_network: BaseNBVPolicy,
+                 policy_network: AttentionNBVPolicy,
                  renderer: DifferentiableRenderer,
                  loss_fn: ReconstructionLoss,
                  min_initial_views: Optional[int] = None,

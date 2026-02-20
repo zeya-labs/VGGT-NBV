@@ -5,8 +5,8 @@ defaults:
   - _self_
 
 experiment_name: dataset-house3k
-mode: "test"
-resume_checkpoint: "runs/2026-02-09/18-04-33/checkpoints/nbv-epoch=0065-val/total_loss=0.6380.ckpt"
+mode: "train"
+# resume_checkpoint: "runs/2026-02-09/18-04-33/checkpoints/nbv-epoch=0065-val/total_loss=0.6380.ckpt"
 checkpoint_weights_only: false
 batch_size: 16
 max_meshes: 3000
