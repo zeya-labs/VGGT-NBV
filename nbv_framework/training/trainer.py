@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
+from typing import Any, Dict, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import torch
 import torch.optim as optim

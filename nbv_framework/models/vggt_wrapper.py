@@ -14,18 +14,17 @@ VGGT基础模型封装类
 import torch
 import torch.nn as nn
 from typing import Dict, Union
-import sys
-import os
 
 from loguru import logger
 
-# 添加vggt路径到sys.path
-sys.path.append(os.path.join(os.path.dirname(__file__), '../../vggt'))
-
-from vggt.models.vggt import VGGT
-from vggt.utils.load_fn import load_and_preprocess_images
-from vggt.utils.pose_enc import pose_encoding_to_extri_intri
-from vggt.utils.geometry_torch import unproject_depth_map_to_point_map_torch
+try:
+    from vggt.models.vggt import VGGT
+    from vggt.utils.pose_enc import pose_encoding_to_extri_intri
+    from vggt.utils.geometry_torch import unproject_depth_map_to_point_map_torch
+except ModuleNotFoundError:
+    from vggt.vggt.models.vggt import VGGT  # type: ignore
+    from vggt.vggt.utils.pose_enc import pose_encoding_to_extri_intri  # type: ignore
+    from vggt.vggt.utils.geometry_torch import unproject_depth_map_to_point_map_torch  # type: ignore
 
 
 class VGGTWrapper(nn.Module):
@@ -51,7 +50,7 @@ class VGGTWrapper(nn.Module):
         
         self.device = device
         # 加载预训练的VGGT模型
-        logger.info("Loading VGGT model: %s", model_name)
+        logger.info("Loading VGGT model: {}", model_name)
         self.vggt_model = VGGT.from_pretrained(model_name).to(device)
         
         # 冻结所有参数

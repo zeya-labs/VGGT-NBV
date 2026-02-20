@@ -4,10 +4,9 @@
 
 import torch
 import torch.nn as nn
-from typing import Tuple, Optional, Dict, Union
+from typing import Dict
 import warnings
 
-from loguru import logger
 
 from pytorch3d.structures import Meshes
 from pytorch3d.renderer import (

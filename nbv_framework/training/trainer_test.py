@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import logging
+from loguru import logger
 import math
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -16,7 +16,6 @@ from ..pipeline.step_ops import sample_random_positions
 from ..training.loss import ChamferDistance
 from ..utils.camera_utils import position_to_pose_tensor
 
-logger = logging.getLogger(__name__)
 
 
 class NBVTrainerTestMixin:
@@ -108,7 +107,7 @@ class NBVTrainerTestMixin:
         try:
             import matplotlib.pyplot as plt
         except Exception as exc:
-            logger.warning("Matplotlib not available; skip metrics table image: %s", exc)
+            logger.warning("Matplotlib not available; skip metrics table image: {}", exc)
             return None
 
         display_map = {
@@ -257,8 +256,8 @@ class NBVTrainerTestMixin:
                 self.log(f"test/{name}_random_std", rand_std, prog_bar=False)
 
                 logger.info(
-                    "Test %s (mean ± std) | Model: %.6f ± %.6f (N=%d) | "
-                    "Random: %.6f ± %.6f (N=%d)",
+                    "Test {} (mean ± std) | Model: {:.6f} ± {:.6f} (N={}) | "
+                    "Random: {:.6f} ± {:.6f} (N={})",
                     name,
                     model_mean,
                     model_std,
@@ -273,4 +272,4 @@ class NBVTrainerTestMixin:
                 save_dir=Path(self.log_dir) / "test_metrics",
             )
             if table_path is not None:
-                logger.info("Saved test metrics table to %s", table_path)
+                logger.info("Saved test metrics table to {}", table_path)

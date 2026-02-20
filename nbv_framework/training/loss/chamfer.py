@@ -10,14 +10,12 @@ from geomloss import SamplesLoss
 from mapanything.utils.geometry import apply_log_to_norm
 import trimesh
 
-import sys
-current_dir = os.path.dirname(os.path.abspath(__file__))
-dcd_dir = os.path.join(current_dir, "Density_aware_Chamfer_Distance")
-if dcd_dir not in sys.path:
-    sys.path.append(dcd_dir)
-
 try:
-    from utils_v2.model_utils import calc_dcd, calc_cd, calc_emd  # type: ignore
+    from .Density_aware_Chamfer_Distance.utils_v2.model_utils import (  # type: ignore
+        calc_cd,
+        calc_dcd,
+        calc_emd,
+    )
     _HAS_DCD = True
 except Exception:
     calc_dcd = None  # type: ignore[assignment]

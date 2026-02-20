@@ -3,7 +3,7 @@
 提供统一的数据集创建接口
 """
 
-from typing import Dict, Any, Optional, Type
+from typing import Dict, Any, Type
 from .base_dataset import BaseDataset
 from .house3k_dataset import House3KDataset
 from loguru import logger
@@ -54,9 +54,11 @@ class DatasetFactory:
         Raises:
             ValueError: 如果数据集类型未注册
         """
-        assert dataset_type in cls._dataset_registry, \
-            f"Unknown dataset type: {dataset_type}. " \
-            f"Available types: {list(cls._dataset_registry.keys())}"
+        if dataset_type not in cls._dataset_registry:
+            raise ValueError(
+                f"Unknown dataset type: {dataset_type}. "
+                f"Available types: {list(cls._dataset_registry.keys())}"
+            )
         
         dataset_class = cls._dataset_registry[dataset_type]
         return dataset_class(data_root=data_root, **kwargs)
@@ -79,8 +81,10 @@ class DatasetFactory:
         """
         config = config.copy()
 
-        assert 'type' in config, "Config must contain 'type' field"
-        assert 'data_root' in config, "Config must contain 'data_root' field"
+        if "type" not in config:
+            raise ValueError("Config must contain 'type' field")
+        if "data_root" not in config:
+            raise ValueError("Config must contain 'data_root' field")
 
         dataset_type = config.pop('type')
         return cls.create_dataset(dataset_type, **config)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import logging
+from loguru import logger
 import os
 from typing import Dict, Optional
 
@@ -14,11 +14,18 @@ from ..pipeline.types import (
     PreparedBatch,
 )
 
-logger = logging.getLogger(__name__)
 
 
 def _stage_prefix(trainer) -> str:
     return "train" if trainer.trainer.training else "val"
+
+
+def _log_on_step(trainer) -> bool:
+    return bool(trainer.trainer.training)
+
+
+def _log_on_epoch(trainer) -> bool:
+    return not _log_on_step(trainer)
 
 
 def _prefix_key(prefix: str, key: str) -> str:
@@ -214,13 +221,13 @@ def save_pre_images_grid(
         return
     if initial_images.ndim != 5:
         logger.warning(
-            "Skip pre_images grid: initial_images expected [B, N, C, H, W], got %s",
+            "Skip pre_images grid: initial_images expected [B, N, C, H, W], got {}",
             tuple(initial_images.shape),
         )
         return
     if new_images.ndim != 4:
         logger.warning(
-            "Skip pre_images grid: new_images expected [B, C, H, W], got %s",
+            "Skip pre_images grid: new_images expected [B, C, H, W], got {}",
             tuple(new_images.shape),
         )
         return
@@ -228,14 +235,14 @@ def save_pre_images_grid(
     batch_size, num_views, channels, height, width = initial_images.shape
     if new_images.shape[0] != batch_size:
         logger.warning(
-            "Skip pre_images grid: batch size mismatch initial_images=%d vs new_images=%d",
+            "Skip pre_images grid: batch size mismatch initial_images={} vs new_images={}",
             batch_size,
             new_images.shape[0],
         )
         return
     if tuple(new_images.shape[1:]) != (channels, height, width):
         logger.warning(
-            "Skip pre_images grid: new_images shape %s does not match expected %s",
+            "Skip pre_images grid: new_images shape {} does not match expected {}",
             tuple(new_images.shape),
             (batch_size, channels, height, width),
         )

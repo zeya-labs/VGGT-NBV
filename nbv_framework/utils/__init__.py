@@ -12,7 +12,6 @@ from .mesh_utils import (
     load_and_normalize_mesh_cpu,
     load_meshes_as_batch,
 )
-from .textures import TextureGenerator
 from .visualization import visualize_reconstruction, plot_training_curves
 from .evaluation import evaluate_nbv_policy
 
@@ -31,7 +30,6 @@ __all__ = [
     "load_and_normalize_mesh_to_device",
     "load_and_normalize_mesh_cpu",
     "load_meshes_as_batch",
-    "TextureGenerator",
     "visualize_reconstruction",
     "plot_training_curves",
     "evaluate_nbv_policy",

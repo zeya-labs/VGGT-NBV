@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from loguru import logger
 import os
 from typing import Tuple
 
@@ -9,7 +10,6 @@ from omegaconf import OmegaConf
 from lightning.pytorch import Trainer
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
-from lightning.pytorch.utilities.rank_zero import rank_zero_only
 from lightning.pytorch.profilers.profiler import Profiler
 from lightning.pytorch.strategies import DDPStrategy
 
@@ -20,7 +20,8 @@ from nbv_framework.training.config import NBVExperimentConfig
 from nbv_framework.training.data_module import NBVDataModule
 from nbv_framework.training.loss import ReconstructionLoss
 from nbv_framework.training.trainer import NBVTrainer
-from loguru import logger
+
+
 
 
 def build_lightning_model(cfg: NBVExperimentConfig) -> NBVTrainer:
@@ -49,26 +50,44 @@ def build_lightning_model(cfg: NBVExperimentConfig) -> NBVTrainer:
 def build_trainer(cfg: NBVExperimentConfig, profiler: Profiler = None) -> Trainer:
     """Configure the PyTorch Lightning Trainer from Hydra config."""
     trainer_conf = OmegaConf.to_container(cfg.trainer, resolve=True)  # type: ignore[arg-type]
-    trainer_conf['strategy'] = DDPStrategy(find_unused_parameters=True)
-    callbacks = [
-        # TODO: 在开启val之后开启模型保存回调
-        ModelCheckpoint(
+    trainer_conf["strategy"] = DDPStrategy(find_unused_parameters=True)
+    limit_val_batches = trainer_conf.get("limit_val_batches", 1.0)
+    val_enabled = float(limit_val_batches) != 0.0
+
+    if val_enabled:
+        checkpoint_callback = ModelCheckpoint(
             dirpath=cfg.save_dir,
             filename="nbv-{epoch:04d}-{val/total_loss:.4f}",
             save_top_k=1,
             monitor="val/total_loss",
             mode="min",
             save_last=True,
-        ),
+        )
+    else:
+        logger.info(
+            "Validation disabled (trainer.limit_val_batches={}); "
+            "checkpoint callback will only save last.",
+            limit_val_batches,
+        )
+        checkpoint_callback = ModelCheckpoint(
+            dirpath=cfg.save_dir,
+            filename="nbv-{epoch:04d}",
+            save_top_k=0,
+            save_last=True,
+        )
+
+    callbacks = [
+        checkpoint_callback,
         LearningRateMonitor(logging_interval="epoch"),
     ]
-    logger = None
+    trainer_logger = None
     if cfg.wandb.enabled and str(cfg.wandb.mode).lower() != "disabled":
         wandb_mode = str(cfg.wandb.mode).lower()
-        assert wandb_mode in {"online", "offline"}, f"Unsupported wandb.mode={cfg.wandb.mode!r}"
+        if wandb_mode not in {"online", "offline"}:
+            raise ValueError(f"Unsupported wandb.mode={cfg.wandb.mode!r}")
         os.environ["WANDB_MODE"] = wandb_mode
         os.environ.setdefault("WANDB_DIR", os.path.abspath(cfg.log_dir))
-        logger = WandbLogger(
+        trainer_logger = WandbLogger(
             project=cfg.wandb.project,
             name=cfg.wandb.name,
             save_dir=cfg.log_dir,
@@ -82,7 +101,7 @@ def build_trainer(cfg: NBVExperimentConfig, profiler: Profiler = None) -> Traine
         **trainer_conf,
         "profiler": profiler,
         "default_root_dir": cfg.output_dir,
-        "logger": logger,
+        "logger": trainer_logger,
         "callbacks": callbacks,
     }
     return Trainer(**trainer_kwargs)

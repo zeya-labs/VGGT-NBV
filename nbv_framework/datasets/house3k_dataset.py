@@ -10,7 +10,6 @@ import random
 import torch
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple, Union
-from torch.utils.data import get_worker_info
 from .base_dataset import BaseDataset
 from ..cache.render_cache import RenderCache
 from ..utils.camera_utils import (

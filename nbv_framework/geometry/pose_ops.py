@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import logging
-from typing import Any, Dict, List, Optional, Tuple
+from loguru import logger
+from typing import Any, Dict, List, Tuple
 
 import torch
 from pytorch3d.transforms import quaternion_to_matrix
@@ -16,7 +16,6 @@ from ..utils.camera_utils import position_to_pose_tensor
 from ..utils.mapanything_views import _compute_pose_quats_and_trans_for_across_views_in_ref_view
 
 
-logger = logging.getLogger(__name__)
 
 
 def compute_pose_for_across_views_in_ref_view(

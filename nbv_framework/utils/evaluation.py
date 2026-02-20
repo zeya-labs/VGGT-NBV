@@ -1,419 +1,439 @@
-"""
-评估工具
+"""Evaluation utilities for NBV policy inference."""
 
-用于评估NBV策略的性能和泛化能力。
-"""
+from __future__ import annotations
 
-import torch
-import torch.nn as nn
-import numpy as np
-from typing import Dict, List, Tuple, Optional, TYPE_CHECKING
+from loguru import logger
 import time
+from typing import TYPE_CHECKING, Any, Dict, List
+
+import numpy as np
+import torch
 from tqdm import tqdm
 
 from ..rendering import DifferentiableRenderer
 from ..training.loss import ChamferDistance
+from ..utils.camera_utils import position_to_pose_tensor
 from ..utils.render_utils import render_mesh_views
-from loguru import logger
+
 if TYPE_CHECKING:
-    from ..models import MapAnythingWrapper, BaseNBVPolicy
-
-def evaluate_nbv_policy(policy_network: "BaseNBVPolicy",
-                       vggt_wrapper: "MapAnythingWrapper",
-                       renderer: DifferentiableRenderer,
-                       test_data: List[Dict],
-                       max_views: int = 10,
-                       device: str = "cuda") -> Dict[str, float]:
-    """
-    评估NBV策略在测试数据上的性能
-    
-    Args:
-        policy_network: 训练好的NBV策略网络
-        vggt_wrapper: VGGT包装器
-        renderer: 可微分渲染器
-        test_data: 测试数据列表
-        max_views: 最大视图数量
-        device: 计算设备
-        
-    Returns:
-        evaluation_results: 评估结果字典
-    """
-    policy_network.eval()
-    
-    results = {
-        "reconstruction_quality": [],
-        "coverage_improvement": [],
-        "view_efficiency": [],
-        "inference_time": [],
-        "chamfer_distances": []
-    }
-    
-    chamfer_loss = ChamferDistance()
-    
-    with torch.no_grad():
-        for test_sample in tqdm(test_data, desc="Evaluating NBV Policy"):
-            # 评估单个测试样本
-            sample_results = _evaluate_single_sample(
-                test_sample, policy_network, vggt_wrapper, 
-                renderer, chamfer_loss, max_views, device
-            )
-            
-            # 收集结果
-            for key, value in sample_results.items():
-                if key in results:
-                    results[key].append(value)
-    
-    # 计算平均结果
-    avg_results = {}
-    for key, values in results.items():
-        if values:
-            avg_results[f"avg_{key}"] = np.mean(values)
-            avg_results[f"std_{key}"] = np.std(values)
-    
-    return avg_results
+    from ..models import BaseNBVPolicy, MapAnythingWrapper
 
 
-def _evaluate_single_sample(test_sample: Dict,
-                           policy_network: "BaseNBVPolicy",
-                           vggt_wrapper: "MapAnythingWrapper",
-                           renderer: DifferentiableRenderer,
-                           chamfer_loss: ChamferDistance,
-                           max_views: int,
-                           device: str) -> Dict[str, float]:
-    """评估单个测试样本"""
-    
+
+
+def _move_to_device(value: Any, device: torch.device) -> Any:
+    if torch.is_tensor(value):
+        return value.to(device)
+    if isinstance(value, dict):
+        return {k: _move_to_device(v, device) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_move_to_device(v, device) for v in value]
+    return value
+
+
+def _ensure_batched_images(images: torch.Tensor) -> torch.Tensor:
+    if images.dim() == 4:
+        return images.unsqueeze(0)
+    if images.dim() == 5:
+        return images
+    raise ValueError(f"Expected images with shape [S, 3, H, W] or [B, S, 3, H, W], got {tuple(images.shape)}")
+
+
+def _ensure_batched_camera_poses(camera_poses: torch.Tensor) -> torch.Tensor:
+    if camera_poses.dim() == 2:
+        if camera_poses.shape[-1] != 7:
+            raise ValueError(f"Expected camera pose width 7, got {camera_poses.shape[-1]}")
+        return camera_poses.unsqueeze(0)
+    if camera_poses.dim() == 3 and camera_poses.shape[-1] == 7:
+        return camera_poses
+    raise ValueError(
+        f"Expected camera poses with shape [S, 7] or [B, S, 7], got {tuple(camera_poses.shape)}"
+    )
+
+
+def _extract_scene_features(
+    vggt_wrapper: "MapAnythingWrapper",
+    images: torch.Tensor,
+    camera_poses: torch.Tensor,
+) -> torch.Tensor:
+    result = vggt_wrapper.extract_scene_features(images, camera_poses)
+    if isinstance(result, tuple):
+        return result[0]
+    return result
+
+
+def _predict_next_pose(
+    policy_network: "BaseNBVPolicy",
+    scene_features: torch.Tensor,
+    camera_poses: torch.Tensor,
+) -> torch.Tensor:
+    # AttentionNBVPolicy needs camera extrinsics while legacy policies only need scene features.
+    try:
+        prediction = policy_network(scene_features, camera_poses)
+    except TypeError:
+        prediction = policy_network(scene_features)
+
+    if isinstance(prediction, list):
+        if not prediction:
+            raise ValueError("Policy returned an empty prediction list")
+        prediction = prediction[-1]
+
+    if prediction.dim() == 3:
+        prediction = prediction[:, -1, :]
+
+    if prediction.dim() != 2:
+        raise ValueError(f"Expected policy output shape [B, D], got {tuple(prediction.shape)}")
+
+    if prediction.shape[-1] >= 7:
+        return prediction[:, :7]
+    if prediction.shape[-1] == 3:
+        return position_to_pose_tensor(prediction)
+
+    raise ValueError(f"Unsupported policy output width {prediction.shape[-1]} (expected 3 or >=7)")
+
+
+def _sample_random_pose(batch_size: int, device: torch.device) -> torch.Tensor:
+    direction = torch.randn(batch_size, 3, device=device)
+    direction = direction / direction.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+    radius = torch.empty(batch_size, 1, device=device).uniform_(1.3, 2.0)
+    position = direction * radius
+    return position_to_pose_tensor(position)
+
+
+def _prepare_sample(
+    test_sample: Dict,
+    renderer: DifferentiableRenderer,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor], Any]:
     if "inputs" not in test_sample:
-        raise KeyError("Evaluation expects batch with inputs/targets/mesh namespaces")
+        raise KeyError("Evaluation expects sample with inputs/targets/mesh namespaces")
 
     inputs = test_sample["inputs"]
     targets = test_sample.get("targets", {})
     mesh = test_sample.get("mesh", {})
 
+    camera_poses = _ensure_batched_camera_poses(inputs["camera_poses"])
+    camera_poses = camera_poses.to(device)
+
     initial_images = inputs.get("images")
-    initial_camera_poses = inputs["camera_poses"].to(device)
-    gt_mesh_data = targets["gt_mesh_data"]
+    if initial_images is not None:
+        initial_images = _ensure_batched_images(initial_images).to(device)
+
     mesh_batch = mesh.get("normalized")
     if mesh_batch is not None:
         mesh_batch = mesh_batch.to(device)
 
+    if mesh_batch is None:
+        raise RuntimeError("Evaluation sample does not contain mesh['normalized']; cannot render candidate views.")
+
     if initial_images is None:
-        if mesh_batch is None:
-            raise RuntimeError("Mesh batch missing when rendering initial images.")
         render_out = render_mesh_views(
             renderer=renderer,
             mesh_batch=mesh_batch,
-            camera_poses=initial_camera_poses,
+            camera_poses=camera_poses,
             out_rgb=True,
-            out_points=False,
-            out_mask=False,
-            out_depth=False,
         )
-        initial_images = render_out["rgb"].squeeze(0)
-    else:
-        initial_images = initial_images.to(device)
-    
-    # 记录开始时间
-    start_time = time.time()
-    
-    # 初始重建质量
-    initial_recon = vggt_wrapper.reconstruct_and_evaluate(
-        initial_images.unsqueeze(0),
-        initial_camera_poses.unsqueeze(0),
-    )
-    initial_quality = _compute_reconstruction_quality(initial_recon, gt_mesh_data, chamfer_loss)
-    
-    # 迭代添加视图
+        initial_images = render_out["rgb"]
+
+    gt_mesh_data = _move_to_device(targets.get("gt_mesh_data", {}), device)
+    return initial_images, camera_poses, gt_mesh_data, mesh_batch
+
+
+def _rollout_single_sample(
+    *,
+    vggt_wrapper: "MapAnythingWrapper",
+    renderer: DifferentiableRenderer,
+    initial_images: torch.Tensor,
+    initial_camera_poses: torch.Tensor,
+    mesh_batch,
+    gt_mesh_data: Dict[str, torch.Tensor],
+    max_views: int,
+    chamfer_loss: ChamferDistance,
+    policy_network: "BaseNBVPolicy" | None,
+) -> Dict[str, float]:
     current_images = initial_images
     current_camera_poses = initial_camera_poses
+
+    initial_recon = vggt_wrapper.reconstruct_and_evaluate(current_images, current_camera_poses)
+    initial_quality = _compute_reconstruction_quality(initial_recon)
     quality_progression = [initial_quality]
-    
-    for view_idx in range(max_views):
-        # 提取场景特征
-        scene_features = vggt_wrapper.extract_scene_features(
-            current_images.unsqueeze(0),
-            current_camera_poses.unsqueeze(0),
+
+    start_time = time.time()
+    for _ in range(max_views):
+        if policy_network is None:
+            next_pose = _sample_random_pose(current_camera_poses.shape[0], current_camera_poses.device)
+        else:
+            scene_features = _extract_scene_features(vggt_wrapper, current_images, current_camera_poses)
+            next_pose = _predict_next_pose(policy_network, scene_features, current_camera_poses)
+
+        render_out = render_mesh_views(
+            renderer=renderer,
+            mesh_batch=mesh_batch,
+            camera_poses=next_pose,
+            out_rgb=True,
         )
-        
-        # 预测下一个视角
-        next_pose = policy_network(scene_features)
-        
-        # 渲染新视图
-        if mesh_batch is None:
-            raise RuntimeError("Mesh batch missing in evaluation sample")
-        new_image = renderer(mesh_batch, next_pose, policy_network.output_mode)
-        
-        # 添加新视图
-        current_images = torch.cat([current_images, new_image.squeeze(0)], dim=0)
-        current_camera_poses = torch.cat([current_camera_poses, next_pose.squeeze(0)], dim=0)
-        
-        # 评估新的重建质量
-        updated_recon = vggt_wrapper.reconstruct_and_evaluate(
-            current_images.unsqueeze(0),
-            current_camera_poses.unsqueeze(0),
-        )
-        new_quality = _compute_reconstruction_quality(updated_recon, gt_mesh_data, chamfer_loss)
+        new_images = render_out["rgb"]
+        if new_images.dim() != 5 or new_images.shape[1] != 1:
+            raise ValueError(f"Expected rendered rgb shape [B, 1, 3, H, W], got {tuple(new_images.shape)}")
+
+        current_images = torch.cat([current_images, new_images], dim=1)
+        current_camera_poses = torch.cat([current_camera_poses, next_pose.unsqueeze(1)], dim=1)
+
+        recon = vggt_wrapper.reconstruct_and_evaluate(current_images, current_camera_poses)
+        new_quality = _compute_reconstruction_quality(recon)
         quality_progression.append(new_quality)
-        
-        # 如果质量提升很小，可以提前停止
+
         if len(quality_progression) > 1:
             improvement = quality_progression[-1] - quality_progression[-2]
-            if improvement < 0.001:  # 阈值
+            if improvement < 0.001:
                 break
-    
-    # 记录结束时间
-    end_time = time.time()
-    
-    # 计算评估指标
+
+    elapsed = time.time() - start_time
+    views_used = len(quality_progression) - 1
     final_quality = quality_progression[-1]
     total_improvement = final_quality - initial_quality
-    views_used = len(quality_progression) - 1
-    efficiency = total_improvement / views_used if views_used > 0 else 0
-    inference_time = (end_time - start_time) / views_used if views_used > 0 else 0
-    
-    # 计算Chamfer距离
-    final_recon = vggt_wrapper.reconstruct_and_evaluate(
-        current_images.unsqueeze(0),
-        current_camera_poses.unsqueeze(0),
-    )
+    efficiency = total_improvement / views_used if views_used > 0 else 0.0
+    inference_time = elapsed / views_used if views_used > 0 else 0.0
+
+    final_recon = vggt_wrapper.reconstruct_and_evaluate(current_images, current_camera_poses)
     chamfer_dist = _compute_chamfer_distance(final_recon, gt_mesh_data, chamfer_loss)
-    
+
     return {
-        "reconstruction_quality": final_quality,
-        "coverage_improvement": total_improvement,
-        "view_efficiency": efficiency,
-        "inference_time": inference_time,
-        "chamfer_distances": chamfer_dist
+        "reconstruction_quality": float(final_quality),
+        "coverage_improvement": float(total_improvement),
+        "view_efficiency": float(efficiency),
+        "inference_time": float(inference_time),
+        "chamfer_distances": float(chamfer_dist),
     }
 
 
-def _compute_reconstruction_quality(recon_data: Dict[str, torch.Tensor],
-                                  gt_data: Dict[str, torch.Tensor],
-                                  chamfer_loss: ChamferDistance) -> float:
-    """计算重建质量评分"""
-    world_points = recon_data.get("world_points")
-    world_points_conf = recon_data.get("world_points_conf")
-    
-    if world_points is None or world_points_conf is None:
-        return 0.0
-    
-    # 基于高置信度点的数量和分布
-    high_conf_mask = world_points_conf > 0.5
-    quality_score = high_conf_mask.float().mean().item()
-    
-    return quality_score
+def evaluate_nbv_policy(
+    policy_network: "BaseNBVPolicy",
+    vggt_wrapper: "MapAnythingWrapper",
+    renderer: DifferentiableRenderer,
+    test_data: List[Dict],
+    max_views: int = 10,
+    device: str = "cuda",
+) -> Dict[str, float]:
+    """Evaluate the learned NBV policy on a list of test samples."""
+    target_device = torch.device(device)
+    policy_network.eval()
 
-
-def _compute_chamfer_distance(recon_data: Dict[str, torch.Tensor],
-                            gt_data: Dict[str, torch.Tensor],
-                            chamfer_loss: ChamferDistance) -> float:
-    """计算Chamfer距离"""
-    # 从重建数据中提取点云
-    world_points = recon_data.get("world_points")
-    world_points_conf = recon_data.get("world_points_conf")
-    
-    if world_points is None or world_points_conf is None:
-        return float('inf')
-    
-    # 提取高置信度点
-    high_conf_mask = world_points_conf > 0.5
-    pred_points = world_points[high_conf_mask].view(-1, 3)
-    
-    # GT点云
-    gt_points = gt_data.get("gt_points")
-    if gt_points is None:
-        return float('inf')
-    
-    if len(pred_points) == 0:
-        return float('inf')
-    
-    # 计算Chamfer距离
-    chamfer_dist = chamfer_loss(
-        pred_points.unsqueeze(0),
-        gt_points.unsqueeze(0)
-    )
-    
-    return chamfer_dist.item()
-
-
-def _create_mesh_from_data(mesh_data: Dict) -> 'Meshes':
-    """从mesh数据创建PyTorch3D mesh对象"""
-    # 这里需要根据实际数据格式实现
-    # 暂时返回None，需要具体实现
-    return None
-
-
-def compare_with_baselines(policy_network: "BaseNBVPolicy",
-                          vggt_wrapper: "MapAnythingWrapper",
-                          renderer: DifferentiableRenderer,
-                          test_data: List[Dict],
-                          device: str = "cuda") -> Dict[str, Dict[str, float]]:
-    """
-    与基线方法比较
-    
-    Args:
-        policy_network: 训练好的NBV策略网络
-        vggt_wrapper: VGGT包装器
-        renderer: 可微分渲染器
-        test_data: 测试数据
-        device: 计算设备
-        
-    Returns:
-        comparison_results: 比较结果字典
-    """
-    methods = {
-        "learned_policy": policy_network,
-        "random_sampling": None,
-        "frontier_based": None,
-        "entropy_based": None
-    }
-    
-    results = {}
-    
-    for method_name, method in methods.items():
-        if method_name == "learned_policy":
-            # 使用学习的策略
-            method_results = evaluate_nbv_policy(
-                policy_network, vggt_wrapper, renderer, test_data, device=device
-            )
-        else:
-            # 实现基线方法
-            method_results = _evaluate_baseline_method(
-                method_name, vggt_wrapper, renderer, test_data, device
-            )
-        
-        results[method_name] = method_results
-    
-    return results
-
-
-def _evaluate_baseline_method(method_name: str,
-                            vggt_wrapper: "MapAnythingWrapper",
-                            renderer: DifferentiableRenderer,
-                            test_data: List[Dict],
-                            device: str) -> Dict[str, float]:
-    """评估基线方法"""
-    
     results = {
         "reconstruction_quality": [],
         "coverage_improvement": [],
         "view_efficiency": [],
-        "chamfer_distances": []
+        "inference_time": [],
+        "chamfer_distances": [],
     }
-    
+
     chamfer_loss = ChamferDistance()
-    
+
     with torch.no_grad():
-        for test_sample in tqdm(test_data, desc=f"Evaluating {method_name}"):
-            if method_name == "random_sampling":
-                sample_results = _evaluate_random_sampling(
-                    test_sample, vggt_wrapper, renderer, chamfer_loss, device
-                )
-            elif method_name == "frontier_based":
-                sample_results = _evaluate_frontier_based(
-                    test_sample, vggt_wrapper, renderer, chamfer_loss, device
-                )
-            elif method_name == "entropy_based":
-                sample_results = _evaluate_entropy_based(
-                    test_sample, vggt_wrapper, renderer, chamfer_loss, device
-                )
-            else:
-                continue
-            
-            # 收集结果
+        for test_sample in tqdm(test_data, desc="Evaluating NBV Policy"):
+            initial_images, initial_camera_poses, gt_mesh_data, mesh_batch = _prepare_sample(
+                test_sample,
+                renderer,
+                target_device,
+            )
+            sample_results = _rollout_single_sample(
+                vggt_wrapper=vggt_wrapper,
+                renderer=renderer,
+                initial_images=initial_images,
+                initial_camera_poses=initial_camera_poses,
+                mesh_batch=mesh_batch,
+                gt_mesh_data=gt_mesh_data,
+                max_views=max_views,
+                chamfer_loss=chamfer_loss,
+                policy_network=policy_network,
+            )
             for key, value in sample_results.items():
                 if key in results:
                     results[key].append(value)
-    
-    # 计算平均结果
-    avg_results = {}
+
+    return _summarize_metric_dict(results)
+
+
+def compare_with_baselines(
+    policy_network: "BaseNBVPolicy",
+    vggt_wrapper: "MapAnythingWrapper",
+    renderer: DifferentiableRenderer,
+    test_data: List[Dict],
+    device: str = "cuda",
+    max_views: int = 10,
+) -> Dict[str, Dict[str, float]]:
+    """Compare learned policy with a random-view baseline."""
+    comparison = {
+        "learned_policy": evaluate_nbv_policy(
+            policy_network,
+            vggt_wrapper,
+            renderer,
+            test_data,
+            max_views=max_views,
+            device=device,
+        )
+    }
+
+    random_results = _evaluate_random_baseline(
+        vggt_wrapper=vggt_wrapper,
+        renderer=renderer,
+        test_data=test_data,
+        max_views=max_views,
+        device=device,
+    )
+    comparison["random_sampling"] = random_results
+    return comparison
+
+
+def _evaluate_random_baseline(
+    *,
+    vggt_wrapper: "MapAnythingWrapper",
+    renderer: DifferentiableRenderer,
+    test_data: List[Dict],
+    max_views: int,
+    device: str,
+) -> Dict[str, float]:
+    target_device = torch.device(device)
+    results = {
+        "reconstruction_quality": [],
+        "coverage_improvement": [],
+        "view_efficiency": [],
+        "inference_time": [],
+        "chamfer_distances": [],
+    }
+    chamfer_loss = ChamferDistance()
+
+    with torch.no_grad():
+        for test_sample in tqdm(test_data, desc="Evaluating random baseline"):
+            initial_images, initial_camera_poses, gt_mesh_data, mesh_batch = _prepare_sample(
+                test_sample,
+                renderer,
+                target_device,
+            )
+            sample_results = _rollout_single_sample(
+                vggt_wrapper=vggt_wrapper,
+                renderer=renderer,
+                initial_images=initial_images,
+                initial_camera_poses=initial_camera_poses,
+                mesh_batch=mesh_batch,
+                gt_mesh_data=gt_mesh_data,
+                max_views=max_views,
+                chamfer_loss=chamfer_loss,
+                policy_network=None,
+            )
+            for key, value in sample_results.items():
+                if key in results:
+                    results[key].append(value)
+
+    return _summarize_metric_dict(results)
+
+
+def _compute_reconstruction_quality(recon_data: Dict[str, torch.Tensor]) -> float:
+    world_points_conf = recon_data.get("world_points_conf")
+    if world_points_conf is None or world_points_conf.numel() == 0:
+        return 0.0
+    return float(world_points_conf.float().mean().item())
+
+
+def _compute_chamfer_distance(
+    recon_data: Dict[str, torch.Tensor],
+    gt_data: Dict[str, torch.Tensor],
+    chamfer_loss: ChamferDistance,
+) -> float:
+    world_points = recon_data.get("world_points")
+    world_points_conf = recon_data.get("world_points_conf")
+    gt_points = gt_data.get("gt_points")
+
+    if world_points is None or world_points_conf is None or gt_points is None:
+        return float("inf")
+
+    if world_points.dim() != 5 or world_points_conf.dim() != 4:
+        return float("inf")
+
+    batch_size = world_points.shape[0]
+    pred_points_list: List[torch.Tensor] = []
+    gt_points_list: List[torch.Tensor] = []
+
+    if torch.is_tensor(gt_points):
+        if gt_points.dim() == 2:
+            gt_points_by_batch = [gt_points for _ in range(batch_size)]
+        elif gt_points.dim() == 3:
+            gt_points_by_batch = [gt_points[i] for i in range(min(batch_size, gt_points.shape[0]))]
+        else:
+            return float("inf")
+    elif isinstance(gt_points, list):
+        gt_points_by_batch = [p for p in gt_points if torch.is_tensor(p)]
+    else:
+        return float("inf")
+
+    valid_batch = min(batch_size, len(gt_points_by_batch))
+    for batch_idx in range(valid_batch):
+        conf = world_points_conf[batch_idx]
+        points = world_points[batch_idx]
+        mask = conf > 0.5
+        pred_points = points[mask]
+        if pred_points.numel() == 0:
+            continue
+
+        pred_points_list.append(pred_points.view(-1, 3))
+        gt_points_list.append(gt_points_by_batch[batch_idx].view(-1, 3))
+
+    if not pred_points_list:
+        return float("inf")
+
+    try:
+        distance = chamfer_loss(pred_points_list, gt_points_list)
+        return float(distance.detach().item())
+    except RuntimeError as exc:
+        logger.warning("Failed to compute Chamfer distance during evaluation: {}", exc)
+        return float("inf")
+
+
+def _summarize_metric_dict(results: Dict[str, List[float]]) -> Dict[str, float]:
+    summary: Dict[str, float] = {}
     for key, values in results.items():
-        if values:
-            avg_results[f"avg_{key}"] = np.mean(values)
-            avg_results[f"std_{key}"] = np.std(values)
-    
-    return avg_results
+        if not values:
+            continue
+        array = np.asarray(values, dtype=np.float64)
+        valid = np.isfinite(array)
+        if not np.any(valid):
+            continue
+        summary[f"avg_{key}"] = float(array[valid].mean())
+        summary[f"std_{key}"] = float(array[valid].std())
+    return summary
 
 
-def _evaluate_random_sampling(test_sample: Dict,
-                            vggt_wrapper: "MapAnythingWrapper",
-                            renderer: DifferentiableRenderer,
-                            chamfer_loss: ChamferDistance,
-                            device: str) -> Dict[str, float]:
-    """评估随机采样基线"""
-    # 实现随机采样策略的评估
-    # 这里简化实现
-    return {
-        "reconstruction_quality": 0.3,
-        "coverage_improvement": 0.1,
-        "view_efficiency": 0.01,
-        "chamfer_distances": 0.5
-    }
+def generate_evaluation_report(comparison_results: Dict[str, Dict[str, float]], save_path: str) -> None:
+    """Write a text summary report for comparison results."""
+    with open(save_path, "w", encoding="utf-8") as report_file:
+        report_file.write("NBV Policy Evaluation Report\n")
+        report_file.write("=" * 50 + "\n\n")
 
+        report_file.write("Method Comparison:\n")
+        report_file.write("-" * 30 + "\n")
+        report_file.write(f"{'Method':<20} {'Quality':<12} {'Efficiency':<12} {'Chamfer':<12}\n")
+        report_file.write("-" * 56 + "\n")
 
-def _evaluate_frontier_based(test_sample: Dict,
-                           vggt_wrapper: "MapAnythingWrapper",
-                           renderer: DifferentiableRenderer,
-                           chamfer_loss: ChamferDistance,
-                           device: str) -> Dict[str, float]:
-    """评估基于边界的基线"""
-    # 实现边界探索策略的评估
-    return {
-        "reconstruction_quality": 0.4,
-        "coverage_improvement": 0.15,
-        "view_efficiency": 0.015,
-        "chamfer_distances": 0.4
-    }
-
-
-def _evaluate_entropy_based(test_sample: Dict,
-                          vggt_wrapper: "MapAnythingWrapper",
-                          renderer: DifferentiableRenderer,
-                          chamfer_loss: ChamferDistance,
-                          device: str) -> Dict[str, float]:
-    """评估基于熵的基线"""
-    # 实现熵最小化策略的评估
-    return {
-        "reconstruction_quality": 0.45,
-        "coverage_improvement": 0.18,
-        "view_efficiency": 0.018,
-        "chamfer_distances": 0.35
-    }
-
-
-def generate_evaluation_report(comparison_results: Dict[str, Dict[str, float]],
-                             save_path: str):
-    """
-    生成评估报告
-    
-    Args:
-        comparison_results: 比较结果
-        save_path: 保存路径
-    """
-    with open(save_path, 'w') as f:
-        f.write("NBV Policy Evaluation Report\n")
-        f.write("=" * 50 + "\n\n")
-        
-        # 方法比较表格
-        f.write("Method Comparison:\n")
-        f.write("-" * 30 + "\n")
-        f.write(f"{'Method':<20} {'Quality':<12} {'Efficiency':<12} {'Chamfer':<12}\n")
-        f.write("-" * 56 + "\n")
-        
         for method_name, results in comparison_results.items():
-            quality = results.get("avg_reconstruction_quality", 0)
-            efficiency = results.get("avg_view_efficiency", 0)
-            chamfer = results.get("avg_chamfer_distances", 0)
-            
-            f.write(f"{method_name:<20} {quality:<12.4f} {efficiency:<12.4f} {chamfer:<12.4f}\n")
-        
-        f.write("\n")
-        
-        # 详细结果
-        f.write("Detailed Results:\n")
-        f.write("-" * 20 + "\n")
+            quality = results.get("avg_reconstruction_quality", float("nan"))
+            efficiency = results.get("avg_view_efficiency", float("nan"))
+            chamfer = results.get("avg_chamfer_distances", float("nan"))
+            report_file.write(
+                f"{method_name:<20} {quality:<12.4f} {efficiency:<12.4f} {chamfer:<12.4f}\n"
+            )
+
+        report_file.write("\nDetailed Results:\n")
+        report_file.write("-" * 20 + "\n")
         for method_name, results in comparison_results.items():
-            f.write(f"\n{method_name.upper()}:\n")
+            report_file.write(f"\n{method_name.upper()}:\n")
             for metric, value in results.items():
-                f.write(f"  {metric}: {value:.6f}\n")
-    
-    logger.info("Evaluation report saved to %s", save_path)
+                report_file.write(f"  {metric}: {value:.6f}\n")
+
+    logger.info("Evaluation report saved to {}", save_path)
+
+
+__all__ = [
+    "evaluate_nbv_policy",
+    "compare_with_baselines",
+    "generate_evaluation_report",
+]

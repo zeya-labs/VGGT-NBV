@@ -5,11 +5,13 @@
 
 import os
 from abc import ABC, abstractmethod
-from typing import List, Dict, Optional, Tuple, Union
+from typing import Callable, List, Dict, Optional, Tuple
 import torch
 from torch.utils.data import Dataset
 
 from loguru import logger
+
+from vggt.vggt.utils.load_fn import load_and_preprocess_images
 
 
 class BaseDataset(Dataset, ABC):
@@ -57,7 +59,8 @@ class BaseDataset(Dataset, ABC):
         self.tensor_dtype = tensor_dtype
         self._epoch: int = 0
         
-        assert os.path.exists(data_root), f"数据根目录不存在: {data_root}"
+        if not os.path.exists(data_root):
+            raise ValueError(f"数据根目录不存在: {data_root}")
         
         # 由子类实现具体的数据加载逻辑
         self.data_list = self._load_data_list()
@@ -366,10 +369,6 @@ class BaseDataset(Dataset, ABC):
         """
         加载和预处理图像
         """
-        import sys
-        sys.path.append("vggt/")
-        from vggt.utils.load_fn import load_and_preprocess_images  # type: ignore
-        
         return load_and_preprocess_images(
             image_paths, 
             mode="crop", 

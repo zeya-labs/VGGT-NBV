@@ -5,7 +5,7 @@
 
 import json
 import math
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -469,11 +469,9 @@ def world_points_to_camera_depth(
     # --- 6. 恢复原始形状 ---
     if is_batched_sequence:
         depth_out = depth.view(batch_size, s_dim, height, width, 1)
-        masks_out = valid_masks
     else:
         # [B, H, W, 1]
         depth_out = depth
-        masks_out = valid_masks
 
     return depth_out
 

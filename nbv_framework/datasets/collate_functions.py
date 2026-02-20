@@ -4,7 +4,6 @@
 """
 
 from typing import List, Dict, Any
-import torch
 from pytorch3d.structures import join_meshes_as_batch
 from torch.utils.data.dataloader import default_collate
 

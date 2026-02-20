@@ -105,9 +105,9 @@ def setup_logging(save_dir: str = "logs", rank: int = 0, log_name: str = "train"
     # 这一步很关键：有些库在 setup_logging 之前就创建了 logger
     # 我们不仅要劫持已有的，还要确保 root logger 的传播
     for name in logging.root.manager.loggerDict:
-        l = logging.getLogger(name)
-        l.handlers = []
-        l.propagate = True
+        child_logger = logging.getLogger(name)
+        child_logger.handlers = []
+        child_logger.propagate = True
 
     # 6. 屏蔽第三方库啰嗦的 DEBUG 日志
     # 常见啰嗦的库列表

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import logging
+from loguru import logger
 import math
 import os
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -25,7 +25,6 @@ _DEFAULT_MEAN = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32)
 _DEFAULT_STD = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32)
 
 
-logger = logging.getLogger(__name__)
 
 
 def compute_pinhole_intrinsics(
@@ -245,7 +244,7 @@ def prepare_mapanything_views(
             mesh_path_list = list(mesh_paths)
             if len(mesh_path_list) != batch_size:
                 logger.warning(
-                    "mesh_paths length (%d) does not match batch size (%d); skipping mesh annotations.",
+                    "mesh_paths length ({}) does not match batch size ({}); skipping mesh annotations.",
                     len(mesh_path_list),
                     batch_size,
                 )
@@ -278,7 +277,7 @@ def prepare_mapanything_views(
                     "camera_poses": cam2world,
                     "is_metric_scale": torch.tensor([bool(is_metric_scale)], dtype=torch.bool),
                 }
-                print("mesh_path_value:", mesh_path_value)
+                logger.debug("mesh_path_value: {}", mesh_path_value)
                 if mesh_path_value is not None:
                     view_payload["mesh_path"] = mesh_path_value
                 if depth_cpu is not None:
@@ -288,7 +287,7 @@ def prepare_mapanything_views(
                 torch.save(view_payload, payload_path)
 
         logger.info(
-            "Saved view data for %d batches (%d views each) to %s",
+            "Saved view data for {} batches ({} views each) to {}",
             batch_size,
             num_views,
             save_dir,

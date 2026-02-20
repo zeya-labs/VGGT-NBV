@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-import logging
+from loguru import logger
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -9,7 +9,6 @@ import torch
 from pytorch3d.structures import Meshes, join_meshes_as_batch
 
 
-logger = logging.getLogger(__name__)
 
 
 class RenderCache:
@@ -124,7 +123,7 @@ class RenderCache:
         try:
             item = torch.load(path, map_location="cpu", weights_only=False)
         except Exception:
-            logger.warning("Failed to load render cache: %s", path)
+            logger.warning("Failed to load render cache: {}", path)
             return None
         if not isinstance(item, dict):
             return None

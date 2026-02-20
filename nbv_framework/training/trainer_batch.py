@@ -166,7 +166,7 @@ class NBVTrainerBatchMixin:
         return PreparedBatch(
             initial_images=initial_images,
             camera_poses=camera_poses_batch,
-            depth_z=None,
+            depth_z=depth_z_batch,
             gt_mesh_data=gt_mesh_data,
             trimmed_gt_mesh_data=trimmed_gt_mesh_data,
             mesh_batch=mesh_batch,

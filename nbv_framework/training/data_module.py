@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
 import lightning.pytorch as pl
 from torch.utils.data import DataLoader, Dataset
-from torch.utils.data.distributed import DistributedSampler
 
 from nbv_framework.datasets.data_loaders import create_train_loader, create_val_loader, create_test_loader
 from nbv_framework.datasets.mixed_dataset import MixedDataset
@@ -31,14 +31,15 @@ class NBVDataModule(pl.LightningDataModule):
         self.cfg = cfg
         self.train_dataset: Optional[Dataset] = None
         self.val_dataset: Optional[Dataset] = None
+        self.test_dataset: Optional[Dataset] = None
 
     def setup(self, stage: Optional[str] = None) -> None:
-        if stage == 'fit' or stage is None:
-            print("正在加载训练和验证数据...")
+        if stage == "fit" or stage is None:
+            logger.info("正在加载训练和验证数据...")
             self.train_dataset = self._build_train_dataset()
             self.val_dataset = self._build_val_dataset()
-        if stage == 'test' or stage is None:
-            print("正在加载测试数据...")
+        if stage == "test" or stage is None:
+            logger.info("正在加载测试数据...")
             self.test_dataset = self._build_test_dataset()
 
     def train_dataloader(self) -> DataLoader:
@@ -54,6 +55,8 @@ class NBVDataModule(pl.LightningDataModule):
         )
 
     def val_dataloader(self) -> Optional[DataLoader]:
+        if self.val_dataset is None:
+            return None
         return create_val_loader(
             self.val_dataset,
             batch_size=self.cfg.batch_size,
@@ -61,6 +64,8 @@ class NBVDataModule(pl.LightningDataModule):
         )
 
     def test_dataloader(self) -> Optional[DataLoader]:
+        if self.test_dataset is None:
+            return None
         test_batch_size = int(getattr(self.cfg, "test_batch_size", 1))
         return create_test_loader(
             self.test_dataset,
@@ -79,8 +84,7 @@ class NBVDataModule(pl.LightningDataModule):
         return dataset
 
     def _build_val_dataset(self) -> Optional[Dataset]:
-
-        if  self.cfg.trainer.get("limit_val_batches", 1.0) == 0.0:
+        if self.cfg.trainer.get("limit_val_batches", 1.0) == 0.0:
             logger.info("Validation disabled via trainer.limit_val_batches=0; skipping val dataset.")
             return None
 
@@ -106,14 +110,18 @@ class NBVDataModule(pl.LightningDataModule):
         return dataset
 
     def _house3k_config(self, split: str) -> dict:
-        data_root = (
-            "/mnt/sdb/chenmohan/VGGT-NBV/models/House3K_obj"
-        )
+        raw_root = Path(str(self.cfg.data_root)).expanduser()
+        if raw_root.is_absolute():
+            data_root = raw_root
+        else:
+            repo_root = Path(__file__).resolve().parents[2]
+            data_root = repo_root / raw_root
+
         return {
             "name": "House3KDataset",
             "type": "house3k",
-            "data_root": data_root,
-            "num_initial_views": self.cfg.max_initial_views if split == "train" else self.cfg.max_initial_views,
+            "data_root": str(data_root),
+            "num_initial_views": self.cfg.max_initial_views,
             "image_size": self.cfg.image_size,
             "normalize_method": self.cfg.normalize_method,
             "num_samples": self.cfg.num_samples,

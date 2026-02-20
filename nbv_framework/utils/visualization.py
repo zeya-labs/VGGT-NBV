@@ -7,8 +7,7 @@
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 import os
 
 from loguru import logger
@@ -128,7 +127,7 @@ def visualize_reconstruction(recon_data: Dict[str, torch.Tensor],
     
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        logger.info("Visualization saved to %s", save_path)
+        logger.info("Visualization saved to {}", save_path)
     
     plt.show()
 
@@ -169,7 +168,7 @@ def plot_training_curves(train_losses: List[float],
     
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        logger.info("Training curves saved to %s", save_path)
+        logger.info("Training curves saved to {}", save_path)
     
     plt.show()
 
@@ -242,7 +241,7 @@ def visualize_nbv_strategy(camera_poses: torch.Tensor,
     
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        logger.info("NBV strategy visualization saved to %s", save_path)
+        logger.info("NBV strategy visualization saved to {}", save_path)
     
     plt.show()
 
@@ -292,7 +291,7 @@ def create_training_report(train_losses: List[float],
         improvement = (initial_loss - final_loss) / initial_loss * 100
         f.write(f"Training Loss Improvement: {improvement:.2f}%\n")
     
-    logger.info("Training report saved to %s", save_dir)
+    logger.info("Training report saved to {}", save_dir)
 
 
 def plot_loss_components(loss_history: Dict[str, List[float]],
@@ -332,6 +331,6 @@ def plot_loss_components(loss_history: Dict[str, List[float]],
     
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        logger.info("Loss components plot saved to %s", save_path)
+        logger.info("Loss components plot saved to {}", save_path)
     
     plt.show()

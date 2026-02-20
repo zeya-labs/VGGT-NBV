@@ -1,7 +1,7 @@
 """Utilities for combining multiple datasets into a single deterministic view."""
 
 from bisect import bisect_right
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import torch
 from torch.utils.data import Dataset
@@ -46,7 +46,8 @@ class MixedDataset(Dataset):
             total += dataset_length
             self.cumulative_lengths.append(total)
 
-        assert total > 0, "All configured datasets are empty; MixedDataset has no samples to expose"
+        if total <= 0:
+            raise ValueError("All configured datasets are empty; MixedDataset has no samples to expose")
 
         self.total_length = total
         self._epoch: int = 0
@@ -63,7 +64,8 @@ class MixedDataset(Dataset):
         dataset_idx, sample_idx = self._resolve_indices(idx)
         sample = self.datasets[dataset_idx][sample_idx]
 
-        assert isinstance(sample, dict), "MixedDataset expects child datasets to return dict samples"
+        if not isinstance(sample, dict):
+            raise TypeError("MixedDataset expects child datasets to return dict samples")
 
         meta = sample.setdefault("meta", {})
         meta["source_dataset"] = self.dataset_names[dataset_idx]
@@ -90,8 +92,10 @@ class MixedDataset(Dataset):
             AssertionError: 如果索引超出了数据集的总长度范围。
         """
         adjusted_idx = idx + self.total_length if idx < 0 else idx
-        assert 0 <= adjusted_idx < self.total_length, \
-            f"Index {idx} is out of range for MixedDataset of length {self.total_length}"
+        if not (0 <= adjusted_idx < self.total_length):
+            raise IndexError(
+                f"Index {idx} is out of range for MixedDataset of length {self.total_length}"
+            )
 
         dataset_idx = bisect_right(self.cumulative_lengths, adjusted_idx)
         dataset_start = 0 if dataset_idx == 0 else self.cumulative_lengths[dataset_idx - 1]

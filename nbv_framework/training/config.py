@@ -86,6 +86,7 @@ class NBVExperimentConfig:
     # Storage locations / bookkeeping
     experiment_name: str = "dataset-house3k"
     timestamp: str = ""
+    data_root: str = "models/House3K_obj"
 
     output_dir: str = "./outputs"
     save_dir: str = "${output_dir}/checkpoints"

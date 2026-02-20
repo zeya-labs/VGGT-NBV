@@ -2,7 +2,6 @@
 
 from typing import Dict, Literal, Optional, Tuple, List
 import torch
-from torchvision.utils import save_image
 
 class PointCloudExtractor:
     """Extract predicted point clouds with configurable masking heuristics."""

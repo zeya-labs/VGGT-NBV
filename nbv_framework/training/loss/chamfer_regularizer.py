@@ -1,6 +1,6 @@
 """Chamfer regularizer component."""
 
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, Optional, Tuple
 import torch
 
 from .chamfer import ChamferDistance
