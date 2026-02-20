@@ -17,6 +17,7 @@ from pytorch3d.structures import Meshes
 
 if TYPE_CHECKING:
     from ..models import AttentionNBVPolicy, MapAnythingWrapper
+from ..pipeline.step_ops import evaluate_candidate_pose
 from ..rendering import DifferentiableRenderer
 from .logging import log_step_outputs, resolve_step_output_dir
 from .loss import ReconstructionLoss
@@ -98,12 +99,6 @@ class NBVTrainer(
         self._last_initial_view_indices: Optional[torch.Tensor] = None
         self._last_batch_size: Optional[int] = None
 
-        # Grad stats captured via hooks (avoid keeping autograd graph alive).
-        self._last_predicted_relative_position_grad_norm: Optional[torch.Tensor] = None
-        self._last_next_pose_position_grad_norm: Optional[torch.Tensor] = None
-        self._last_next_pose_quaternion_grad_norm: Optional[torch.Tensor] = None
-        self._last_new_point_maps_grad_norm: Optional[torch.Tensor] = None
-
         # 深度反投影坐标轴符号约定（与渲染器一致）
         self._depth_backproject_xy_signs: Optional[Tuple[int, int]] = (-1,-1)
 
@@ -152,20 +147,23 @@ class NBVTrainer(
             depth_z_batch=prepared.depth_z,
         )
 
-        self._maybe_track_policy_gradients(
+        self._track_policy_gradients(
             policy_inference.predicted_relative_position,
             policy_inference.next_camera_pose,
         )
 
         step_output_dir = resolve_step_output_dir(self)
 
-        policy_eval = self._evaluate_candidate_pose(
+        policy_eval = evaluate_candidate_pose(
+            renderer=self.renderer,
+            loss_fn=self.loss_fn,
             pose=policy_inference.next_camera_pose,
             initial_images=prepared.initial_images,
             camera_poses_batch=prepared.camera_poses,
             gt_mesh_data=prepared.trimmed_gt_mesh_data,
             mesh_batch=prepared.mesh_batch,
             point_cloud_dir=step_output_dir,
+            on_new_point_maps=self._track_new_point_maps_gradients,
         )
 
         total_loss = policy_eval.total_loss
@@ -266,63 +264,6 @@ class NBVTrainer(
             logger=True,
             batch_size=self._get_log_batch_size(),
         )
-
-    def on_after_backward(self) -> None:
-        """Log gradients w.r.t. pose tensors to pinpoint spike sources."""
-        if not self.trainer.training:
-            self._last_predicted_relative_position_grad_norm = None
-            self._last_next_pose_position_grad_norm = None
-            self._last_next_pose_quaternion_grad_norm = None
-            self._last_new_point_maps_grad_norm = None
-            return
-
-        # rel_grad_norm = self._last_predicted_relative_position_grad_norm
-        # if rel_grad_norm is not None:
-        #     self.log(
-        #         "gradients/relative_position_grad_norm",
-        #         rel_grad_norm,
-        #         on_step=True,
-        #         on_epoch=False,
-        #         prog_bar=False,
-        #         logger=True,
-        #     )
-
-        if self._last_new_point_maps_grad_norm is not None:
-            self.log(
-                "gradients/new_point_maps_render_grad_norm",
-                self._last_new_point_maps_grad_norm,
-                on_step=True,
-                on_epoch=False,
-                prog_bar=False,
-                logger=True,
-                batch_size=self._get_log_batch_size(),
-            )
-
-        if self._last_next_pose_position_grad_norm is not None:
-            self.log(
-                "gradients/next_pose_position_grad_norm",
-                self._last_next_pose_position_grad_norm,
-                on_step=True,
-                on_epoch=False,
-                prog_bar=False,
-                logger=True,
-                batch_size=self._get_log_batch_size(),
-            )
-        if self._last_next_pose_quaternion_grad_norm is not None:
-            self.log(
-                "gradients/next_pose_quaternion_grad_norm",
-                self._last_next_pose_quaternion_grad_norm,
-                on_step=True,
-                on_epoch=False,
-                prog_bar=False,
-                logger=True,
-                batch_size=self._get_log_batch_size(),
-            )
-
-        self._last_predicted_relative_position_grad_norm = None
-        self._last_next_pose_position_grad_norm = None
-        self._last_next_pose_quaternion_grad_norm = None
-        self._last_new_point_maps_grad_norm = None
 
     def transfer_batch_to_device(self, batch: Dict[str, Any], device: torch.device, dataloader_idx: int):
 

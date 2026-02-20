@@ -12,7 +12,7 @@ import torch
 import torch.distributed as dist
 
 from ..models.direct_reconstruction import build_recon_from_point_maps
-from ..pipeline.step_ops import sample_random_positions
+from ..pipeline.step_ops import evaluate_candidate_pose, sample_random_positions
 from ..training.loss import ChamferDistance
 from ..utils.camera_utils import position_to_pose_tensor
 
@@ -163,14 +163,15 @@ class NBVTrainerTestMixin:
                 depth_z_batch=prepared.depth_z,
             )
 
-            policy_eval = self._evaluate_candidate_pose(
+            policy_eval = evaluate_candidate_pose(
+                renderer=self.renderer,
+                loss_fn=self.loss_fn,
                 pose=policy_inference.next_camera_pose,
                 initial_images=prepared.initial_images,
                 camera_poses_batch=prepared.camera_poses,
                 gt_mesh_data=prepared.trimmed_gt_mesh_data,
                 mesh_batch=prepared.mesh_batch,
                 point_cloud_dir=None,
-                mesh_paths=prepared.mesh_paths,
             )
 
             combined_images = torch.cat(
@@ -192,14 +193,15 @@ class NBVTrainerTestMixin:
                 loss_fn=self.loss_fn,
             )
             random_pose = position_to_pose_tensor(random_positions)
-            random_eval = self._evaluate_candidate_pose(
+            random_eval = evaluate_candidate_pose(
+                renderer=self.renderer,
+                loss_fn=self.loss_fn,
                 pose=random_pose,
                 initial_images=prepared.initial_images,
                 camera_poses_batch=prepared.camera_poses,
                 gt_mesh_data=prepared.trimmed_gt_mesh_data,
                 mesh_batch=prepared.mesh_batch,
                 point_cloud_dir=None,
-                mesh_paths=prepared.mesh_paths,
             )
             random_combined_images = torch.cat(
                 [prepared.initial_images, random_eval.new_images.unsqueeze(1)], dim=1

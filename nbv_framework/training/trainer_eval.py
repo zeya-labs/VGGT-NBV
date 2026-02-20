@@ -2,12 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Sequence
-
-import torch
-
-from ..pipeline.step_ops import evaluate_candidate_pose
-from ..pipeline.types import PoseEvaluationResult
+from typing import Dict
 
 
 class NBVTrainerEvalMixin:
@@ -40,26 +35,3 @@ class NBVTrainerEvalMixin:
         }
         # loss_dict["num_initial_views"] = float(active_view_count)
         return loss_dict
-
-    def _evaluate_candidate_pose(
-        self,
-        *,
-        pose: torch.Tensor,
-        initial_images: torch.Tensor,
-        camera_poses_batch: torch.Tensor,
-        gt_mesh_data: Dict[str, torch.Tensor],
-        mesh_batch,
-        point_cloud_dir: Optional[str],
-        mesh_paths: Optional[Sequence[Optional[str]]] = None,
-    ) -> PoseEvaluationResult:
-        return evaluate_candidate_pose(
-            renderer=self.renderer,
-            loss_fn=self.loss_fn,
-            pose=pose,
-            initial_images=initial_images,
-            camera_poses_batch=camera_poses_batch,
-            gt_mesh_data=gt_mesh_data,
-            mesh_batch=mesh_batch,
-            point_cloud_dir=point_cloud_dir,
-            on_new_point_maps=self._set_last_new_point_maps_render,
-        )

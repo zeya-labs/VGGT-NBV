@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import torch
 
@@ -73,49 +73,78 @@ class NBVTrainerPolicyMixin:
             predicted_relative_position=predicted_relative_position,
         )
 
-    def _maybe_track_policy_gradients(
+    def _attach_gradient_metric_hooks(
+        self,
+        tensor: Optional[torch.Tensor],
+        metrics: Sequence[Tuple[str, Callable[[torch.Tensor], torch.Tensor]]],
+    ) -> None:
+        trainer = self._trainer
+        if trainer is None or not trainer.training:
+            return
+        if tensor is None or not tensor.requires_grad:
+            return
+
+        batch_size = self._get_log_batch_size()
+
+        def _capture(grad: torch.Tensor) -> torch.Tensor:
+            if grad is None or grad.numel() == 0:
+                return grad
+            detached_grad = grad.detach()
+            for log_key, selector in metrics:
+                selected_grad = selector(detached_grad)
+                if selected_grad is None or selected_grad.numel() == 0:
+                    continue
+                self.log(
+                    log_key,
+                    selected_grad.float().norm(dim=-1).mean(),
+                    on_step=True,
+                    on_epoch=False,
+                    prog_bar=False,
+                    logger=True,
+                    batch_size=batch_size,
+                )
+            return grad
+
+        try:
+            tensor.register_hook(_capture)
+        except RuntimeError:
+            return
+
+    def _track_policy_gradients(
         self,
         predicted_relative_position: torch.Tensor,
         next_camera_pose: torch.Tensor,
     ) -> None:
-        if not self.trainer.training:
-            return
-        try:
-            if predicted_relative_position.requires_grad:
-                def _capture_pred_rel_grad(grad: torch.Tensor) -> torch.Tensor:
-                    if grad is not None:
-                        self._last_predicted_relative_position_grad_norm = (
-                            grad.norm(dim=-1).mean().detach()
-                        )
-                    return grad
-                predicted_relative_position.register_hook(_capture_pred_rel_grad)
+        self._attach_gradient_metric_hooks(
+            predicted_relative_position,
+            (
+                (
+                    "gradients/predicted_relative_position_grad_norm",
+                    lambda grad: grad,
+                ),
+            ),
+        )
+        self._attach_gradient_metric_hooks(
+            next_camera_pose,
+            (
+                (
+                    "gradients/next_pose_position_grad_norm",
+                    lambda grad: grad[:, :3],
+                ),
+                (
+                    "gradients/next_pose_quaternion_grad_norm",
+                    lambda grad: grad[:, 3:],
+                ),
+            ),
+        )
 
-            if next_camera_pose.requires_grad:
-                def _capture_next_pose_grad(grad: torch.Tensor) -> torch.Tensor:
-                    if grad is not None and grad.numel() > 0:
-                        grad = grad.detach()
-                        self._last_next_pose_position_grad_norm = (
-                            grad[:, :3].norm(dim=-1).mean()
-                        )
-                        self._last_next_pose_quaternion_grad_norm = (
-                            grad[:, 3:].norm(dim=-1).mean()
-                        )
-                    return grad
-                next_camera_pose.register_hook(_capture_next_pose_grad)
-        except RuntimeError:
-            self._last_predicted_relative_position_grad_norm = None
-            self._last_next_pose_position_grad_norm = None
-            self._last_next_pose_quaternion_grad_norm = None
-
-    def _set_last_new_point_maps_render(self, value: Optional[torch.Tensor]) -> None:
-        self._last_new_point_maps_grad_norm = None
-        if value is None or not value.requires_grad:
-            return
-        try:
-            def _capture_new_point_maps_grad(grad: torch.Tensor) -> torch.Tensor:
-                if grad is not None and grad.numel() > 0:
-                    self._last_new_point_maps_grad_norm = grad.norm(dim=-1).mean().detach()
-                return grad
-            value.register_hook(_capture_new_point_maps_grad)
-        except RuntimeError:
-            self._last_new_point_maps_grad_norm = None
+    def _track_new_point_maps_gradients(self, value: Optional[torch.Tensor]) -> None:
+        self._attach_gradient_metric_hooks(
+            value,
+            (
+                (
+                    "gradients/new_point_maps_render_grad_norm",
+                    lambda grad: grad,
+                ),
+            ),
+        )
