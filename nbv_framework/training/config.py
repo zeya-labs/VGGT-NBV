@@ -91,8 +91,6 @@ class NBVExperimentConfig:
     output_dir: str = "./outputs"
     save_dir: str = "${output_dir}/checkpoints"
     log_dir: str = "${output_dir}/logs"
-    render_cache_enabled: bool = True
-    render_cache_root: Optional[str] = None
     wandb: WandbConfig = field(default_factory=WandbConfig)
 
     # Device / dtype get resolved at runtime

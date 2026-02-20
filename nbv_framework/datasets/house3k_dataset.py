@@ -11,7 +11,6 @@ import torch
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 from .base_dataset import BaseDataset
-from ..cache.render_cache import RenderCache
 from ..utils.camera_utils import (
     position_to_pose_tensor,
 )
@@ -61,10 +60,6 @@ class House3KDataset(BaseDataset):
         val_ratio: float = 0.2,
         max_meshes: int = None,
         view_sampling_mode: str = "deterministic_per_call",
-        render_cache_enabled: bool = True,
-        render_cache_root: Optional[str] = None,
-        render_cache_version: int = 1,
-        render_cache_signature: Optional[str] = None,
         manual_camera_position: Optional[
             Union[
                 Sequence[float],
@@ -121,11 +116,6 @@ class House3KDataset(BaseDataset):
         self.camera_radius = float(camera_radius)
         self.camera_radius_variation = float(camera_radius_variation)
         self.camera_radius_mode = str(camera_radius_mode).lower()
-        self._render_cache_enabled = bool(render_cache_enabled)
-        self._render_cache_root = Path(render_cache_root) if render_cache_root else None
-        self._render_cache_version = int(render_cache_version)
-        self._render_cache_signature = render_cache_signature
-        self._render_cache = None
 
         # 验证分割比例，允许浮点运算带来的微小负数
         if self.test_ratio < 0:
@@ -150,24 +140,6 @@ class House3KDataset(BaseDataset):
             seed=seed,
             **kwargs
         )
-
-        if self._render_cache_enabled:
-            if self._render_cache_signature is None:
-                self._render_cache_signature = RenderCache.build_signature(
-                    version=self._render_cache_version,
-                    image_size=self.image_size,
-                    fov=60.0,
-                    faces_per_pixel=4,
-                    blur_radius=1e-5,
-                    perspective_correct=False,
-                    cull_backfaces=False,
-                )
-            self._render_cache = RenderCache(
-                renderer=None,
-                root=self._render_cache_root,
-                version=self._render_cache_version,
-                render_signature=self._render_cache_signature,
-            )
     
     def _load_data_list(self) -> List[Dict]:
         """
@@ -387,7 +359,7 @@ class House3KDataset(BaseDataset):
         )
         
         model_name = data_item["model_name"]
-        camera_poses_tensor, camera_poses_list = self._build_camera_poses(
+        camera_poses_tensor, _ = self._build_camera_poses(
             idx,
             data_item,
             model_name,
@@ -398,23 +370,6 @@ class House3KDataset(BaseDataset):
         gt_supervision.pop("original_mesh", None)
         gt_supervision.pop("normalized_mesh", None)
         gt_supervision.pop("mesh_path", None)
-
-        cache_hit = False
-        if self._render_cache is not None:
-            cache_paths = self._render_cache.build_paths(
-                mesh_paths=[mesh_path],
-                normalize_methods=[self.normalize_method],
-                camera_poses_batch=camera_poses_tensor.unsqueeze(0),
-            )
-            if cache_paths:
-                cache_payload = self._render_cache.load_item(
-                    cache_path=cache_paths[0],
-                    base_gt_mesh_data=gt_supervision,
-                )
-                if cache_payload is not None:
-                    _, cached_images, cached_gt_mesh_data = cache_payload
-                    gt_supervision = cached_gt_mesh_data
-                    cache_hit = True
         metadata = {
             "data_item": data_item,
             # "camera_poses_list": camera_poses_list,
@@ -424,14 +379,11 @@ class House3KDataset(BaseDataset):
             "model_name": model_name,
             "normalize_method": gt_supervision.get("normalize_method"),
             "num_samples": gt_supervision.get("num_samples"),
-            "cache_hit": cache_hit,
         }
 
         inputs = {
             "camera_poses": camera_poses_tensor,
         }
-        if cache_hit:
-            inputs["images"] = cached_images
 
         sample = {
             "inputs": inputs,

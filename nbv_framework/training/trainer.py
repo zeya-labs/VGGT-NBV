@@ -6,10 +6,10 @@ NBV策略训练器
 from __future__ import annotations
 
 import math
-from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import torch
+import torch.distributed as dist
 import torch.optim as optim
 from lightning.pytorch import LightningModule
 from lightning_fabric.utilities.apply_func import apply_to_collection
@@ -24,7 +24,6 @@ from .trainer_batch import NBVTrainerBatchMixin
 from .trainer_eval import NBVTrainerEvalMixin
 from .trainer_policy import NBVTrainerPolicyMixin
 from .trainer_test import NBVTrainerTestMixin
-from ..cache.render_cache import RenderCache
 
 
 class NBVTrainer(
@@ -54,9 +53,7 @@ class NBVTrainer(
                  log_dir: str = "runs/nbv_experiment",
                  use_epoch_seed: bool = False,
                  test_chamfer_metrics: Optional[Sequence[str]] = None,
-                 mesh_load_workers: int = 4,
-                 render_cache_enabled: bool = True,
-                 render_cache_root: Optional[str] = None):
+                 mesh_load_workers: int = 4):
         """
         初始化训练器
 
@@ -93,7 +90,6 @@ class NBVTrainer(
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
         self.mesh_load_workers = mesh_load_workers
-        self.render_cache_enabled = bool(render_cache_enabled)
 
         self.min_initial_views = min_initial_views
         self.max_initial_views = max_initial_views
@@ -110,12 +106,6 @@ class NBVTrainer(
 
         # 深度反投影坐标轴符号约定（与渲染器一致）
         self._depth_backproject_xy_signs: Optional[Tuple[int, int]] = (-1,-1)
-
-        if self.render_cache_enabled:
-            root = Path(render_cache_root) if render_cache_root else None
-            self.render_cache = RenderCache(renderer=self.renderer, root=root)
-        else:
-            self.render_cache = None
 
         self.log_freq = 5
 
@@ -233,36 +223,30 @@ class NBVTrainer(
     def on_before_optimizer_step(self, optimizer) -> None:
         """
         在优化器更新参数之前执行。
-        用于监控梯度范数，检测梯度消失或爆炸。
+        仅监控梯度范数；实际裁剪由 Lightning 内部统一执行，避免重复裁剪。
         """
-        clip_val = None
-        clip_algo = "norm"
-        if self.trainer is not None:
-            clip_val = getattr(self.trainer, "gradient_clip_val", None)
-            clip_algo = getattr(self.trainer, "gradient_clip_algorithm", "norm") or "norm"
+        grad_params = [p for p in self.policy_network.parameters() if p.grad is not None]
+        if grad_params:
+            grad_norm_sq = torch.zeros((), device=grad_params[0].grad.device, dtype=torch.float32)
+            num_params = torch.zeros((), device=grad_params[0].grad.device, dtype=torch.float32)
+            for p in grad_params:
+                grad = p.grad.detach()
+                num_params = num_params + float(grad.numel())
+                grad_norm_sq = grad_norm_sq + grad.float().pow(2).sum()
 
-        parameters = list(self.policy_network.parameters())
-        num_params = 0
-        for p in parameters:
-            if p.grad is not None:
-                num_params += p.grad.numel()
-        if clip_val is None or float(clip_val) <= 0:
-            grad_norm = torch.nn.utils.clip_grad_norm_(parameters, max_norm=float("inf"))
-            post_clip_norm = grad_norm
-        else:
-            clip_val_f = float(clip_val)
-            if str(clip_algo).lower() == "value":
-                grad_norm = torch.nn.utils.clip_grad_norm_(parameters, max_norm=float("inf"))
-                torch.nn.utils.clip_grad_value_(parameters, clip_value=clip_val_f)
-                post_clip_norm = torch.nn.utils.clip_grad_norm_(parameters, max_norm=float("inf"))
-            else:
-                grad_norm = torch.nn.utils.clip_grad_norm_(parameters, max_norm=clip_val_f)
-                post_clip_norm = torch.nn.utils.clip_grad_norm_(parameters, max_norm=float("inf"))
+            # DDP 下各 rank 为参数副本；这里先跨卡求和再取均值，得到“单模型等价”范数。
+            if dist.is_available() and dist.is_initialized():
+                dist.all_reduce(grad_norm_sq, op=dist.ReduceOp.SUM)
+                dist.all_reduce(num_params, op=dist.ReduceOp.SUM)
+                world_size = float(dist.get_world_size())
+                grad_norm_sq = grad_norm_sq / world_size
+                num_params = num_params / world_size
 
-        if num_params > 0:
-            grad_rms = grad_norm / math.sqrt(num_params)
+            grad_norm = torch.sqrt(grad_norm_sq)
+            grad_rms = grad_norm / torch.sqrt(num_params.clamp_min(1.0))
         else:
-            grad_rms = torch.tensor(0.0, device=grad_norm.device)
+            grad_norm = torch.zeros((), device=self.device, dtype=torch.float32)
+            grad_rms = grad_norm
 
         self.log(
             "gradients/global_norm",
@@ -282,16 +266,6 @@ class NBVTrainer(
             logger=True,
             batch_size=self._get_log_batch_size(),
         )
-        if clip_val is not None and float(clip_val) > 0:
-            self.log(
-                "gradients/global_norm_post_clip",
-                post_clip_norm,
-                on_step=True,
-                on_epoch=False,
-                prog_bar=False,
-                logger=True,
-                batch_size=self._get_log_batch_size(),
-            )
 
     def on_after_backward(self) -> None:
         """Log gradients w.r.t. pose tensors to pinpoint spike sources."""

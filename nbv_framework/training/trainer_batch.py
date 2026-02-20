@@ -43,13 +43,6 @@ class NBVTrainerBatchMixin:
 
         gt_mesh_data = targets.get("gt_mesh_data", {})
         mesh_paths, normalize_methods = parse_mesh_metadata(meta)
-        cache_paths = None
-        if self.render_cache is not None:
-            cache_paths = self.render_cache.build_paths(
-                mesh_paths=mesh_paths,
-                normalize_methods=normalize_methods,
-                camera_poses_batch=camera_poses_batch,
-            )
 
         mesh_batch = mesh_data.get("normalized")
         if isinstance(mesh_batch, list):
@@ -98,7 +91,6 @@ class NBVTrainerBatchMixin:
                     break
 
         missing_indices = [idx for idx, ready in enumerate(cache_ready) if not ready]
-        rendered = False
         if missing_indices:
             idx_tensor = torch.as_tensor(
                 missing_indices, device=camera_poses_batch.device, dtype=torch.long
@@ -123,8 +115,6 @@ class NBVTrainerBatchMixin:
                 gt_mesh_data=subset_gt_mesh_data,
                 mesh_batch=subset_mesh_batch,
             )
-            rendered = True
-
             initial_images_list = _as_list(initial_images)
             for offset, idx in enumerate(missing_indices):
                 initial_images_list[idx] = subset_initial_images[offset]
@@ -143,15 +133,6 @@ class NBVTrainerBatchMixin:
                 value = gt_mesh_data.get(key)
                 if isinstance(value, list):
                     gt_mesh_data[key] = torch.stack(value, dim=0)
-
-        if rendered and cache_paths and self.render_cache is not None:
-            self.render_cache.save_batch(
-                cache_paths=cache_paths,
-                mesh_batch=mesh_batch,
-                initial_images=initial_images,
-                gt_mesh_data=gt_mesh_data,
-                is_global_zero=getattr(self.trainer, "is_global_zero", True),
-            )
         depth_z_batch = gt_mesh_data.get("depth_z")
 
         initial_images, camera_poses_batch, depth_z_batch, selection, active_view_count = self._select_initial_views(

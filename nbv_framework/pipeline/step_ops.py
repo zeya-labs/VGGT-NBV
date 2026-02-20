@@ -179,7 +179,7 @@ def evaluate_candidate_pose(
         combined_images_batch,
         combined_camera_poses,
         return_components=True,
-        point_cloud_dir=None,
+        point_cloud_dir=point_cloud_dir,
     )
 
     return PoseEvaluationResult(

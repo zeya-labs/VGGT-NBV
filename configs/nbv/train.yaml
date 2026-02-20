@@ -15,7 +15,6 @@ max_epochs: 100
 seed: 42
 view_sampling_mode: "fully_random"
 normalize_method: "unit_sphere"
-render_cache_enabled: false
 
 output_dir: ${hydra:runtime.cwd}/runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
 

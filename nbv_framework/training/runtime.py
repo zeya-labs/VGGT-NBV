@@ -42,8 +42,6 @@ def build_lightning_model(cfg: NBVExperimentConfig) -> NBVTrainer:
         use_epoch_seed=cfg.use_epoch_seed,
         test_chamfer_metrics=getattr(cfg, "test_chamfer_metrics", None),
         mesh_load_workers=cfg.mesh_load_workers,
-        render_cache_enabled=cfg.render_cache_enabled,
-        render_cache_root=cfg.render_cache_root,
     )
 
 
