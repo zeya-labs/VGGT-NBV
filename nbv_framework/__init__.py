@@ -6,10 +6,6 @@
 __version__ = "0.1.0"
 __author__ = "NBV Research Team"
 
-from .models import AttentionNBVPolicy, BaseNBVPolicy, MapAnythingWrapper
-from .rendering import DifferentiableRenderer
-from .training import NBVTrainer
-
 __all__ = [
     "MapAnythingWrapper",
     "BaseNBVPolicy",
@@ -17,3 +13,23 @@ __all__ = [
     "DifferentiableRenderer",
     "NBVTrainer",
 ]
+
+
+def __getattr__(name: str):
+    if name in {"MapAnythingWrapper", "BaseNBVPolicy", "AttentionNBVPolicy"}:
+        from .models import AttentionNBVPolicy, BaseNBVPolicy, MapAnythingWrapper
+
+        return {
+            "MapAnythingWrapper": MapAnythingWrapper,
+            "BaseNBVPolicy": BaseNBVPolicy,
+            "AttentionNBVPolicy": AttentionNBVPolicy,
+        }[name]
+    if name == "DifferentiableRenderer":
+        from .rendering import DifferentiableRenderer
+
+        return DifferentiableRenderer
+    if name == "NBVTrainer":
+        from .training import NBVTrainer
+
+        return NBVTrainer
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

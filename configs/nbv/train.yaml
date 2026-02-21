@@ -15,6 +15,9 @@ max_epochs: 100
 seed: 42
 view_sampling_mode: "fully_random"
 normalize_method: "unit_sphere"
+mapanything_model_name: "facebook/map-anything"
+mapanything_revision: "6f3a25bfbb8fcc799176bb01e9d07dfb49d5416a"
+mapanything_local_files_only: true
 
 output_dir: ${hydra:runtime.cwd}/runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
 
@@ -42,7 +45,7 @@ trainer:
   accelerator: auto
   devices: auto
   # enable_checkpointing: false
-  strategy: auto
+  strategy: ddp_find_unused_parameters_true
   precision: bf16
   sync_batchnorm: true
   benchmark: true

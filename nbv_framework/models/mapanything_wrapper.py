@@ -19,7 +19,10 @@ from loguru import logger
 from mapanything.models import MapAnything
 from uniception.models.info_sharing.base import MultiViewTransformerInput
 
-from ..utils.mapanything_views import prepare_mapanything_views
+from ..utils.mapanything_views import (
+    dump_mapanything_views_for_debug,
+    prepare_mapanything_views,
+)
 
 TensorDict = Dict[str, torch.Tensor]
 PredList = List[TensorDict]
@@ -34,6 +37,8 @@ class MapAnythingWrapper(nn.Module):
     def __init__(
         self,
         model_name: str = "facebook/map-anything",
+        revision: Optional[str] = "6f3a25bfbb8fcc799176bb01e9d07dfb49d5416a",
+        local_files_only: bool = True,
         data_norm_type: str = "dinov2",
         memory_efficient_inference: bool = False,
     ) -> None:
@@ -42,7 +47,13 @@ class MapAnythingWrapper(nn.Module):
         self.memory_efficient_inference = memory_efficient_inference
 
         logger.info(f"Loading MapAnything model: {model_name}")
-        self.base_model: MapAnything = MapAnything.from_pretrained(model_name, revision='6f3a25bfbb8fcc799176bb01e9d07dfb49d5416a', local_files_only=True)
+        from_pretrained_kwargs = {"local_files_only": bool(local_files_only)}
+        if revision is not None:
+            from_pretrained_kwargs["revision"] = revision
+        self.base_model: MapAnything = MapAnything.from_pretrained(
+            model_name,
+            **from_pretrained_kwargs,
+        )
         self.base_model.eval()
         for param in self.base_model.parameters():
             param.requires_grad = False
@@ -74,9 +85,17 @@ class MapAnythingWrapper(nn.Module):
             fov_degrees=effective_fov,
             is_metric_scale=is_metric_scale,
             depth_z=depth_z,
-            save_dir=view_save_dir,
-            mesh_paths=mesh_paths,
         )
+        if view_save_dir is not None:
+            dump_mapanything_views_for_debug(
+                images=images,
+                camera_poses=camera_poses,
+                fov_degrees=effective_fov,
+                is_metric_scale=is_metric_scale,
+                save_dir=view_save_dir,
+                depth_z=depth_z,
+                mesh_paths=mesh_paths,
+            )
         batch_size = normalized.shape[0]
         self._configure_geometric_inputs(
             use_calibration=True,
@@ -132,9 +151,17 @@ class MapAnythingWrapper(nn.Module):
             fov_degrees=effective_fov,
             is_metric_scale=is_metric_scale,
             depth_z=depth_z,
-            save_dir=view_save_dir,
-            mesh_paths=mesh_paths,
         )
+        if view_save_dir is not None:
+            dump_mapanything_views_for_debug(
+                images=images,
+                camera_poses=camera_poses,
+                fov_degrees=effective_fov,
+                is_metric_scale=is_metric_scale,
+                save_dir=view_save_dir,
+                depth_z=depth_z,
+                mesh_paths=mesh_paths,
+            )
         self._configure_geometric_inputs(
             use_calibration=True,
             use_pose=True,

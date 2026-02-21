@@ -142,8 +142,6 @@ def prepare_mapanything_views(
     fov_degrees: float = 60.0,
     is_metric_scale: bool = False,
     depth_z: Optional[torch.Tensor] = None,
-    save_dir: Optional[str] = None,
-    mesh_paths: Optional[Sequence[Optional[str]]] = None,
 ) -> Tuple[List[Dict[str, Any]], torch.Tensor]:
     """验证输入并基于原始分辨率构建 MapAnything 视图描述。"""
     if images.dim() != 5 or images.shape[2] != 3:
@@ -231,66 +229,83 @@ def prepare_mapanything_views(
 
     validated_views = validate_input_views_for_inference(base_views)
     processed_views = preprocess_input_views_for_inference(validated_views)
-    if save_dir is not None:
-        os.makedirs(save_dir, exist_ok=True)
-        images_cpu = images.detach().cpu()
-        poses_cpu = camera_poses.detach().cpu()
-        depth_cpu = depth_z.detach().cpu() if depth_z is not None else None
-
-        batch_size, num_views, _, height, width = images_cpu.shape
-        intrinsics = compute_pinhole_intrinsics(height, width, fov_degrees)
-        mesh_path_list: Optional[List[Optional[str]]] = None
-        if mesh_paths is not None:
-            mesh_path_list = list(mesh_paths)
-            if len(mesh_path_list) != batch_size:
-                logger.warning(
-                    "mesh_paths length ({}) does not match batch size ({}); skipping mesh annotations.",
-                    len(mesh_path_list),
-                    batch_size,
-                )
-                mesh_path_list = None
-
-        for batch_idx in range(batch_size):
-            batch_dir = os.path.join(save_dir, f"batch_{batch_idx:03d}")
-            os.makedirs(batch_dir, exist_ok=True)
-
-            mesh_path_value: Optional[str] = None
-            if mesh_path_list is not None:
-                mesh_entry = mesh_path_list[batch_idx]
-                if mesh_entry is not None:
-                    mesh_path_value = str(mesh_entry)
-
-            for view_idx in range(num_views):
-                raw_img = images_cpu[batch_idx, view_idx]
-                pose_tensor = poses_cpu[batch_idx, view_idx]
-
-                png_img = torch.clamp(raw_img, 0.0, 1.0)
-                png_path = os.path.join(batch_dir, f"image_{view_idx:02d}.png")
-                torchvision.utils.save_image(png_img, png_path)
-
-                img_uint8 = (png_img.permute(1, 2, 0) * 255.0).round().to(torch.uint8)
-                cam2world = pose7d_to_opencv_cam2world_with_official_func(pose_tensor)
-
-                view_payload: Dict[str, Any] = {
-                    "img": img_uint8,
-                    "intrinsics": intrinsics.clone(),
-                    "camera_poses": cam2world,
-                    "is_metric_scale": torch.tensor([bool(is_metric_scale)], dtype=torch.bool),
-                }
-                logger.debug("mesh_path_value: {}", mesh_path_value)
-                if mesh_path_value is not None:
-                    view_payload["mesh_path"] = mesh_path_value
-                if depth_cpu is not None:
-                    view_payload["depth_z"] = depth_cpu[batch_idx, view_idx].contiguous()
-
-                payload_path = os.path.join(batch_dir, f"view_{view_idx:02d}.pt")
-                torch.save(view_payload, payload_path)
-
-        logger.info(
-            "Saved view data for {} batches ({} views each) to {}",
-            batch_size,
-            num_views,
-            save_dir,
-        )
     normalized_stack = torch.stack(normalized_views, dim=1)
     return processed_views, normalized_stack
+
+
+def dump_mapanything_views_for_debug(
+    *,
+    images: torch.Tensor,
+    camera_poses: torch.Tensor,
+    fov_degrees: float,
+    is_metric_scale: bool,
+    save_dir: str,
+    depth_z: Optional[torch.Tensor] = None,
+    mesh_paths: Optional[Sequence[Optional[str]]] = None,
+) -> None:
+    """Dump preprocessed multi-view payloads for debugging and offline inspection."""
+    os.makedirs(save_dir, exist_ok=True)
+
+    depth_to_dump = depth_z
+    if depth_to_dump is not None and depth_to_dump.dim() == 5 and depth_to_dump.shape[-1] == 1:
+        depth_to_dump = depth_to_dump.squeeze(-1)
+
+    images_cpu = images.detach().cpu()
+    poses_cpu = camera_poses.detach().cpu()
+    depth_cpu = depth_to_dump.detach().cpu() if depth_to_dump is not None else None
+
+    batch_size, num_views, _, height, width = images_cpu.shape
+    intrinsics = compute_pinhole_intrinsics(height, width, fov_degrees)
+    mesh_path_list: Optional[List[Optional[str]]] = None
+    if mesh_paths is not None:
+        mesh_path_list = list(mesh_paths)
+        if len(mesh_path_list) != batch_size:
+            logger.warning(
+                "mesh_paths length ({}) does not match batch size ({}); skipping mesh annotations.",
+                len(mesh_path_list),
+                batch_size,
+            )
+            mesh_path_list = None
+
+    for batch_idx in range(batch_size):
+        batch_dir = os.path.join(save_dir, f"batch_{batch_idx:03d}")
+        os.makedirs(batch_dir, exist_ok=True)
+
+        mesh_path_value: Optional[str] = None
+        if mesh_path_list is not None:
+            mesh_entry = mesh_path_list[batch_idx]
+            if mesh_entry is not None:
+                mesh_path_value = str(mesh_entry)
+
+        for view_idx in range(num_views):
+            raw_img = images_cpu[batch_idx, view_idx]
+            pose_tensor = poses_cpu[batch_idx, view_idx]
+
+            png_img = torch.clamp(raw_img, 0.0, 1.0)
+            png_path = os.path.join(batch_dir, f"image_{view_idx:02d}.png")
+            torchvision.utils.save_image(png_img, png_path)
+
+            img_uint8 = (png_img.permute(1, 2, 0) * 255.0).round().to(torch.uint8)
+            cam2world = pose7d_to_opencv_cam2world_with_official_func(pose_tensor)
+
+            view_payload: Dict[str, Any] = {
+                "img": img_uint8,
+                "intrinsics": intrinsics.clone(),
+                "camera_poses": cam2world,
+                "is_metric_scale": torch.tensor([bool(is_metric_scale)], dtype=torch.bool),
+            }
+            logger.debug("mesh_path_value: {}", mesh_path_value)
+            if mesh_path_value is not None:
+                view_payload["mesh_path"] = mesh_path_value
+            if depth_cpu is not None:
+                view_payload["depth_z"] = depth_cpu[batch_idx, view_idx].contiguous()
+
+            payload_path = os.path.join(batch_dir, f"view_{view_idx:02d}.pt")
+            torch.save(view_payload, payload_path)
+
+    logger.info(
+        "Saved view data for {} batches ({} views each) to {}",
+        batch_size,
+        num_views,
+        save_dir,
+    )

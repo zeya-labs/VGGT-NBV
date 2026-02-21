@@ -5,7 +5,6 @@ NBV策略训练器
 
 from __future__ import annotations
 
-import math
 from typing import Any, Dict, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import torch

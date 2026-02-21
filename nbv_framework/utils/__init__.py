@@ -13,7 +13,6 @@ from .mesh_utils import (
     load_meshes_as_batch,
 )
 from .visualization import visualize_reconstruction, plot_training_curves
-from .evaluation import evaluate_nbv_policy
 
 from .coordinate_utils import get_up_vector, get_coordinate_transform_matrix, apply_transform_to_vertices
 from .camera_utils import CameraPoseGenerator, tensor_to_pose_dict, position_to_pose_tensor
@@ -32,7 +31,6 @@ __all__ = [
     "load_meshes_as_batch",
     "visualize_reconstruction",
     "plot_training_curves",
-    "evaluate_nbv_policy",
     "get_up_vector",
     "get_coordinate_transform_matrix", 
     "apply_transform_to_vertices",

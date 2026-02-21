@@ -11,7 +11,6 @@ from lightning.pytorch import Trainer
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.profilers.profiler import Profiler
-from lightning.pytorch.strategies import DDPStrategy
 
 from nbv_framework.models.mapanything_wrapper import MapAnythingWrapper
 from nbv_framework.models.nbv_policy_networks import AttentionNBVPolicy
@@ -48,7 +47,6 @@ def build_lightning_model(cfg: NBVExperimentConfig) -> NBVTrainer:
 def build_trainer(cfg: NBVExperimentConfig, profiler: Profiler = None) -> Trainer:
     """Configure the PyTorch Lightning Trainer from Hydra config."""
     trainer_conf = OmegaConf.to_container(cfg.trainer, resolve=True)  # type: ignore[arg-type]
-    trainer_conf["strategy"] = DDPStrategy(find_unused_parameters=True)
     limit_val_batches = trainer_conf.get("limit_val_batches", 1.0)
     val_enabled = float(limit_val_batches) != 0.0
 
@@ -111,7 +109,9 @@ def _build_components(
     cfg: NBVExperimentConfig,
 ) -> Tuple[MapAnythingWrapper, AttentionNBVPolicy, DifferentiableRenderer, ReconstructionLoss]:
     mapanything = MapAnythingWrapper(
-        model_name="facebook/map-anything",
+        model_name=cfg.mapanything_model_name,
+        revision=cfg.mapanything_revision,
+        local_files_only=cfg.mapanything_local_files_only,
     )
     policy = AttentionNBVPolicy(
         scene_feature_dim=cfg.scene_feature_dim,

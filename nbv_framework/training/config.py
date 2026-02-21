@@ -40,6 +40,9 @@ class NBVExperimentConfig:
     policy_num_heads: int = 4
     policy_num_layers: int = 3
     policy_output_mode: str = "position_only"
+    mapanything_model_name: str = "facebook/map-anything"
+    mapanything_revision: Optional[str] = "6f3a25bfbb8fcc799176bb01e9d07dfb49d5416a"
+    mapanything_local_files_only: bool = True
 
     # Optimizer & trainer controls
     learning_rate: float = 1e-5
