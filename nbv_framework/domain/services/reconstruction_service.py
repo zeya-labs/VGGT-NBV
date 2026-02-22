@@ -11,7 +11,7 @@ from typing import Dict, Optional
 
 import torch
 
-from nbv_framework.infrastructure.utils.camera_utils import world_points_to_camera_depth
+from nbv_framework.domain.geometry.depth_ops import world_points_to_camera_depth
 
 TensorDict = Dict[str, torch.Tensor]
 
@@ -61,6 +61,8 @@ def build_recon_from_point_maps(
     dtype = point_maps.dtype
     camera_poses = camera_poses.to(device=device, dtype=dtype)
 
+    if valid_masks is None:
+        raise ValueError("valid_masks is required and must match point_maps shape [B, S, H, W].")
     if valid_masks.shape[:4] != (batch_size, num_views, height, width):
         raise ValueError(
             "valid_masks must have shape [B, S, H, W] matching point_maps "

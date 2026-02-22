@@ -1,3 +1,5 @@
 """Interfaces layer package."""
 
-__all__ = []
+from .cli.train import main
+
+__all__ = ["main"]

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from nbv_framework.interfaces.train import main
+from nbv_framework.interfaces.cli.train import main
 
 
 if __name__ == "__main__":

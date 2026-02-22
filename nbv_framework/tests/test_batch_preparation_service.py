@@ -2,12 +2,22 @@ from __future__ import annotations
 
 import torch
 
-from nbv_framework.application.services.batch_preparation_service import BatchPreparationService
+from nbv_framework.application.use_cases.batch_preparation_use_case import BatchPreparationUseCase
 
 
 class _NoopRenderer:
     def render_views(self, **kwargs):
         raise AssertionError("render_views should not be called when cache is complete")
+
+
+class _NoopMeshRepository:
+    def load_meshes_as_batch(self, **kwargs):
+        raise AssertionError("load_meshes_as_batch should not be called when mesh cache is complete")
+
+
+class _NoopDepthVisualizer:
+    def normalize_depth_for_visualization(self, depth, valid_masks):
+        raise AssertionError("normalize_depth_for_visualization should not be called when cache is complete")
 
 
 def test_prepare_batch_keeps_tensor_cache_and_selects_views() -> None:
@@ -44,9 +54,10 @@ def test_prepare_batch_keeps_tensor_cache_and_selects_views() -> None:
         ],
     }
 
-    service = BatchPreparationService(
+    service = BatchPreparationUseCase(
         renderer=_NoopRenderer(),
-        dtype=torch.float32,
+        mesh_repository=_NoopMeshRepository(),
+        depth_visualizer=_NoopDepthVisualizer(),
         mesh_load_workers=1,
         min_initial_views=2,
         max_initial_views=2,

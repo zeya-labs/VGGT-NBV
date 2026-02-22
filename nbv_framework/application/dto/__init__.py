@@ -1,4 +1,4 @@
-"""Public contracts for NBV application services."""
+"""Application DTO exports."""
 
 from .batch import NBVBatch, PreparedBatch
 from .evaluation import MetricSummary, PoseEvaluationResult

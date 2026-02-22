@@ -1,4 +1,4 @@
-"""Test metric evaluation service."""
+"""Test metric evaluation use case."""
 
 from __future__ import annotations
 
@@ -6,11 +6,11 @@ from typing import Dict, Optional
 
 import torch
 
-from nbv_framework.domain.models.direct_reconstruction import build_recon_from_point_maps
+from nbv_framework.domain.services.reconstruction_service import build_recon_from_point_maps
 from nbv_framework.application.ports import LossPort, MetricsPort
 
 
-class TestEvaluationService:
+class TestEvaluationUseCase:
     def __init__(self, *, loss: LossPort, metrics: MetricsPort) -> None:
         self.loss = loss
         self.metrics = metrics
@@ -44,3 +44,4 @@ class TestEvaluationService:
             raise RuntimeError("gt_points missing for test metrics")
 
         return self.metrics.compute(pred_points_list, gt_points)
+

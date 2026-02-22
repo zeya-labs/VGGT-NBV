@@ -1,4 +1,4 @@
-"""Application bootstrap helpers."""
+"""Composition root for interface entrypoints."""
 
 from .components import build_lightning_module
 from .datamodule import build_datamodule

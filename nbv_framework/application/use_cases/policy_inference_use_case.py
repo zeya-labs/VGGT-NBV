@@ -1,4 +1,4 @@
-"""Policy inference service."""
+"""Policy inference use case."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from typing import Optional
 
 import torch
 
-from nbv_framework.application.contracts import PolicyInferenceResult
+from nbv_framework.application.dto import PolicyInferenceResult
 from nbv_framework.domain.geometry.pose_ops import (
     compute_policy_pose,
     compute_pose_for_across_views_in_ref_view,
@@ -14,7 +14,7 @@ from nbv_framework.domain.geometry.pose_ops import (
 from nbv_framework.application.ports import PolicyNetworkPort, SceneEncoderPort
 
 
-class PolicyInferenceService:
+class PolicyInferenceUseCase:
     def __init__(
         self,
         *,
@@ -48,3 +48,4 @@ class PolicyInferenceService:
             next_camera_pose=next_camera_pose,
             predicted_relative_position=predicted_relative_position,
         )
+

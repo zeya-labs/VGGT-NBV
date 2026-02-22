@@ -1,4 +1,4 @@
-"""Batch preparation service for NBV train/eval steps."""
+"""Batch preparation use case for NBV train/eval steps."""
 
 from __future__ import annotations
 
@@ -9,15 +9,13 @@ import torch
 if TYPE_CHECKING:
     from pytorch3d.structures import Meshes
 
-from nbv_framework.application.contracts import NBVBatch, PreparedBatch
+from nbv_framework.application.dto import NBVBatch, PreparedBatch
 from nbv_framework.domain.data.batch_utils import parse_mesh_metadata, trim_gt_mesh_data
 from nbv_framework.domain.data.view_selection import select_initial_views
-from nbv_framework.application.ports import RendererPort
-from nbv_framework.infrastructure.utils.camera_utils import normalize_depth_for_visualization
-from nbv_framework.infrastructure.utils.mesh_utils import load_meshes_as_batch
+from nbv_framework.application.ports import DepthVisualizationPort, MeshRepositoryPort, RendererPort
 
 
-class BatchPreparationService:
+class BatchPreparationUseCase:
     """Prepare heterogeneous dataset batches into tensor-ready structures."""
 
     REQUIRED_GT_KEYS = ("gt_point_maps", "gt_valid_masks", "depth_z", "depth_z_viz")
@@ -26,12 +24,16 @@ class BatchPreparationService:
         self,
         *,
         renderer: RendererPort,
+        mesh_repository: MeshRepositoryPort,
+        depth_visualizer: DepthVisualizationPort,
         mesh_load_workers: int,
         min_initial_views: int,
         max_initial_views: int,
         randomize_initial_views: bool,
     ) -> None:
         self.renderer = renderer
+        self.mesh_repository = mesh_repository
+        self.depth_visualizer = depth_visualizer
         self.mesh_load_workers = int(mesh_load_workers)
         self.min_initial_views = int(min_initial_views)
         self.max_initial_views = int(max_initial_views)
@@ -70,7 +72,7 @@ class BatchPreparationService:
 
         mesh_batch = parsed.mesh_batch
         if mesh_batch is None:
-            mesh_batch = load_meshes_as_batch(
+            mesh_batch = self.mesh_repository.load_meshes_as_batch(
                 mesh_paths=parsed.mesh_paths,
                 normalize_methods=parsed.normalize_methods,
                 device=camera_poses_batch.device,
@@ -205,7 +207,10 @@ class BatchPreparationService:
         subset_points = subset_render_out["points"]
         subset_masks = subset_render_out["mask"].to(dtype=torch.bool)
         subset_depth = subset_render_out["depth"]
-        subset_depth_viz = normalize_depth_for_visualization(subset_depth, subset_masks)
+        subset_depth_viz = self.depth_visualizer.normalize_depth_for_visualization(
+            subset_depth,
+            subset_masks,
+        )
 
         initial_images_list = self._as_list(initial_images, batch_size)
         points_list = self._as_list(gt_mesh_data.get("gt_point_maps"), batch_size)
@@ -225,3 +230,4 @@ class BatchPreparationService:
         gt_mesh_data["depth_z"] = torch.stack(depth_list, dim=0)
         gt_mesh_data["depth_z_viz"] = torch.stack(depth_viz_list, dim=0)
         return torch.stack(initial_images_list, dim=0), gt_mesh_data
+

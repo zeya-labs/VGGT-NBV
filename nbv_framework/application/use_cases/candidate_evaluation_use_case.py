@@ -1,4 +1,4 @@
-"""Candidate-pose evaluation service."""
+"""Candidate-pose evaluation use case."""
 
 from __future__ import annotations
 
@@ -6,12 +6,12 @@ from typing import Callable, Dict, Optional
 
 import torch
 
-from nbv_framework.application.contracts import PoseEvaluationResult
-from nbv_framework.domain.models.direct_reconstruction import build_recon_from_point_maps
+from nbv_framework.application.dto import PoseEvaluationResult
+from nbv_framework.domain.services.reconstruction_service import build_recon_from_point_maps
 from nbv_framework.application.ports import LossPort, RendererPort
 
 
-class CandidateEvaluationService:
+class CandidateEvaluationUseCase:
     def __init__(self, *, renderer: RendererPort, loss: LossPort) -> None:
         self.renderer = renderer
         self.loss = loss
@@ -96,3 +96,4 @@ class CandidateEvaluationService:
             gt_mesh_data=updated_gt_mesh_data,
             depth_z=updated_depth_z,
         )
+

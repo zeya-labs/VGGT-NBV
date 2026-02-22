@@ -16,12 +16,12 @@ from nbv_framework.infrastructure.utils.logging_utils import setup_logging
 
 cs = ConfigStore.instance()
 cs.store(name="nbv_schema", node=NBVConfig)
-_CONFIG_PATH = str(Path(__file__).resolve().parents[2] / "configs/nbv")
+_CONFIG_PATH = str(Path(__file__).resolve().parents[3] / "configs/nbv")
 
 
 @hydra.main(config_path=_CONFIG_PATH, config_name="train", version_base="1.3")
 def main(cfg: NBVConfig) -> None:
-    from nbv_framework.bootstrap import (
+    from nbv_framework.interfaces.composition import (
         build_datamodule,
         build_lightning_module,
         build_trainer,

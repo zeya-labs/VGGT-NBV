@@ -7,21 +7,23 @@ from typing import Any
 
 from nbv_framework.infrastructure.adapters import (
     ChamferMetricsAdapter,
+    DepthVisualizationAdapter,
     MapAnythingSceneEncoderAdapter,
+    PyTorch3DMeshRepositoryAdapter,
     PyTorch3DRendererAdapter,
     ReconstructionLossAdapter,
 )
 from nbv_framework.infrastructure.rendering.differentiable_renderer import DifferentiableRenderer
 from nbv_framework.infrastructure.training.lightning_module import LightningNBVModule
 from nbv_framework.infrastructure.training.loss import ReconstructionLoss
-from nbv_framework.domain.models.mapanything_wrapper import MapAnythingWrapper
-from nbv_framework.domain.models.nbv_policy_networks import AttentionNBVPolicy
-from nbv_framework.application.services import (
-    BatchPreparationService,
-    CandidateEvaluationService,
-    PolicyInferenceService,
-    TestEvaluationService,
-    TrainingOrchestrator,
+from nbv_framework.infrastructure.models.policy.attention_policy_network import AttentionNBVPolicy
+from nbv_framework.infrastructure.models.scene_encoder.mapanything_encoder import MapAnythingWrapper
+from nbv_framework.application.use_cases import (
+    BatchPreparationUseCase,
+    CandidateEvaluationUseCase,
+    PolicyInferenceUseCase,
+    TestEvaluationUseCase,
+    TrainingStepUseCase,
 )
 
 
@@ -48,27 +50,29 @@ def build_lightning_module(cfg: Any) -> LightningNBVModule:
         point_cloud_dir_name=getattr(chamfer, "point_cloud_dir_name", "point_clouds"),
     )
 
-    batch_preparation = BatchPreparationService(
+    batch_preparation = BatchPreparationUseCase(
         renderer=renderer_adapter,
+        mesh_repository=PyTorch3DMeshRepositoryAdapter(),
+        depth_visualizer=DepthVisualizationAdapter(),
         mesh_load_workers=cfg.runtime.mesh_load_workers,
         min_initial_views=cfg.data.min_initial_views,
         max_initial_views=cfg.data.max_initial_views,
         randomize_initial_views=cfg.data.randomize_initial_views,
     )
-    policy_inference = PolicyInferenceService(
+    policy_inference = PolicyInferenceUseCase(
         scene_encoder=scene_encoder,
         policy_network=components.policy_network,
     )
-    candidate_evaluation = CandidateEvaluationService(
+    candidate_evaluation = CandidateEvaluationUseCase(
         renderer=renderer_adapter,
         loss=loss_adapter,
     )
-    test_evaluator = TestEvaluationService(
+    test_evaluator = TestEvaluationUseCase(
         loss=loss_adapter,
         metrics=metrics_adapter,
     )
 
-    orchestrator = TrainingOrchestrator(
+    training_step = TrainingStepUseCase(
         batch_preparation=batch_preparation,
         policy_inference=policy_inference,
         candidate_evaluation=candidate_evaluation,
@@ -77,7 +81,7 @@ def build_lightning_module(cfg: Any) -> LightningNBVModule:
     return LightningNBVModule(
         mapanything_module=components.mapanything,
         policy_network=components.policy_network,
-        orchestrator=orchestrator,
+        orchestrator=training_step,
         test_evaluator=test_evaluator,
         learning_rate=cfg.optimization.learning_rate,
         weight_decay=cfg.optimization.weight_decay,

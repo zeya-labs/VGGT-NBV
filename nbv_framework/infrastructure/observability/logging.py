@@ -7,7 +7,7 @@ from typing import Dict, Optional
 
 import torch
 
-from nbv_framework.application.contracts import PolicyInferenceResult, PoseEvaluationResult, PreparedBatch
+from nbv_framework.application.dto import PolicyInferenceResult, PoseEvaluationResult, PreparedBatch
 from .artifacts import save_pre_images_grid
 
 

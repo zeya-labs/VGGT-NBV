@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import torch
 
-from nbv_framework.application.contracts import PolicyInferenceResult, PoseEvaluationResult, PreparedBatch
-from nbv_framework.application.services.training_orchestrator import TrainingOrchestrator
+from nbv_framework.application.dto import PolicyInferenceResult, PoseEvaluationResult, PreparedBatch
+from nbv_framework.application.use_cases.training_step_use_case import TrainingStepUseCase
 
 
 class _BatchPreparation:
@@ -49,7 +49,7 @@ class _CandidateEvaluation:
 
 
 def test_training_orchestrator_builds_loss_dict() -> None:
-    orchestrator = TrainingOrchestrator(
+    orchestrator = TrainingStepUseCase(
         batch_preparation=_BatchPreparation(),
         policy_inference=_PolicyInference(),
         candidate_evaluation=_CandidateEvaluation(),

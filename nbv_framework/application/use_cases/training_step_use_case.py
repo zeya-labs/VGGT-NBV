@@ -1,4 +1,4 @@
-"""Main training orchestration service."""
+"""Main training-step orchestration use case."""
 
 from __future__ import annotations
 
@@ -6,10 +6,10 @@ from typing import Dict, Optional, Tuple
 
 import torch
 
-from nbv_framework.application.contracts import PolicyInferenceResult, PoseEvaluationResult, PreparedBatch
+from nbv_framework.application.dto import PolicyInferenceResult, PoseEvaluationResult, PreparedBatch
 
 
-class TrainingOrchestrator:
+class TrainingStepUseCase:
     def __init__(
         self,
         *,
@@ -66,3 +66,4 @@ class TrainingOrchestrator:
         }
         loss_dict["num_initial_views"] = float(active_view_count)
         return loss_dict
+

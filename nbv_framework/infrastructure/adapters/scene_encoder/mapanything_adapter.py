@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
-from nbv_framework.domain.models.mapanything_wrapper import MapAnythingWrapper
+from nbv_framework.infrastructure.models.scene_encoder.mapanything_encoder import MapAnythingWrapper
 
 
 class MapAnythingSceneEncoderAdapter:

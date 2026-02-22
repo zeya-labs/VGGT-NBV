@@ -12,10 +12,8 @@ from mapanything.utils.geometry import (
     rotation_matrix_to_quaternion,
     transform_pose_using_quats_and_trans_2_to_1,
 )
-from nbv_framework.infrastructure.utils.camera_utils import position_to_pose_tensor
-from nbv_framework.infrastructure.utils.mapanything_views import (
-    _compute_pose_quats_and_trans_for_across_views_in_ref_view,
-)
+from nbv_framework.domain.geometry.camera_pose import position_to_pose_tensor
+from nbv_framework.domain.geometry.relative_pose import compute_relative_pose_quats_and_trans
 
 
 
@@ -29,23 +27,7 @@ def compute_pose_for_across_views_in_ref_view(
     """
     num_views = len(views)
     batch_size_per_view = views[0]["img"].shape[0]
-    device = views[0]["img"].device
-    dtype = views[0]["img"].dtype
-
-    per_sample_cam_input_mask = torch.ones(
-        batch_size_per_view * num_views,
-        dtype=torch.bool,
-        device=device,
-    )
-
-    pose_quats_flat, pose_trans_flat, _ = _compute_pose_quats_and_trans_for_across_views_in_ref_view(
-        views=views,
-        num_views=num_views,
-        device=device,
-        dtype=dtype,
-        batch_size_per_view=batch_size_per_view,
-        per_sample_cam_input_mask=per_sample_cam_input_mask,
-    )
+    pose_quats_flat, pose_trans_flat = compute_relative_pose_quats_and_trans(views)
 
     pose_flat_7d = torch.cat([pose_trans_flat, pose_quats_flat], dim=-1)
     pose_sb7 = pose_flat_7d.view(num_views, batch_size_per_view, 7)
