@@ -11,13 +11,14 @@ __all__ = [
     "BaseNBVPolicy",
     "AttentionNBVPolicy",
     "DifferentiableRenderer",
-    "NBVTrainer",
+    "LightningNBVModule",
+    "NBVConfig",
 ]
 
 
 def __getattr__(name: str):
     if name in {"MapAnythingWrapper", "BaseNBVPolicy", "AttentionNBVPolicy"}:
-        from .models import AttentionNBVPolicy, BaseNBVPolicy, MapAnythingWrapper
+        from .domain.models import AttentionNBVPolicy, BaseNBVPolicy, MapAnythingWrapper
 
         return {
             "MapAnythingWrapper": MapAnythingWrapper,
@@ -25,11 +26,15 @@ def __getattr__(name: str):
             "AttentionNBVPolicy": AttentionNBVPolicy,
         }[name]
     if name == "DifferentiableRenderer":
-        from .rendering import DifferentiableRenderer
+        from .infrastructure.rendering import DifferentiableRenderer
 
         return DifferentiableRenderer
-    if name == "NBVTrainer":
-        from .training import NBVTrainer
+    if name == "LightningNBVModule":
+        from .infrastructure.training import LightningNBVModule
 
-        return NBVTrainer
+        return LightningNBVModule
+    if name == "NBVConfig":
+        from .config import NBVConfig
+
+        return NBVConfig
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

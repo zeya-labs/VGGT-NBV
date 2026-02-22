@@ -4,54 +4,97 @@ defaults:
   - override hydra/hydra_logging: disabled
   - _self_
 
-experiment_name: dataset-house3k
-mode: "train"
-# resume_checkpoint: "runs/2026-02-09/18-04-33/checkpoints/nbv-epoch=0065-val/total_loss=0.6380.ckpt"
-checkpoint_weights_only: false
-batch_size: 16
-max_meshes: 3000
-learning_rate: 1e-5
-max_epochs: 100
-seed: 42
-view_sampling_mode: "fully_random"
-normalize_method: "unit_sphere"
-mapanything_model_name: "facebook/map-anything"
-mapanything_revision: "6f3a25bfbb8fcc799176bb01e9d07dfb49d5416a"
-mapanything_local_files_only: true
+experiment:
+  name: dataset-house3k
+  mode: train
+  resume_checkpoint: null
+  checkpoint_weights_only: false
+  seed: 42
+  output_dir: ${hydra:runtime.cwd}/runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
 
-output_dir: ${hydra:runtime.cwd}/runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+model:
+  scene_feature_dim: 768
+  policy_hidden_dim: 512
+  policy_num_heads: 4
+  policy_num_layers: 3
+  policy_output_mode: position_only
+  mapanything_model_name: facebook/map-anything
+  mapanything_revision: 6f3a25bfbb8fcc799176bb01e9d07dfb49d5416a
+  mapanything_local_files_only: true
+  image_size: 518
+  up_axis: Y
+  pose_outer_radius: 2.0
+  pose_inner_radius: 1.3
+  pose_floor_margin: 1.0
 
-wandb:
-  enabled: true
-  project: nbv-framework
-  entity: null
-  name: ${experiment_name}-${now:%Y%m%d_%H%M%S}
-  group: null
-  tags: []
-  notes: null
-  mode: online
-  log_model: false
+data:
+  data_root: models/House3K_obj
+  batch_size: 16
+  num_workers: 4
+  max_meshes: 3000
+  normalize_method: unit_sphere
+  num_samples: 32768
+  train_ratio: 0.8
+  val_ratio: 0.1
+  train_repeat_factor: 1
+  val_repeat_factor: 1
+  test_repeat_factor: 1
+  test_batch_size: 16
+  test_chamfer_metrics: [geomloss, cd, dcd, emd]
+  min_initial_views: 2
+  max_initial_views: 2
+  randomize_initial_views: false
+  view_sampling_mode: fully_random
+  camera_radius: 1.6
+  camera_radius_variation: 0.0
+  camera_radius_mode: random
+  manual_camera_position:
+    - [-1.093546, 1.648833, -1.686863]
+  manual_camera_look_at: [0.0, 0.0, 0.0]
+  use_manual_camera: false
+
+optimization:
+  learning_rate: 1e-5
+  weight_decay: 0.0
+  max_epochs: 100
+
+runtime:
+  mesh_load_workers: 4
+  use_epoch_seed: false
+  device: null
+  trainer:
+    accelerator: auto
+    devices: auto
+    strategy: ddp_find_unused_parameters_true
+    precision: bf16
+    sync_batchnorm: true
+    benchmark: true
+    max_epochs: ${optimization.max_epochs}
+    accumulate_grad_batches: 1
+    num_sanity_val_steps: 2
+    gradient_clip_val: 1.0
+    limit_val_batches: 1.0
+    log_every_n_steps: 5
+
+observability:
+  save_dir: ${experiment.output_dir}/checkpoints
+  log_dir: ${experiment.output_dir}/logs
+  wandb:
+    enabled: true
+    project: nbv-framework
+    entity: null
+    name: ${experiment.name}-${now:%Y%m%d_%H%M%S}
+    group: null
+    tags: []
+    notes: null
+    mode: online
+    log_model: false
 
 hydra:
   run:
-    dir: ${output_dir}
+    dir: ${experiment.output_dir}
   sweep:
     dir: ${hydra:runtime.cwd}/runs/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
     subdir: ${hydra.job.num}
   job:
     chdir: true
-
-trainer:
-  accelerator: auto
-  devices: auto
-  # enable_checkpointing: false
-  strategy: ddp_find_unused_parameters_true
-  precision: bf16
-  sync_batchnorm: true
-  benchmark: true
-  max_epochs: ${max_epochs}
-  accumulate_grad_batches: 1
-  num_sanity_val_steps: 2
-  gradient_clip_val: 1.0
-  limit_val_batches: 1.0
-  log_every_n_steps: 5
