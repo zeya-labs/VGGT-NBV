@@ -19,6 +19,7 @@ from loguru import logger
 from mapanything.models import MapAnything
 from uniception.models.info_sharing.base import MultiViewTransformerInput
 
+from nbv_framework.domain.services import ReconstructionData
 from nbv_framework.infrastructure.utils.mapanything_views import (
     dump_mapanything_views_for_debug,
     prepare_mapanything_views,
@@ -141,8 +142,8 @@ class MapAnythingWrapper(nn.Module):
         fov_degrees: Optional[float] = None,
         view_save_dir: Optional[str] = None,
         mesh_paths: Optional[Sequence[Optional[str]]] = None,
-    ) -> TensorDict:
-        """运行 MapAnything 前向, 返回与 VGGTWrapper 对齐的关键输出."""
+    ) -> ReconstructionData:
+        """运行 MapAnything 前向, 返回 NBV 训练最小重建数据."""
         effective_fov = self.default_fov_degrees if fov_degrees is None else fov_degrees
         views, normalized = prepare_mapanything_views(
             images,
@@ -179,33 +180,77 @@ class MapAnythingWrapper(nn.Module):
         # 列出 predictions 中的所有键
         # print("predictions keys:", predictions[0].keys())
         # predictions keys: dict_keys(['pts3d', 'pts3d_cam', 'ray_directions', 'depth_along_ray', 'cam_trans', 'cam_quats', 'metric_scaling_factor', 'conf', 'non_ambiguous_mask', 'non_ambiguous_mask_logits'])
-        recon = self._stack_predictions(predictions)
-        return recon
+        return self._to_reconstruction_data(predictions)
 
-    def _stack_predictions(self, predictions: PredList) -> TensorDict:
-        stacked: Dict[str, List[torch.Tensor]] = {}
-        for view_pred in predictions:
-            for key, value in view_pred.items():
+    def _to_reconstruction_data(self, predictions: PredList) -> ReconstructionData:
+        if not predictions:
+            raise ValueError("MapAnything forward returned empty predictions list")
+
+        def _stack_prediction_key(
+            key: str, *, required: bool
+        ) -> Optional[torch.Tensor]:
+            values: List[torch.Tensor] = []
+            for view_idx, view_pred in enumerate(predictions):
+                value = view_pred.get(key)
+                if value is None:
+                    if required:
+                        raise KeyError(
+                            f"MapAnything prediction missing required key `{key}` at view {view_idx}"
+                        )
+                    return None
                 if not torch.is_tensor(value):
-                    continue
-                stacked.setdefault(key, []).append(value)
+                    raise TypeError(
+                        f"MapAnything prediction key `{key}` must be torch.Tensor, got {type(value)}"
+                    )
+                values.append(value)
+            return torch.stack(values, dim=1)
 
-        result: TensorDict = {}
-        for key, values in stacked.items():
-            tensor = torch.stack(values, dim=1)
-            result[key] = tensor
+        world_points = _stack_prediction_key("pts3d", required=True)
+        assert world_points is not None  # for typing
+        if world_points.ndim != 5 or world_points.shape[-1] != 3:
+            raise ValueError(
+                f"world_points must have shape [B, S, H, W, 3], got {tuple(world_points.shape)}"
+            )
 
-        if "pts3d" in result:
-            pts3d = result["pts3d"]
-            result["world_points_from_depth"] = pts3d
-            result["world_points"] = pts3d
-        if "conf" in result:
-            conf = result["conf"]
-            result["depth_conf"] = conf
-            result["world_points_conf"] = conf
-        if "pts3d_cam" in result and "depth" not in result:
-            result["depth"] = result["pts3d_cam"][..., 2:3]
-        return result
+        conf = _stack_prediction_key("conf", required=False)
+
+        mask = _stack_prediction_key("non_ambiguous_mask", required=False)
+        if mask is None:
+            if conf is not None:
+                mask = conf > 1e-5
+            else:
+                mask = torch.ones(
+                    world_points.shape[:-1],
+                    dtype=torch.bool,
+                    device=world_points.device,
+                )
+
+        if mask.ndim == 5 and mask.shape[-1] == 1:
+            mask = mask.squeeze(-1)
+        if mask.shape != world_points.shape[:-1]:
+            raise ValueError(
+                "non_ambiguous_mask shape mismatch with world_points: "
+                f"{tuple(mask.shape)} vs {tuple(world_points.shape[:-1])}"
+            )
+        mask = mask.to(device=world_points.device, dtype=torch.bool)
+
+        if conf is None:
+            conf = mask.to(dtype=world_points.dtype)
+        else:
+            if conf.ndim == 5 and conf.shape[-1] == 1:
+                conf = conf.squeeze(-1)
+            if conf.shape != world_points.shape[:-1]:
+                raise ValueError(
+                    "conf shape mismatch with world_points: "
+                    f"{tuple(conf.shape)} vs {tuple(world_points.shape[:-1])}"
+                )
+            conf = conf.to(device=world_points.device, dtype=world_points.dtype)
+
+        return ReconstructionData(
+            recon_world_points=world_points,
+            recon_conf=conf,
+            recon_mask=mask,
+        )
 
     def forward(
         self,
@@ -218,7 +263,7 @@ class MapAnythingWrapper(nn.Module):
         fov_degrees: Optional[float] = None,
         view_save_dir: Optional[str] = None,
         mesh_paths: Optional[Sequence[Optional[str]]] = None,
-    ) -> Union[torch.Tensor, TensorDict]:
+    ) -> Union[Tuple[torch.Tensor, List[Dict[str, Any]]], ReconstructionData]:
         if mode == "encode":
             return self.extract_scene_features(
                 images,

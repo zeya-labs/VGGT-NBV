@@ -3,6 +3,7 @@
 from typing import Dict, Optional, Tuple
 import torch
 
+from nbv_framework.domain.services import ReconstructionData
 from .chamfer import ChamferDistance
 from .pointcloud_builder import PointCloudExtractor
 
@@ -14,7 +15,6 @@ class ChamferRegularizer:
         self,
         weight: float,
         extractor: PointCloudExtractor,
-        point_source: str = "vggt",
         confidence_threshold: float = 0.0,
         max_points_per_cloud: int = 32768,
         save_point_clouds: bool = True,
@@ -23,7 +23,6 @@ class ChamferRegularizer:
     ) -> None:
         self.weight = weight
         self.extractor = extractor
-        self.point_source = point_source
         self.confidence_threshold = confidence_threshold
 
         self.chamfer = ChamferDistance(
@@ -35,7 +34,7 @@ class ChamferRegularizer:
 
     def __call__(
         self,
-        recon_data: Dict[str, torch.Tensor],
+        recon_data: ReconstructionData,
         gt_data: Dict[str, torch.Tensor],
         combined_images_batch: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
@@ -43,8 +42,6 @@ class ChamferRegularizer:
             recon_data=recon_data,
             combined_images_batch=combined_images_batch,
             confidence_threshold=self.confidence_threshold,
-            source=self.point_source,
-            gt_valid_masks=gt_data["gt_valid_masks"],
         )
 
         gt_points_tensor = gt_data["gt_points"]
@@ -60,7 +57,7 @@ class ChamferRegularizer:
     @torch.no_grad()
     def export_point_clouds(
         self,
-        recon_data: Dict[str, torch.Tensor],
+        recon_data: ReconstructionData,
         gt_data: Dict[str, torch.Tensor],
         combined_images_batch: Optional[torch.Tensor],
         point_cloud_dir: Optional[str],
@@ -79,8 +76,6 @@ class ChamferRegularizer:
             recon_data=recon_data,
             combined_images_batch=combined_images_batch,
             confidence_threshold=self.confidence_threshold,
-            source=self.point_source,
-            gt_valid_masks=gt_data["gt_valid_masks"],
         )
         self.chamfer.export_point_clouds(
             pred_points_list,

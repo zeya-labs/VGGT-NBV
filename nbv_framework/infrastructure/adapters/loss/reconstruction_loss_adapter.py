@@ -6,6 +6,7 @@ from typing import Dict, Optional, Tuple
 
 import torch
 
+from nbv_framework.domain.services import ReconstructionData
 from nbv_framework.infrastructure.training.loss import ReconstructionLoss
 
 
@@ -15,7 +16,7 @@ class ReconstructionLossAdapter:
 
     def compute_loss(
         self,
-        recon_data: Dict[str, torch.Tensor],
+        recon_data: ReconstructionData,
         gt_data: Dict[str, torch.Tensor],
         combined_images_batch: Optional[torch.Tensor],
         combined_camera_poses: Optional[torch.Tensor],
@@ -30,7 +31,7 @@ class ReconstructionLossAdapter:
 
     def export_point_clouds(
         self,
-        recon_data: Dict[str, torch.Tensor],
+        recon_data: ReconstructionData,
         gt_data: Dict[str, torch.Tensor],
         combined_images_batch: Optional[torch.Tensor],
         *,
@@ -47,7 +48,7 @@ class ReconstructionLossAdapter:
 
     def extract_pred_points(
         self,
-        recon_data: Dict[str, torch.Tensor],
+        recon_data: ReconstructionData,
         gt_data: Dict[str, torch.Tensor],
         combined_images_batch: Optional[torch.Tensor],
     ):
@@ -56,8 +57,6 @@ class ReconstructionLossAdapter:
             recon_data=recon_data,
             combined_images_batch=combined_images_batch,
             confidence_threshold=chamfer_reg.confidence_threshold,
-            source=chamfer_reg.point_source,
-            gt_valid_masks=gt_data.get("gt_valid_masks"),
         )
         gt_points = gt_data.get("gt_points")
         return pred_points_list, gt_points

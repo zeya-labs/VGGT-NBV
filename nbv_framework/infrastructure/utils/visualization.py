@@ -7,13 +7,15 @@
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 import os
 
 from loguru import logger
 
+from nbv_framework.domain.services import ReconstructionData
 
-def visualize_reconstruction(recon_data: Dict[str, torch.Tensor],
+
+def visualize_reconstruction(recon_data: Union[Dict[str, torch.Tensor], ReconstructionData],
                            save_path: Optional[str] = None,
                            show_confidence: bool = True):
     """
@@ -27,10 +29,16 @@ def visualize_reconstruction(recon_data: Dict[str, torch.Tensor],
     fig = plt.figure(figsize=(15, 10))
     
     # 提取数据
-    world_points = recon_data.get("world_points")  # [B, S, H, W, 3]
-    world_points_conf = recon_data.get("world_points_conf")  # [B, S, H, W]
-    depth = recon_data.get("depth")  # [B, S, H, W, 1]
-    images = recon_data.get("images")  # [B, S, 3, H, W]
+    if isinstance(recon_data, ReconstructionData):
+        world_points = recon_data.recon_world_points  # [B, S, H, W, 3]
+        world_points_conf = recon_data.recon_conf  # [B, S, H, W]
+        depth = None
+        images = None
+    else:
+        world_points = recon_data.get("world_points")  # [B, S, H, W, 3]
+        world_points_conf = recon_data.get("world_points_conf")  # [B, S, H, W]
+        depth = recon_data.get("depth")  # [B, S, H, W, 1]
+        images = recon_data.get("images")  # [B, S, 3, H, W]
     
     if world_points is None:
         logger.warning("No world points available for visualization")

@@ -1,65 +1,40 @@
 """
 Simplified reconstruction helper that bypasses MapAnything.
 
-直接利用已有的世界坐标点云(如 new_point_maps)和相机位姿构建与
-``MapAnythingWrapper.reconstruct_and_evaluate`` 对齐的 recon 字典。
+直接利用已有的世界坐标点云(如 new_point_maps)构建训练所需的最小重建结果。
 """
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from dataclasses import dataclass
+from typing import Optional
 
 import torch
 
-from nbv_framework.domain.geometry.depth_ops import world_points_to_camera_depth
 
-TensorDict = Dict[str, torch.Tensor]
+@dataclass(frozen=True)
+class ReconstructionData:
+    """Minimal reconstruction tensors consumed by NBV loss stack."""
+
+    recon_world_points: torch.Tensor
+    recon_conf: torch.Tensor
+    recon_mask: torch.Tensor
 
 
 def build_recon_from_point_maps(
     point_maps: torch.Tensor,
-    camera_poses: torch.Tensor,
     *,
     valid_masks: Optional[torch.Tensor] = None,
-    depth_z: Optional[torch.Tensor] = None,
-) -> TensorDict:
-    """
-    使用预先获得的点云直接拼装重建结果, 不经过 MapAnything 前向。
-
-    Args:
-        point_maps: [B, S, H, W, 3] 世界坐标点云。
-        camera_poses: [B, S, 7] 的相机位姿 (position xyz + quaternion qx,qy,qz,qw)。
-        valid_masks: 可选的有效像素掩码, [B, S, H, W], 用作 non_ambiguous_mask。
-        depth_z: 可选的深度张量, 若为空则由 point_maps 和 camera_poses 计算。
-
-    Returns:
-        recon 字典, 仅包含训练下游所需的关键字段:
-        - world_points: 世界坐标点云 [B, S, H, W, 3]
-        - cam_trans: 相机平移 [B, S, 3]
-        - cam_quats: 相机旋转四元数 [B, S, 4]
-        - non_ambiguous_mask: 有效区域掩码 [B, S, H, W]
-        - depth: 相机坐标系下的 Z 深度 [B, S, H, W, 1]
-    """
+) -> ReconstructionData:
+    """构建最小重建数据: 世界点云 + 置信度 + 有效掩码。"""
     if point_maps.ndim != 5 or point_maps.shape[-1] != 3:
         raise ValueError(
             f"point_maps must have shape [B, S, H, W, 3], but got {tuple(point_maps.shape)}"
         )
 
-    if camera_poses.ndim != 3 or camera_poses.shape[-1] != 7:
-        raise ValueError(
-            f"camera_poses must have shape [B, S, 7] (or [B, 7] before unsqueeze), got {tuple(camera_poses.shape)}"
-        )
-
     batch_size, num_views, height, width, _ = point_maps.shape
-    if camera_poses.shape[0] != batch_size or camera_poses.shape[1] != num_views:
-        raise ValueError(
-            "Batch/view dimensions of camera_poses must match point_maps "
-            f"({camera_poses.shape[:2]} vs {(batch_size, num_views)})"
-        )
-
     device = point_maps.device
     dtype = point_maps.dtype
-    camera_poses = camera_poses.to(device=device, dtype=dtype)
 
     if valid_masks is None:
         raise ValueError("valid_masks is required and must match point_maps shape [B, S, H, W].")
@@ -70,36 +45,12 @@ def build_recon_from_point_maps(
         )
     masks = valid_masks.to(device=device, dtype=torch.bool)
 
-    if depth_z is None:
-        depth = world_points_to_camera_depth(
-            point_maps,
-            camera_poses,
-            valid_masks=masks,
-        )
-    else:
-        depth = depth_z
-        if depth.dim() == 4:
-            depth = depth.unsqueeze(-1)
-        if depth.shape[:4] != (batch_size, num_views, height, width):
-            raise ValueError(
-                "depth_z must align with point_maps spatial dimensions "
-                f"({depth.shape} vs {(batch_size, num_views, height, width)})"
-            )
-        depth = depth.to(device=device, dtype=dtype)
-
     conf = masks.to(device=device, dtype=point_maps.dtype)
-
-    recon: TensorDict = {
-        "world_points": point_maps.to(dtype=dtype),
-        "cam_trans": camera_poses[..., :3].contiguous(),
-        "cam_quats": camera_poses[..., 3:].contiguous(),
-        "non_ambiguous_mask": masks,
-        "depth": depth,
-        "conf": conf,
-        "world_points_conf": conf,
-        "depth_conf": conf,
-    }
-    return recon
+    return ReconstructionData(
+        recon_world_points=point_maps.to(dtype=dtype),
+        recon_conf=conf,
+        recon_mask=masks,
+    )
 
 
-__all__ = ["build_recon_from_point_maps"]
+__all__ = ["ReconstructionData", "build_recon_from_point_maps"]

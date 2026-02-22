@@ -1,8 +1,10 @@
 """Confidence regularization helper."""
 
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
+
+from nbv_framework.domain.services import ReconstructionData
 
 
 class ConfidenceRegularizer:
@@ -13,7 +15,7 @@ class ConfidenceRegularizer:
 
     def __call__(
         self,
-        recon_data: Dict[str, torch.Tensor],
+        recon_data: ReconstructionData,
         device: torch.device,
         dtype: torch.dtype,
         confidence_mask: Optional[torch.Tensor] = None,
@@ -22,14 +24,12 @@ class ConfidenceRegularizer:
         if self.weight <= 0:
             return zero, zero
 
-        world_points_conf = recon_data.get("world_points_conf")
-        if world_points_conf is None:
-            return zero, zero
+        world_points_conf = recon_data.recon_conf
 
         if confidence_mask is not None:
             if confidence_mask.shape != world_points_conf.shape:
                 raise ValueError(
-                    "confidence_mask shape {confidence_mask.shape} does not match "
+                    f"confidence_mask shape {confidence_mask.shape} does not match "
                     f"world_points_conf shape {world_points_conf.shape}"
                 )
             mask = confidence_mask.to(

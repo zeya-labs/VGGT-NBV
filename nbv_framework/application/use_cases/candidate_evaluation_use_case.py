@@ -69,9 +69,7 @@ class CandidateEvaluationUseCase:
 
         recon_data = build_recon_from_point_maps(
             point_maps=updated_point_maps,
-            camera_poses=combined_camera_poses,
             valid_masks=updated_valid_masks,
-            depth_z=updated_depth_z,
         )
 
         total_loss, loss_components = self.loss.compute_loss(
@@ -96,4 +94,3 @@ class CandidateEvaluationUseCase:
             gt_mesh_data=updated_gt_mesh_data,
             depth_z=updated_depth_z,
         )
-

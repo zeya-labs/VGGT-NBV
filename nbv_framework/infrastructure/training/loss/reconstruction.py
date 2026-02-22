@@ -3,6 +3,7 @@ from typing import Dict, Optional, Tuple, TYPE_CHECKING, Union
 import torch
 import torch.nn as nn
 
+from nbv_framework.domain.services import ReconstructionData
 from .chamfer_regularizer import ChamferRegularizer
 from .confidence_regularizer import ConfidenceRegularizer
 from .pointcloud_builder import PointCloudExtractor
@@ -27,7 +28,6 @@ class ReconstructionLoss(nn.Module):
         save_point_clouds: bool = True,
         point_cloud_dir_name: str = "point_clouds",
         max_points_per_cloud: int = 32768,
-        point_source: str = "vggt",
         confidence_threshold: float = 0.0, # 百分之
         black_pixel_threshold: float = 0.1,
         pose_outer_radius: float = 2.0,
@@ -39,15 +39,10 @@ class ReconstructionLoss(nn.Module):
 
         self.renderer = renderer
 
-        normalized_source = point_source.lower()
-        if normalized_source not in {"vggt", "depth"}:
-            raise ValueError("point_source must be either 'vggt' or 'depth'.")
-
         extractor = PointCloudExtractor(black_threshold=black_pixel_threshold)
         self.chamfer_regularizer = ChamferRegularizer(
             weight=chamfer_weight,
             extractor=extractor,
-            point_source=normalized_source,
             confidence_threshold=confidence_threshold,
             max_points_per_cloud=max_points_per_cloud,
             save_point_clouds=save_point_clouds,
@@ -89,7 +84,7 @@ class ReconstructionLoss(nn.Module):
 
     def forward(
         self,
-        recon_data: Dict[str, torch.Tensor],
+        recon_data: ReconstructionData,
         gt_data: Dict[str, torch.Tensor],
         combined_images_batch: Optional[torch.Tensor],
         combined_camera_poses: Optional[torch.Tensor],
@@ -193,7 +188,7 @@ class ReconstructionLoss(nn.Module):
     @torch.no_grad()
     def export_point_clouds(
         self,
-        recon_data: Dict[str, torch.Tensor],
+        recon_data: ReconstructionData,
         gt_data: Dict[str, torch.Tensor],
         combined_images_batch: Optional[torch.Tensor],
         *,
