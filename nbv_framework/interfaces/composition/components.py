@@ -66,6 +66,7 @@ def build_lightning_module(cfg: Any) -> LightningNBVModule:
     candidate_evaluation = CandidateEvaluationUseCase(
         renderer=renderer_adapter,
         loss=loss_adapter,
+        scene_encoder=scene_encoder,
     )
     test_evaluator = TestEvaluationUseCase(
         loss=loss_adapter,

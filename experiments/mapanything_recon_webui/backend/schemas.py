@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -53,6 +53,7 @@ class ReconstructRequest(BaseModel):
     conf_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
     max_points: int = Field(default=300000, ge=1000, le=2000000)
     use_depth_input: bool = True
+    display_mode: Literal["both", "gt_only", "recon_only"] = "both"
 
 
 class ReconstructResponse(BaseModel):
@@ -60,6 +61,9 @@ class ReconstructResponse(BaseModel):
     ply_url: str
     num_points: int
     num_points_before_sampling: int
+    num_points_gt: int
+    num_points_recon: int
+    display_mode: Literal["both", "gt_only", "recon_only"]
     used_depth_input: bool
     created_at: str
     timings: Dict[str, float]

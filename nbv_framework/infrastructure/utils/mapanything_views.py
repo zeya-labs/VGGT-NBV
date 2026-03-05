@@ -15,6 +15,7 @@ from mapanything.utils.inference import (
     validate_input_views_for_inference,
 )
 from mapanything.utils.geometry import (
+    quaternion_to_rotation_matrix,
     transform_pose_using_quats_and_trans_2_to_1,
 )
 from pytorch3d.renderer.cameras import PerspectiveCameras
@@ -108,6 +109,109 @@ def pose7d_to_opencv_cam2world_with_official_func(
         cam2world = cam2world.squeeze(0)
 
     return cam2world.to(dtype=output_dtype)
+
+
+def transform_points_ref0_to_global(
+    points_ref: torch.Tensor,
+    ref0_quat_xyzw: torch.Tensor,
+    ref0_trans: torch.Tensor,
+) -> torch.Tensor:
+    """Transform points from ref-view0 frame to global world frame.
+
+    Args:
+        points_ref: Tensor of shape [B, ..., 3].
+        ref0_quat_xyzw: Tensor of shape [B, 4], quaternion in XYZW order.
+        ref0_trans: Tensor of shape [B, 3], translation in world frame.
+
+    Returns:
+        Tensor with the same shape as ``points_ref`` in global world frame.
+    """
+    if not torch.is_tensor(points_ref):
+        raise TypeError(f"points_ref must be torch.Tensor, got {type(points_ref)}")
+    if points_ref.ndim < 2 or points_ref.shape[-1] != 3:
+        raise ValueError(
+            "points_ref must have shape [B, ..., 3], "
+            f"got {tuple(points_ref.shape)}"
+        )
+    if not torch.is_tensor(ref0_quat_xyzw):
+        raise TypeError(
+            f"ref0_quat_xyzw must be torch.Tensor, got {type(ref0_quat_xyzw)}"
+        )
+    if not torch.is_tensor(ref0_trans):
+        raise TypeError(f"ref0_trans must be torch.Tensor, got {type(ref0_trans)}")
+
+    batch_size = points_ref.shape[0]
+    if ref0_quat_xyzw.ndim != 2 or ref0_quat_xyzw.shape != (batch_size, 4):
+        raise ValueError(
+            "ref0_quat_xyzw must have shape [B, 4] matching points_ref batch size, "
+            f"got {tuple(ref0_quat_xyzw.shape)} with B={batch_size}"
+        )
+    if ref0_trans.ndim != 2 or ref0_trans.shape != (batch_size, 3):
+        raise ValueError(
+            "ref0_trans must have shape [B, 3] matching points_ref batch size, "
+            f"got {tuple(ref0_trans.shape)} with B={batch_size}"
+        )
+
+    quat = ref0_quat_xyzw.to(device=points_ref.device, dtype=points_ref.dtype)
+    quat = quat / quat.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+    trans = ref0_trans.to(device=points_ref.device, dtype=points_ref.dtype)
+
+    rotation_ref0_to_global = quaternion_to_rotation_matrix(quat)  # [B, 3, 3]
+    points_ref_flat = points_ref.reshape(batch_size, -1, 3)
+    points_global_flat = (
+        torch.einsum("bij,bnj->bni", rotation_ref0_to_global, points_ref_flat)
+        + trans.unsqueeze(1)
+    )
+    return points_global_flat.reshape_as(points_ref)
+
+
+def transform_prediction_pts3d_ref0_to_global(
+    predictions: List[Dict[str, torch.Tensor]],
+    views: List[Dict[str, Any]],
+) -> List[Dict[str, torch.Tensor]]:
+    """Transform MapAnything prediction ``pts3d`` from ref-view0 frame to global frame."""
+    if not predictions:
+        raise ValueError("predictions must be non-empty")
+    if not views:
+        raise ValueError("views must be non-empty")
+
+    ref_view = views[0]
+    if "camera_pose_quats" not in ref_view:
+        raise KeyError("views[0] missing `camera_pose_quats` required for global alignment")
+    if "camera_pose_trans" not in ref_view:
+        raise KeyError("views[0] missing `camera_pose_trans` required for global alignment")
+
+    ref0_quat_xyzw = ref_view["camera_pose_quats"]
+    ref0_trans = ref_view["camera_pose_trans"]
+    if not torch.is_tensor(ref0_quat_xyzw):
+        raise TypeError(
+            f"views[0]['camera_pose_quats'] must be torch.Tensor, got {type(ref0_quat_xyzw)}"
+        )
+    if not torch.is_tensor(ref0_trans):
+        raise TypeError(
+            f"views[0]['camera_pose_trans'] must be torch.Tensor, got {type(ref0_trans)}"
+        )
+
+    transformed_predictions: List[Dict[str, torch.Tensor]] = []
+    for view_idx, view_pred in enumerate(predictions):
+        pts3d = view_pred.get("pts3d")
+        if pts3d is None:
+            raise KeyError(f"predictions[{view_idx}] missing required key `pts3d`")
+        if not torch.is_tensor(pts3d):
+            raise TypeError(
+                f"predictions[{view_idx}]['pts3d'] must be torch.Tensor, got {type(pts3d)}"
+            )
+
+        transformed_view_pred = dict(view_pred)
+        transformed_view_pred["pts3d"] = transform_points_ref0_to_global(
+            pts3d,
+            ref0_quat_xyzw,
+            ref0_trans,
+        )
+        transformed_predictions.append(transformed_view_pred)
+
+    return transformed_predictions
+
 
 def _compute_pose_quats_and_trans_for_across_views_in_ref_view(views, num_views, batch_size_per_view, device, dtype, per_sample_cam_input_mask):
     # 1. 一次性提取所有位姿 (假设 views 里的数据已在 GPU)

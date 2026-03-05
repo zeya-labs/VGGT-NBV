@@ -23,6 +23,7 @@ from nbv_framework.domain.services import ReconstructionData
 from nbv_framework.infrastructure.utils.mapanything_views import (
     dump_mapanything_views_for_debug,
     prepare_mapanything_views,
+    transform_prediction_pts3d_ref0_to_global,
 )
 
 TensorDict = Dict[str, torch.Tensor]
@@ -72,7 +73,7 @@ class MapAnythingWrapper(nn.Module):
         camera_poses: torch.Tensor,
         *,
         depth_z: Optional[torch.Tensor] = None,
-        is_metric_scale: bool = False,
+        is_metric_scale: bool = True,
         fov_degrees: Optional[float] = None,
         view_save_dir: Optional[str] = None,
         mesh_paths: Optional[Sequence[Optional[str]]] = None,
@@ -102,6 +103,8 @@ class MapAnythingWrapper(nn.Module):
             use_calibration=True,
             use_pose=True,
             use_depth=depth_z is not None,
+            use_depth_scale=True,
+            use_pose_scale=True,
         )
         try:
             encoder_features = self.base_model._encode_n_views(views)
@@ -138,12 +141,17 @@ class MapAnythingWrapper(nn.Module):
         camera_poses: torch.Tensor,
         *,
         depth_z: Optional[torch.Tensor] = None,
-        is_metric_scale: bool = False,
+        is_metric_scale: bool = True,
         fov_degrees: Optional[float] = None,
         view_save_dir: Optional[str] = None,
         mesh_paths: Optional[Sequence[Optional[str]]] = None,
+        align_pts3d_to_input_world: bool = True,
     ) -> ReconstructionData:
-        """运行 MapAnything 前向, 返回 NBV 训练最小重建数据."""
+        """运行 MapAnything 前向, 返回 NBV 训练最小重建数据.
+
+        默认会将 MapAnything 在 ref-view0 坐标系下的 ``pts3d`` 对齐到输入
+        ``camera_poses`` 对应的全局世界坐标系。
+        """
         effective_fov = self.default_fov_degrees if fov_degrees is None else fov_degrees
         views, normalized = prepare_mapanything_views(
             images,
@@ -167,6 +175,8 @@ class MapAnythingWrapper(nn.Module):
             use_calibration=True,
             use_pose=True,
             use_depth=depth_z is not None,
+            use_depth_scale=True,
+            use_pose_scale=True,
         )
         # 输出views(list)的键
         # print("views keys:", views[0].keys())
@@ -177,6 +187,10 @@ class MapAnythingWrapper(nn.Module):
             )
         finally:
             self._restore_geometric_inputs()
+
+        if align_pts3d_to_input_world:
+            predictions = transform_prediction_pts3d_ref0_to_global(predictions, views)
+
         # 列出 predictions 中的所有键
         # print("predictions keys:", predictions[0].keys())
         # predictions keys: dict_keys(['pts3d', 'pts3d_cam', 'ray_directions', 'depth_along_ray', 'cam_trans', 'cam_quats', 'metric_scaling_factor', 'conf', 'non_ambiguous_mask', 'non_ambiguous_mask_logits'])
@@ -259,10 +273,11 @@ class MapAnythingWrapper(nn.Module):
         *,
         mode: str = "encode",
         depth_z: Optional[torch.Tensor] = None,
-        is_metric_scale: bool = False,
+        is_metric_scale: bool = True,
         fov_degrees: Optional[float] = None,
         view_save_dir: Optional[str] = None,
         mesh_paths: Optional[Sequence[Optional[str]]] = None,
+        align_pts3d_to_input_world: bool = True,
     ) -> Union[Tuple[torch.Tensor, List[Dict[str, Any]]], ReconstructionData]:
         if mode == "encode":
             return self.extract_scene_features(
@@ -283,6 +298,7 @@ class MapAnythingWrapper(nn.Module):
                 fov_degrees=fov_degrees,
                 view_save_dir=view_save_dir,
                 mesh_paths=mesh_paths,
+                align_pts3d_to_input_world=align_pts3d_to_input_world,
             )
         raise ValueError(f"Unknown mode: {mode}. Supported modes: encode, reconstruct")
 

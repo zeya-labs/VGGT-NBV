@@ -19,6 +19,7 @@ const imageSizeInput = document.getElementById("image-size");
 const fovInput = document.getElementById("fov");
 const confThresholdInput = document.getElementById("conf-threshold");
 const maxPointsInput = document.getElementById("max-points");
+const displayModeSelect = document.getElementById("display-mode");
 const showDepthInput = document.getElementById("show-depth");
 const useDepthReconInput = document.getElementById("use-depth-recon");
 
@@ -216,6 +217,22 @@ function withCacheBust(url) {
   return `${url}${sep}v=${Date.now()}`;
 }
 
+function modeLabel(mode) {
+  if (mode === "both") return "both";
+  if (mode === "gt_only") return "gt_only";
+  if (mode === "recon_only") return "recon_only";
+  return "unknown";
+}
+
+function setPointStats(total, raw, gtCount, reconCount) {
+  const totalSafe = Number.isFinite(Number(total)) ? Number(total) : 0;
+  const rawSafe = Number.isFinite(Number(raw)) ? Number(raw) : totalSafe;
+  const gtSafe = Number.isFinite(Number(gtCount)) ? Number(gtCount) : 0;
+  const reconSafe = Number.isFinite(Number(reconCount)) ? Number(reconCount) : 0;
+  pointStatsEl.textContent =
+    `points: ${totalSafe} (raw ${rawSafe}) | gt=${gtSafe} | recon=${reconSafe}`;
+}
+
 function renderMeshOptions(paths) {
   meshPathSelect.innerHTML = "";
   if (!paths || paths.length === 0) {
@@ -370,11 +387,13 @@ async function handleReconstruct() {
 
   try {
     const useDepthInput = !!useDepthReconInput.checked;
+    const displayMode = displayModeSelect.value;
     const payload = {
       run_id: currentRunId,
       conf_threshold: Number.parseFloat(confThresholdInput.value),
       max_points: Number.parseInt(maxPointsInput.value, 10),
       use_depth_input: useDepthInput,
+      display_mode: displayMode,
     };
 
     const result = await fetchJSON("/api/reconstruct", {
@@ -384,10 +403,16 @@ async function handleReconstruct() {
     });
 
     await loadPointCloud(withCacheBust(result.ply_url));
-    pointStatsEl.textContent = `points: ${result.num_points} (raw ${result.num_points_before_sampling})`;
+    setPointStats(
+      result.num_points,
+      result.num_points_before_sampling,
+      result.num_points_gt,
+      result.num_points_recon
+    );
     setTimings(result.timings);
     const depthMode = result.used_depth_input ? "enabled" : "disabled";
-    setStatus(`Reconstruction done. Point cloud loaded. depth=${depthMode}.`);
+    const mode = modeLabel(result.display_mode);
+    setStatus(`Reconstruction done. mode=${mode}, depth=${depthMode}.`);
     await loadHistory();
   } catch (error) {
     setStatus(`Reconstruct failed: ${error.message}`, true);
@@ -404,9 +429,20 @@ function applyHistoryRun(record) {
 
   const reconstruct = record.reconstruct;
   if (reconstruct && reconstruct.ply_url) {
-    pointStatsEl.textContent = `points: ${reconstruct.num_points}`;
+    if (reconstruct.display_mode && displayModeSelect.querySelector(`option[value="${reconstruct.display_mode}"]`)) {
+      displayModeSelect.value = reconstruct.display_mode;
+    }
+    setPointStats(
+      reconstruct.num_points,
+      reconstruct.num_points_before_sampling,
+      reconstruct.num_points_gt,
+      reconstruct.num_points_recon
+    );
     loadPointCloud(withCacheBust(reconstruct.ply_url))
-      .then(() => setStatus(`Loaded point cloud from run ${record.run_id}`))
+      .then(() => {
+        const mode = modeLabel(reconstruct.display_mode);
+        setStatus(`Loaded point cloud from run ${record.run_id} (mode=${mode})`);
+      })
       .catch((err) => setStatus(`Failed to load point cloud: ${err.message}`, true));
   }
 
@@ -438,10 +474,13 @@ function renderHistory(records) {
       meta.className = "history-meta";
       const rec = record.reconstruct;
       const pointInfo = rec ? ` | points=${rec.num_points}` : " | not reconstructed";
+      const modeInfo = rec && rec.display_mode
+        ? ` | mode=${modeLabel(rec.display_mode)}`
+        : "";
       const depthInfo = rec && typeof rec.use_depth_input === "boolean"
         ? ` | depth=${rec.use_depth_input ? "on" : "off"}`
         : "";
-      meta.textContent = `${record.model_name} | views=${record.num_views}${pointInfo}${depthInfo}`;
+      meta.textContent = `${record.model_name} | views=${record.num_views}${pointInfo}${modeInfo}${depthInfo}`;
 
       const actions = document.createElement("div");
       actions.className = "history-actions";
@@ -457,8 +496,14 @@ function renderHistory(records) {
         cloudButton.addEventListener("click", async () => {
           try {
             await loadPointCloud(withCacheBust(rec.ply_url));
-            pointStatsEl.textContent = `points: ${rec.num_points}`;
-            setStatus(`Loaded point cloud from run ${record.run_id}`);
+            setPointStats(
+              rec.num_points,
+              rec.num_points_before_sampling,
+              rec.num_points_gt,
+              rec.num_points_recon
+            );
+            const mode = modeLabel(rec.display_mode);
+            setStatus(`Loaded point cloud from run ${record.run_id} (mode=${mode})`);
           } catch (error) {
             setStatus(`Load cloud failed: ${error.message}`, true);
           }

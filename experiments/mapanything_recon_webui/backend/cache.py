@@ -25,6 +25,8 @@ class PreparedRun:
     camera_poses: torch.Tensor
     depth_z: Optional[torch.Tensor]
     depth_z_viz: Optional[torch.Tensor]
+    gt_point_maps: torch.Tensor
+    gt_valid_masks: torch.Tensor
 
 
 class PreparedRunCache:

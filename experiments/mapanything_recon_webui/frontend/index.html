@@ -99,6 +99,13 @@
             </div>
           </div>
 
+          <label for="display-mode">Display Mode</label>
+          <select id="display-mode">
+            <option value="both" selected>both (GT+Recon)</option>
+            <option value="gt_only">gt_only (GT only)</option>
+            <option value="recon_only">recon_only (Recon only)</option>
+          </select>
+
           <label class="checkbox-line">
             <input id="show-depth" type="checkbox" />
             <span>Preview depth images</span>
@@ -146,7 +153,7 @@
 
         <section class="panel viewer-panel">
           <div class="row">
-            <h2>Reconstructed Colored Point Cloud</h2>
+            <h2>Point Cloud Viewer (GT / Recon)</h2>
             <span id="point-stats" class="badge">points: -</span>
           </div>
           <canvas id="pointcloud-canvas"></canvas>

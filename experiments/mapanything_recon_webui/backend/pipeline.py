@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from time import perf_counter
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 import os
 
 # Keep runtime caches in writable temp paths for sandboxed environments.
@@ -61,7 +61,13 @@ class ReconstructResult:
     ply_url: str
     num_points: int
     num_points_before_sampling: int
+    num_points_gt: int
+    num_points_recon: int
+    display_mode: DisplayMode
     timings: Dict[str, float]
+
+
+DisplayMode = Literal["both", "gt_only", "recon_only"]
 
 
 _MODEL_LOCK = Lock()
@@ -336,6 +342,16 @@ def prepare_inputs_for_run(
     else:
         depth_z_viz = None
 
+    gt_point_maps = prepared.trimmed_gt_mesh_data.get("gt_point_maps")
+    if not torch.is_tensor(gt_point_maps):
+        raise RuntimeError("Prepared batch missing tensor gt_point_maps for WebUI reconstruction.")
+    gt_point_maps = gt_point_maps.detach().cpu().to(dtype=torch.float32).contiguous()
+
+    gt_valid_masks = prepared.trimmed_gt_mesh_data.get("gt_valid_masks")
+    if not torch.is_tensor(gt_valid_masks):
+        raise RuntimeError("Prepared batch missing tensor gt_valid_masks for WebUI reconstruction.")
+    gt_valid_masks = gt_valid_masks.detach().cpu().to(dtype=torch.bool).contiguous()
+
     rgb_urls, depth_urls = _save_prepare_previews(
         output_dir=output_dir,
         results_dir=results_dir,
@@ -358,6 +374,8 @@ def prepare_inputs_for_run(
         camera_poses=camera_poses,
         depth_z=depth_z,
         depth_z_viz=depth_z_viz,
+        gt_point_maps=gt_point_maps,
+        gt_valid_masks=gt_valid_masks,
     )
 
     camera_pose_list = camera_poses[0].tolist()
@@ -430,13 +448,22 @@ def _normalize_map_to_bshw(
     return out
 
 
-def _extract_colored_points(
+def _sample_points(points: torch.Tensor, max_points: int) -> torch.Tensor:
+    if points.ndim != 2 or points.shape[-1] != 3:
+        raise ValueError(f"Expected points shape [N, 3], got {tuple(points.shape)}")
+    if max_points <= 0 or points.shape[0] == 0:
+        return points.new_empty((0, 3))
+    if points.shape[0] <= max_points:
+        return points
+    indices = torch.randperm(points.shape[0], device=points.device)[:max_points]
+    return points.index_select(0, indices)
+
+
+def _extract_recon_points(
     recon_data: ReconstructionData | Dict[str, torch.Tensor],
-    images: torch.Tensor,
     *,
     conf_threshold: float,
-    max_points: int,
-) -> Tuple[torch.Tensor, torch.Tensor, int]:
+) -> Tuple[torch.Tensor, int]:
     if isinstance(recon_data, ReconstructionData):
         world_points = recon_data.recon_world_points
         conf = recon_data.recon_conf
@@ -460,20 +487,6 @@ def _extract_colored_points(
 
     world_points = world_points.to(dtype=torch.float32)
     batch_size, num_views, h_pts, w_pts, _ = world_points.shape
-
-    colors = images
-    if colors.dim() != 5 or colors.shape[:2] != (batch_size, num_views):
-        raise ValueError(
-            "Input images must align with world points on [B, S], "
-            f"got images={tuple(colors.shape)} points={tuple(world_points.shape)}"
-        )
-
-    if colors.shape[-2:] != (h_pts, w_pts):
-        flat_colors = colors.reshape(batch_size * num_views, 3, colors.shape[-2], colors.shape[-1])
-        flat_colors = F.interpolate(flat_colors, size=(h_pts, w_pts), mode="bilinear", align_corners=False)
-        colors = flat_colors.reshape(batch_size, num_views, 3, h_pts, w_pts)
-
-    colors = colors.permute(0, 1, 3, 4, 2).contiguous()
     mask = torch.isfinite(world_points).all(dim=-1)
 
     if torch.is_tensor(non_ambiguous):
@@ -501,18 +514,105 @@ def _extract_colored_points(
         mask = torch.isfinite(world_points).all(dim=-1)
 
     selected_points = world_points[mask]
-    selected_colors = colors[mask].clamp(0.0, 1.0)
+    return selected_points, int(selected_points.shape[0])
 
-    num_before = int(selected_points.shape[0])
-    if num_before == 0:
-        raise RuntimeError("No valid points were extracted from reconstruction output")
 
-    if num_before > max_points:
-        indices = torch.randperm(num_before, device=selected_points.device)[:max_points]
-        selected_points = selected_points.index_select(0, indices)
-        selected_colors = selected_colors.index_select(0, indices)
+def _extract_gt_points(
+    gt_point_maps: torch.Tensor,
+    gt_valid_masks: torch.Tensor,
+) -> Tuple[torch.Tensor, int]:
+    if gt_point_maps.dim() != 5 or gt_point_maps.shape[-1] != 3:
+        raise ValueError(
+            "Expected gt_point_maps shape [B, S, H, W, 3], "
+            f"got {tuple(gt_point_maps.shape)}"
+        )
 
-    return selected_points, selected_colors, num_before
+    points = gt_point_maps.to(dtype=torch.float32)
+    batch_size, num_views, h_pts, w_pts, _ = points.shape
+    mask = torch.isfinite(points).all(dim=-1)
+
+    valid_masks = _normalize_map_to_bshw(
+        gt_valid_masks,
+        batch_size=batch_size,
+        num_views=num_views,
+        target_hw=(h_pts, w_pts),
+        as_mask=True,
+    )
+    mask &= valid_masks
+    selected_points = points[mask]
+    return selected_points, int(selected_points.shape[0])
+
+
+def _build_display_cloud(
+    *,
+    recon_points: torch.Tensor,
+    gt_points: torch.Tensor,
+    display_mode: DisplayMode,
+    max_points: int,
+) -> Tuple[torch.Tensor, torch.Tensor, int, int, int]:
+    if max_points <= 0:
+        raise ValueError(f"max_points must be > 0, got {max_points}")
+
+    device = recon_points.device if recon_points.numel() > 0 else gt_points.device
+    dtype = recon_points.dtype if recon_points.numel() > 0 else gt_points.dtype
+    red = torch.tensor([1.0, 0.0, 0.0], device=device, dtype=dtype)
+    green = torch.tensor([0.0, 1.0, 0.0], device=device, dtype=dtype)
+
+    recon_before = int(recon_points.shape[0])
+    gt_before = int(gt_points.shape[0])
+
+    if display_mode == "recon_only":
+        recon_selected = _sample_points(recon_points, max_points)
+        gt_selected = gt_points.new_empty((0, 3))
+        num_before = recon_before
+    elif display_mode == "gt_only":
+        gt_selected = _sample_points(gt_points, max_points)
+        recon_selected = recon_points.new_empty((0, 3))
+        num_before = gt_before
+    elif display_mode == "both":
+        recon_budget = min(recon_before, max_points // 2)
+        gt_budget = min(gt_before, max_points - recon_budget)
+        remaining = max_points - (recon_budget + gt_budget)
+        if remaining > 0 and recon_before > recon_budget:
+            recon_extra = min(recon_before - recon_budget, remaining)
+            recon_budget += recon_extra
+            remaining -= recon_extra
+        if remaining > 0 and gt_before > gt_budget:
+            gt_extra = min(gt_before - gt_budget, remaining)
+            gt_budget += gt_extra
+
+        recon_selected = _sample_points(recon_points, recon_budget)
+        gt_selected = _sample_points(gt_points, gt_budget)
+        num_before = gt_before + recon_before
+    else:
+        raise ValueError(
+            f"Unsupported display_mode `{display_mode}`. Expected one of: both, gt_only, recon_only."
+        )
+
+    point_chunks: List[torch.Tensor] = []
+    color_chunks: List[torch.Tensor] = []
+    if gt_selected.shape[0] > 0:
+        point_chunks.append(gt_selected)
+        color_chunks.append(green.unsqueeze(0).repeat(gt_selected.shape[0], 1))
+    if recon_selected.shape[0] > 0:
+        point_chunks.append(recon_selected)
+        color_chunks.append(red.unsqueeze(0).repeat(recon_selected.shape[0], 1))
+
+    if not point_chunks:
+        raise RuntimeError(
+            f"No valid points to visualize for mode={display_mode}. "
+            f"gt_before={gt_before}, recon_before={recon_before}"
+        )
+
+    points = torch.cat(point_chunks, dim=0)
+    colors = torch.cat(color_chunks, dim=0)
+    return (
+        points,
+        colors,
+        num_before,
+        int(gt_selected.shape[0]),
+        int(recon_selected.shape[0]),
+    )
 
 
 def _write_colored_ply(path: Path, points: np.ndarray, colors: np.ndarray) -> None:
@@ -541,6 +641,7 @@ def reconstruct_and_export(
     conf_threshold: float,
     max_points: int,
     use_depth_input: bool,
+    display_mode: DisplayMode,
 ) -> ReconstructResult:
     timings: Dict[str, float] = {}
 
@@ -561,23 +662,35 @@ def reconstruct_and_export(
             images,
             camera_poses,
             depth_z=depth_z,
-            is_metric_scale=False,
+            is_metric_scale=True,
             fov_degrees=float(prepared_run.fov),
         )
     timings["reconstruct_s"] = perf_counter() - run_started
 
     cloud_started = perf_counter()
-    points, colors, num_before = _extract_colored_points(
+    recon_points, _ = _extract_recon_points(
         recon_data,
-        images,
         conf_threshold=float(conf_threshold),
+    )
+    gt_points, _ = _extract_gt_points(
+        prepared_run.gt_point_maps.to(device=device, dtype=torch.float32),
+        prepared_run.gt_valid_masks.to(device=device, dtype=torch.bool),
+    )
+    points, colors, num_before, num_points_gt, num_points_recon = _build_display_cloud(
+        recon_points=recon_points,
+        gt_points=gt_points,
+        display_mode=display_mode,
         max_points=int(max_points),
     )
     points_np = points.detach().cpu().numpy()
     colors_np = colors.detach().cpu().numpy()
 
     depth_tag = "with_depth" if use_depth_input else "without_depth"
-    ply_path = prepared_run.output_dir / "reconstruction" / f"colored_point_cloud_{depth_tag}.ply"
+    ply_path = (
+        prepared_run.output_dir
+        / "reconstruction"
+        / f"point_cloud_{display_mode}_{depth_tag}.ply"
+    )
     _write_colored_ply(ply_path, points_np, colors_np)
     timings["export_point_cloud_s"] = perf_counter() - cloud_started
 
@@ -585,5 +698,8 @@ def reconstruct_and_export(
         ply_url=_to_results_url(ply_path, results_dir),
         num_points=int(points_np.shape[0]),
         num_points_before_sampling=num_before,
+        num_points_gt=num_points_gt,
+        num_points_recon=num_points_recon,
+        display_mode=display_mode,
         timings=timings,
     )

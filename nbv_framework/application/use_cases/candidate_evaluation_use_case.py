@@ -8,13 +8,19 @@ import torch
 
 from nbv_framework.application.dto import PoseEvaluationResult
 from nbv_framework.domain.services.reconstruction_service import build_recon_from_point_maps
-from nbv_framework.application.ports import LossPort, RendererPort
-
+from nbv_framework.application.ports import LossPort, RendererPort, SceneEncoderPort
 
 class CandidateEvaluationUseCase:
-    def __init__(self, *, renderer: RendererPort, loss: LossPort) -> None:
+    def __init__(
+        self,
+        *,
+        renderer: RendererPort,
+        loss: LossPort,
+        scene_encoder: SceneEncoderPort,
+    ) -> None:
         self.renderer = renderer
         self.loss = loss
+        self.scene_encoder = scene_encoder
 
     def evaluate_candidate_pose(
         self,
@@ -71,6 +77,12 @@ class CandidateEvaluationUseCase:
             point_maps=updated_point_maps,
             valid_masks=updated_valid_masks,
         )
+
+        # recon_data = self.scene_encoder.reconstruct_and_evaluate(
+        #     combined_images_batch,
+        #     combined_camera_poses,
+        #     depth_z=updated_depth_z,
+        # )
 
         total_loss, loss_components = self.loss.compute_loss(
             recon_data,

@@ -217,6 +217,7 @@ def reconstruct(payload: ReconstructRequest) -> ReconstructResponse:
             conf_threshold=payload.conf_threshold,
             max_points=payload.max_points,
             use_depth_input=payload.use_depth_input,
+            display_mode=payload.display_mode,
         )
     except Exception as exc:
         logger.exception("reconstruct failed for run_id=%s", payload.run_id)
@@ -226,6 +227,9 @@ def reconstruct(payload: ReconstructRequest) -> ReconstructResponse:
         "ply_url": result.ply_url,
         "num_points": result.num_points,
         "num_points_before_sampling": result.num_points_before_sampling,
+        "num_points_gt": result.num_points_gt,
+        "num_points_recon": result.num_points_recon,
+        "display_mode": result.display_mode,
         "timings": result.timings,
         "conf_threshold": payload.conf_threshold,
         "max_points": payload.max_points,
@@ -250,6 +254,9 @@ def reconstruct(payload: ReconstructRequest) -> ReconstructResponse:
         ply_url=result.ply_url,
         num_points=result.num_points,
         num_points_before_sampling=result.num_points_before_sampling,
+        num_points_gt=result.num_points_gt,
+        num_points_recon=result.num_points_recon,
+        display_mode=result.display_mode,
         used_depth_input=payload.use_depth_input,
         created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         timings=result.timings,

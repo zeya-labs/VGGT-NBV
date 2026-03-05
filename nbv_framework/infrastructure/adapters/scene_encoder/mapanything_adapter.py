@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
+from nbv_framework.domain.services import ReconstructionData
 from nbv_framework.infrastructure.models.scene_encoder.mapanything_encoder import MapAnythingWrapper
 
 
@@ -24,5 +25,20 @@ class MapAnythingSceneEncoderAdapter:
             images,
             camera_poses,
             depth_z=depth_z,
-            is_metric_scale=False,
+            is_metric_scale=True,
+        )
+
+    def reconstruct_and_evaluate(
+        self,
+        images: torch.Tensor,
+        camera_poses: torch.Tensor,
+        *,
+        depth_z: Optional[torch.Tensor] = None,
+    ) -> ReconstructionData:
+        return self.wrapper.reconstruct_and_evaluate(
+            images,
+            camera_poses,
+            depth_z=depth_z,
+            is_metric_scale=True,
+            align_pts3d_to_input_world=True,
         )
