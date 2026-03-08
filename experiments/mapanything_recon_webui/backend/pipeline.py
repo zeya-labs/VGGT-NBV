@@ -22,24 +22,24 @@ import torch
 import torch.nn.functional as F
 from torchvision.utils import save_image
 
-from nbv_framework.application.use_cases.batch_preparation_use_case import BatchPreparationUseCase
-from nbv_framework.domain.services import ReconstructionData
-from nbv_framework.infrastructure.adapters.depth.depth_visualization_adapter import (
+from nbv_framework.workflows import BatchPreparationUseCase
+from nbv_framework.reconstruction import ReconstructionData
+from nbv_framework.adapters.depth.depth_visualization_adapter import (
     DepthVisualizationAdapter,
 )
-from nbv_framework.infrastructure.adapters.mesh_repository.pytorch3d_mesh_repository_adapter import (
+from nbv_framework.adapters.mesh_repository.pytorch3d_mesh_repository_adapter import (
     PyTorch3DMeshRepositoryAdapter,
 )
-from nbv_framework.infrastructure.adapters.renderer.pytorch3d_renderer_adapter import (
+from nbv_framework.adapters.renderer.pytorch3d_renderer_adapter import (
     PyTorch3DRendererAdapter,
 )
-from nbv_framework.infrastructure.datasets.collate_functions import custom_nbv_collate_fn
-from nbv_framework.infrastructure.datasets.house3k_camera import (
+from nbv_framework.data.collate_functions import custom_nbv_collate_fn
+from nbv_framework.data.house3k_camera import (
     House3KCameraConfig,
     House3KCameraPlanner,
 )
-from nbv_framework.infrastructure.datasets.house3k_sample_builder import build_house3k_sample
-from nbv_framework.infrastructure.models.scene_encoder.mapanything_encoder import MapAnythingWrapper
+from nbv_framework.data.house3k_sample_builder import build_house3k_sample
+from nbv_framework.models.scene_encoder.mapanything_encoder import MapAnythingWrapper
 from nbv_framework.infrastructure.rendering.differentiable_renderer import DifferentiableRenderer
 from nbv_framework.infrastructure.utils.mesh_utils import load_and_normalize_mesh
 
