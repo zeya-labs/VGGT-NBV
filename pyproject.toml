@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.scripts]
-nbv = "nbv_framework.interfaces.cli.train:main"
+nbv = "nbv_framework.cli.train:main"
 
 [[tool.uv.index]]
 name = "pytorch"

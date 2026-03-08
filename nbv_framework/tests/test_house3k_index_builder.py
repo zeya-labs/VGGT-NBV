@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from nbv_framework.infrastructure.datasets.house3k_index_builder import apply_max_mesh_limit
+from nbv_framework.data.house3k_index_builder import apply_max_mesh_limit
 
 
 def test_apply_max_mesh_limit_returns_copy_when_disabled() -> None:

@@ -15,8 +15,8 @@ if __package__ in {None, ""}:
         sys.path.insert(0, str(repo_root))
 
 from nbv_framework.config import NBVConfig, validate_config
-from nbv_framework.infrastructure.datasets.house3k_camera import House3KCameraConfig, House3KCameraPlanner
-from nbv_framework.infrastructure.training.test_metrics import summarize_values
+from nbv_framework.data.house3k_camera import House3KCameraConfig, House3KCameraPlanner
+from nbv_framework.training.test_metrics import summarize_values
 from nbv_framework.tests.test_architecture_import_boundaries import test_architecture_import_boundaries
 
 

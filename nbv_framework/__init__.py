@@ -12,13 +12,14 @@ __all__ = [
     "AttentionNBVPolicy",
     "DifferentiableRenderer",
     "LightningNBVModule",
+    "NBVDataModule",
     "NBVConfig",
 ]
 
 
 def __getattr__(name: str):
     if name in {"MapAnythingWrapper", "BaseNBVPolicy", "AttentionNBVPolicy"}:
-        from .domain.models import AttentionNBVPolicy, BaseNBVPolicy, MapAnythingWrapper
+        from .models import AttentionNBVPolicy, BaseNBVPolicy, MapAnythingWrapper
 
         return {
             "MapAnythingWrapper": MapAnythingWrapper,
@@ -30,9 +31,13 @@ def __getattr__(name: str):
 
         return DifferentiableRenderer
     if name == "LightningNBVModule":
-        from .infrastructure.training import LightningNBVModule
+        from .training import LightningNBVModule
 
         return LightningNBVModule
+    if name == "NBVDataModule":
+        from .training import NBVDataModule
+
+        return NBVDataModule
     if name == "NBVConfig":
         from .config import NBVConfig
 

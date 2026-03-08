@@ -4,10 +4,10 @@ from typing import Dict, Optional, Tuple
 
 import torch
 
-from nbv_framework.application.use_cases.candidate_evaluation_use_case import (
+from nbv_framework.workflows.candidate_evaluation_use_case import (
     CandidateEvaluationUseCase,
 )
-from nbv_framework.domain.services import (
+from nbv_framework.reconstruction import (
     ReconstructionData,
     build_recon_from_depth_z,
     build_recon_from_point_maps,

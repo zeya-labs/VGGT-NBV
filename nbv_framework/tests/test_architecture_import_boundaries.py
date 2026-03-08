@@ -10,10 +10,14 @@ _PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 # Keep these rules small and explicit. They are meant to prevent major
 # architectural regressions in dependency direction.
 _FORBIDDEN_IMPORT_ROOTS: Dict[str, Set[str]] = {
-    "application": {"interfaces", "infrastructure"},
-    "infrastructure": {"interfaces"},
-    "domain": {"interfaces", "infrastructure", "application"},
-    "shared": {"interfaces", "infrastructure", "application", "domain"},
+    "geometry": {"adapters", "interfaces", "models", "training", "workflows"},
+    "ports": {"adapters", "interfaces", "models", "training", "workflows"},
+    "reconstruction": {"adapters", "interfaces", "models", "training", "workflows"},
+    "data": {"interfaces", "training"},
+    "models": {"interfaces", "training"},
+    "adapters": {"interfaces"},
+    "workflows": {"interfaces"},
+    "training": {"interfaces"},
 }
 
 

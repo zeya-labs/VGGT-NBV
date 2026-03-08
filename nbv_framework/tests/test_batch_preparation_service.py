@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from nbv_framework.application.use_cases.batch_preparation_use_case import BatchPreparationUseCase
+from nbv_framework.workflows.batch_preparation_use_case import BatchPreparationUseCase
 
 
 class _NoopRenderer:

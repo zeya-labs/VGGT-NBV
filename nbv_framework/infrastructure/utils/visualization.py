@@ -12,7 +12,7 @@ import os
 
 from loguru import logger
 
-from nbv_framework.domain.services import ReconstructionData
+from nbv_framework.reconstruction import ReconstructionData
 
 
 def visualize_reconstruction(recon_data: Union[Dict[str, torch.Tensor], ReconstructionData],

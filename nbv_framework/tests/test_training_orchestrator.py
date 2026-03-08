@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import torch
 
-from nbv_framework.application.dto import PolicyInferenceResult, PoseEvaluationResult, PreparedBatch
-from nbv_framework.application.use_cases.training_step_use_case import TrainingStepUseCase
+from nbv_framework.dto import PolicyInferenceResult, PoseEvaluationResult, PreparedBatch
+from nbv_framework.workflows.training_step_use_case import TrainingStepUseCase
 
 
 class _BatchPreparation:

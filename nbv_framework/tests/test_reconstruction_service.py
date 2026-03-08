@@ -4,7 +4,7 @@ import math
 
 import torch
 
-from nbv_framework.domain.services import (
+from nbv_framework.reconstruction import (
     build_recon_from_depth_z,
     build_recon_from_point_maps,
 )
@@ -118,8 +118,8 @@ def test_build_recon_from_depth_z_matches_renderer_output_with_default_signs() -
     except ImportError:
         return
 
-    from nbv_framework.domain.geometry.camera_pose import position_to_pose_tensor
-    from nbv_framework.infrastructure.adapters.renderer.pytorch3d_renderer_adapter import (
+    from nbv_framework.geometry.camera_pose import position_to_pose_tensor
+    from nbv_framework.adapters.renderer.pytorch3d_renderer_adapter import (
         PyTorch3DRendererAdapter,
     )
     from nbv_framework.infrastructure.rendering.differentiable_renderer import (

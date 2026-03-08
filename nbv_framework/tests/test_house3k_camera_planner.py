@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from nbv_framework.infrastructure.datasets.house3k_camera import House3KCameraConfig, House3KCameraPlanner
+from nbv_framework.data.house3k_camera import House3KCameraConfig, House3KCameraPlanner
 
 
 def _base_config(**overrides) -> House3KCameraConfig:
