@@ -36,6 +36,8 @@ class ModelConfig:
     policy_num_heads: int = 4
     policy_num_layers: int = 3
     policy_output_mode: str = "position_only"
+    candidate_reconstruction_mode: str = "scene_encoder"
+    candidate_depth_z_detach: bool = False
     mapanything_model_name: str = "facebook/map-anything"
     mapanything_revision: Optional[str] = "6f3a25bfbb8fcc799176bb01e9d07dfb49d5416a"
     mapanything_local_files_only: bool = True

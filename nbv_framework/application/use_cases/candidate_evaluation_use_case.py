@@ -7,8 +7,14 @@ from typing import Callable, Dict, Optional
 import torch
 
 from nbv_framework.application.dto import PoseEvaluationResult
-from nbv_framework.domain.services.reconstruction_service import build_recon_from_point_maps
 from nbv_framework.application.ports import LossPort, RendererPort, SceneEncoderPort
+from nbv_framework.domain.services.reconstruction_service import (
+    build_recon_from_depth_z,
+    build_recon_from_point_maps,
+)
+
+_SUPPORTED_RECONSTRUCTION_MODES = {"scene_encoder", "point_maps", "depth_z"}
+
 
 class CandidateEvaluationUseCase:
     def __init__(
@@ -17,10 +23,21 @@ class CandidateEvaluationUseCase:
         renderer: RendererPort,
         loss: LossPort,
         scene_encoder: SceneEncoderPort,
+        reconstruction_mode: str = "scene_encoder",
+        depth_z_detach: bool = False,
     ) -> None:
+        reconstruction_mode_normalized = str(reconstruction_mode).lower().strip()
+        if reconstruction_mode_normalized not in _SUPPORTED_RECONSTRUCTION_MODES:
+            raise ValueError(
+                "Unsupported candidate reconstruction mode "
+                f"{reconstruction_mode!r}. Expected one of: "
+                f"{', '.join(sorted(_SUPPORTED_RECONSTRUCTION_MODES))}"
+            )
         self.renderer = renderer
         self.loss = loss
         self.scene_encoder = scene_encoder
+        self.reconstruction_mode = reconstruction_mode_normalized
+        self.depth_z_detach = bool(depth_z_detach)
 
     def evaluate_candidate_pose(
         self,
@@ -73,16 +90,13 @@ class CandidateEvaluationUseCase:
         combined_images_batch = torch.cat([initial_images, new_images.unsqueeze(1)], dim=1)
         combined_camera_poses = torch.cat([camera_poses_batch, pose.unsqueeze(1)], dim=1)
 
-        recon_data = build_recon_from_point_maps(
-            point_maps=updated_point_maps,
-            valid_masks=updated_valid_masks,
+        recon_data = self._build_reconstruction_data(
+            combined_images_batch=combined_images_batch,
+            combined_camera_poses=combined_camera_poses,
+            updated_point_maps=updated_point_maps,
+            updated_valid_masks=updated_valid_masks,
+            updated_depth_z=updated_depth_z,
         )
-
-        # recon_data = self.scene_encoder.reconstruct_and_evaluate(
-        #     combined_images_batch,
-        #     combined_camera_poses,
-        #     depth_z=updated_depth_z,
-        # )
 
         total_loss, loss_components = self.loss.compute_loss(
             recon_data,
@@ -104,5 +118,39 @@ class CandidateEvaluationUseCase:
             loss_components=loss_components,
             new_images=new_images,
             gt_mesh_data=updated_gt_mesh_data,
+            depth_z=updated_depth_z,
+        )
+
+    def _build_reconstruction_data(
+        self,
+        *,
+        combined_images_batch: torch.Tensor,
+        combined_camera_poses: torch.Tensor,
+        updated_point_maps: torch.Tensor,
+        updated_valid_masks: torch.Tensor,
+        updated_depth_z: Optional[torch.Tensor],
+    ):
+        if self.reconstruction_mode == "point_maps":
+            return build_recon_from_point_maps(
+                point_maps=updated_point_maps,
+                valid_masks=updated_valid_masks,
+            )
+
+        if self.reconstruction_mode == "depth_z":
+            if updated_depth_z is None:
+                raise RuntimeError(
+                    "candidate reconstruction mode `depth_z` requires `gt_mesh_data['depth_z']` "
+                    "to be available for all input views."
+                )
+            depth_z_input = updated_depth_z.detach() if self.depth_z_detach else updated_depth_z
+            return build_recon_from_depth_z(
+                camera_poses=combined_camera_poses,
+                depth_z=depth_z_input,
+                valid_masks=updated_valid_masks,
+            )
+
+        return self.scene_encoder.reconstruct_and_evaluate(
+            combined_images_batch,
+            combined_camera_poses,
             depth_z=updated_depth_z,
         )

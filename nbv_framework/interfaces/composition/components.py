@@ -67,6 +67,8 @@ def build_lightning_module(cfg: Any) -> LightningNBVModule:
         renderer=renderer_adapter,
         loss=loss_adapter,
         scene_encoder=scene_encoder,
+        reconstruction_mode=cfg.model.candidate_reconstruction_mode,
+        depth_z_detach=cfg.model.candidate_depth_z_detach,
     )
     test_evaluator = TestEvaluationUseCase(
         loss=loss_adapter,

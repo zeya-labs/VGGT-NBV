@@ -22,6 +22,15 @@ def validate_config(cfg: Any) -> None:
     if mode not in {"train", "test", "train_test"}:
         raise ValueError(f"Unsupported experiment.mode={mode!r}. Expected train|test|train_test")
 
+    reconstruction_mode = str(
+        _get(cfg, "model", "candidate_reconstruction_mode", default="scene_encoder")
+    ).lower().strip()
+    if reconstruction_mode not in {"scene_encoder", "point_maps", "depth_z"}:
+        raise ValueError(
+            "Unsupported model.candidate_reconstruction_mode="
+            f"{reconstruction_mode!r}. Expected scene_encoder|point_maps|depth_z"
+        )
+
     train_ratio = float(_get(cfg, "data", "train_ratio", default=0.8))
     val_ratio = float(_get(cfg, "data", "val_ratio", default=0.1))
     if train_ratio < 0 or val_ratio < 0:

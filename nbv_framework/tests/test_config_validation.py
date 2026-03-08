@@ -23,3 +23,10 @@ def test_validate_config_rejects_invalid_split_sum() -> None:
     cfg.data.val_ratio = 0.2
     with pytest.raises(ValueError, match="Invalid split ratios"):
         validate_config(cfg)
+
+
+def test_validate_config_rejects_invalid_candidate_reconstruction_mode() -> None:
+    cfg = NBVConfig()
+    cfg.model.candidate_reconstruction_mode = "invalid"
+    with pytest.raises(ValueError, match="Unsupported model.candidate_reconstruction_mode"):
+        validate_config(cfg)
