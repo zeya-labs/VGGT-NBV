@@ -3,10 +3,10 @@ name = "vggt-nbv"
 version = "0.1.0"
 description = "NBV Deep Learning Project"
 readme = "README.md"
-requires-python = ">=3.11,<3.12"
+requires-python = ">=3.12"
 dependencies = [
     "numpy",
-    "torch>=2.6.0",
+    "torch==2.6.0+cu124",
     "torchvision",
     "torchaudio",
     "mapanything",
@@ -17,10 +17,9 @@ dependencies = [
     "lightning>=2.6.0",
     "wandb>=0.24.0",
     "pytorch3d",
+    "geomloss",
+    "pykeops",
 ]
-
-[project.scripts]
-nbv = "nbv_framework.cli.train:main"
 
 [[tool.uv.index]]
 name = "pytorch"
@@ -31,8 +30,11 @@ explicit = true
 torch = [{ index = "pytorch" }]
 torchvision = [{ index = "pytorch" }]
 torchaudio = [{ index = "pytorch" }]
-mapanything = { workspace = true, editable = true }
-pytorch3d = { git = "https://github.com/facebookresearch/pytorch3d.git", rev = "stable" }
+mapanything = { workspace = true }
+pytorch3d = { git = "https://github.com/facebookresearch/pytorch3d.git", rev = "75ebeeaea0908c5527e7b1e305fbc7681382db47" }
+
+[tool.uv.extra-build-dependencies]
+pytorch3d = [{ requirement = "torch", match-runtime = true }]
 
 [tool.uv.workspace]
 members = [

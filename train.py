@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="torch.distributed")
+
 from nbv_framework.cli.train import main
 
 
