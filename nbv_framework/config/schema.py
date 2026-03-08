@@ -26,7 +26,7 @@ class ExperimentConfig:
     seed: int = 42
     resume_checkpoint: Optional[str] = None
     checkpoint_weights_only: bool = False
-    output_dir: str = "${hydra:runtime.cwd}/runs/${now:%Y-%m-%d}/${now:%H-%M-%S}"
+    output_dir: str = "${hydra:runtime.cwd}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}"
 
 
 @dataclass

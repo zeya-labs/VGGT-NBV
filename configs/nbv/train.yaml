@@ -10,7 +10,7 @@ experiment:
   resume_checkpoint: null
   checkpoint_weights_only: false
   seed: 42
-  output_dir: ${hydra:runtime.cwd}/runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  output_dir: ${hydra:runtime.cwd}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
 
 model:
   scene_feature_dim: 768
@@ -96,7 +96,7 @@ hydra:
   run:
     dir: ${experiment.output_dir}
   sweep:
-    dir: ${hydra:runtime.cwd}/runs/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: ${hydra:runtime.cwd}/outputs/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
     subdir: ${hydra.job.num}
   job:
     chdir: true

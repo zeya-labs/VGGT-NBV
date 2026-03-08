@@ -15,6 +15,6 @@ python -m experiments.two_view_chamfer_experiment \
 
 
 python -m experiments.view1_camera_path_experiment \
---run_dir runs/dataset-house3k_bs-1_initv-1_pom-position_only_20251103-142858 \
+--run_dir outputs/dataset-house3k_bs-1_initv-1_pom-position_only_20251103-142858 \
 --mesh_path models/House3K_obj/BATCH_7/SET_B/BAT7_SETB_HOUSE33_WTR.obj \
 --max_steps 120
