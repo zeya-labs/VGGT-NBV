@@ -27,6 +27,7 @@ const prepareButton = document.getElementById("prepare-btn");
 const reconstructButton = document.getElementById("reconstruct-btn");
 const clearHistoryButton = document.getElementById("clear-history");
 
+const statusCardEl = document.getElementById("status-card");
 const statusEl = document.getElementById("status");
 const timingsEl = document.getElementById("timings");
 const runIdBadgeEl = document.getElementById("run-id");
@@ -38,13 +39,50 @@ const historyEl = document.getElementById("history");
 
 const pointCanvas = document.getElementById("pointcloud-canvas");
 
+const criticalElements = {
+  meshRootSelect,
+  refreshMeshesButton,
+  meshFilterInput,
+  meshPathSelect,
+  meshCountEl,
+  numViewsInput,
+  seedInput,
+  samplingModeSelect,
+  cameraRadiusInput,
+  cameraVarInput,
+  radiusModeSelect,
+  imageSizeInput,
+  fovInput,
+  confThresholdInput,
+  maxPointsInput,
+  displayModeSelect,
+  showDepthInput,
+  useDepthReconInput,
+  prepareButton,
+  reconstructButton,
+  statusEl,
+  timingsEl,
+  runIdBadgeEl,
+  pointStatsEl,
+  rgbGallery,
+  depthGallery,
+  historyEl,
+  pointCanvas,
+};
+
+function getMissingCriticalElementNames() {
+  return Object.entries(criticalElements)
+    .filter(([, el]) => !el)
+    .map(([name]) => name);
+}
+
 let currentRunId = null;
 let allMeshPaths = [];
 let meshListTruncated = false;
 let currentPointCloud = null;
 
 const pointScene = new THREE.Scene();
-pointScene.background = new THREE.Color(0x061b1d);
+pointScene.background = new THREE.Color(0xf1f5f9);
 
 const pointCamera = new THREE.PerspectiveCamera(60, 1, 0.001, 2000);
 pointCamera.position.set(1.4, 1.1, 1.6);
@@ -55,6 +93,7 @@ const pointRenderer = new THREE.WebGLRenderer({
   alpha: false,
 });
 pointRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+pointRenderer.setClearColor(0xf1f5f9, 1);
 
 const pointControls = new OrbitControls(pointCamera, pointRenderer.domElement);
 pointControls.enableDamping = true;
@@ -66,7 +105,9 @@ const plyLoader = new PLYLoader();
 
 function setStatus(message, isError = false) {
   statusEl.textContent = message;
-  statusEl.style.color = isError ? "var(--danger)" : "var(--text)";
+  if (statusCardEl) {
+    statusCardEl.dataset.state = isError ? "error" : "normal";
+  }
 }
 
 function setTimings(timings) {
@@ -195,10 +236,12 @@ async function loadPointCloud(plyUrl) {
 
         geometry.computeBoundingSphere();
         const material = new THREE.PointsMaterial({
-          size: 0.006,
+          size: 0.0055,
           sizeAttenuation: true,
           vertexColors: !!geometry.getAttribute("color"),
-          color: geometry.getAttribute("color") ? 0xffffff : 0x9be7d6,
+          color: geometry.getAttribute("color") ? 0xffffff : 0x2563eb,
+          opacity: 0.95,
+          transparent: true,
         });
 
         currentPointCloud = new THREE.Points(geometry, material);
@@ -259,6 +302,11 @@ function setMeshPlaceholder(text) {
   meshPathSelect.appendChild(option);
 }
 
+function setMeshCountLabel(filteredCount = 0, totalCount = 0, truncated = false) {
+  const suffix = truncated ? " (truncated)" : "";
+  meshCountEl.textContent = `${filteredCount} / ${totalCount} mesh files${suffix}`;
+}
+
 function applyMeshFilter() {
   const keyword = meshFilterInput.value.trim().toLowerCase();
   const filtered = !keyword
@@ -266,8 +314,7 @@ function applyMeshFilter() {
     : allMeshPaths.filter((path) => path.toLowerCase().includes(keyword));
 
   renderMeshOptions(filtered);
-  const trunc = meshListTruncated ? " (truncated)" : "";
-  meshCountEl.textContent = `${filtered.length} / ${allMeshPaths.length} mesh files${trunc}`;
+  setMeshCountLabel(filtered.length, allMeshPaths.length, meshListTruncated);
 }
 
 async function loadMeshRoots() {
@@ -290,7 +337,9 @@ async function loadMeshList() {
   const root = meshRootSelect.value;
   if (!root) {
     allMeshPaths = [];
+    meshListTruncated = false;
     setMeshPlaceholder("No mesh root selected");
+    setMeshCountLabel(0, 0, false);
     return;
   }
 
@@ -307,6 +356,7 @@ async function loadMeshList() {
     allMeshPaths = [];
     meshListTruncated = false;
     setMeshPlaceholder("Failed to load mesh list");
+    setMeshCountLabel(0, 0, false);
     throw error;
   }
 }
@@ -545,20 +595,28 @@ async function clearHistory() {
   }
 }
 
-meshRootSelect.addEventListener("change", () => {
+meshRootSelect?.addEventListener("change", () => {
   loadMeshList().catch((err) => setStatus(`Failed to list meshes: ${err.message}`, true));
 });
 
-refreshMeshesButton.addEventListener("click", () => {
+refreshMeshesButton?.addEventListener("click", () => {
   loadMeshList().catch((err) => setStatus(`Failed to list meshes: ${err.message}`, true));
 });
 
-meshFilterInput.addEventListener("input", applyMeshFilter);
-prepareButton.addEventListener("click", handlePrepare);
-reconstructButton.addEventListener("click", handleReconstruct);
-clearHistoryButton.addEventListener("click", clearHistory);
+meshFilterInput?.addEventListener("input", applyMeshFilter);
+prepareButton?.addEventListener("click", handlePrepare);
+reconstructButton?.addEventListener("click", handleReconstruct);
+clearHistoryButton?.addEventListener("click", clearHistory);
 
 async function bootstrap() {
+  const missingElements = getMissingCriticalElementNames();
+  if (missingElements.length > 0) {
+    console.error(
+      `Initialization failed: missing DOM elements: ${missingElements.join(", ")}`
+    );
+    return;
+  }
+
   resizePointViewer();
   animate();
   renderGallery(rgbGallery, [], "RGB");

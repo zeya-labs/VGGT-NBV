@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>MapAnything Reconstruction Lab</title>
-    <link rel="stylesheet" href="/static/style.css" />
+    <link rel="stylesheet" href="/static/style.css?v=20260309b" />
     <script type="importmap">
       {
         "imports": {
@@ -14,153 +14,220 @@
     </script>
   </head>
   <body>
-    <div id="page-bg"></div>
     <div id="app">
-      <aside class="panel control-panel">
-        <h1>Reconstruction Lab</h1>
-        <p class="subtitle">House3K-style camera sampling + MapAnything reconstruction</p>
+      <header class="panel hero-panel">
+        <div class="hero-copy">
+          <span class="eyebrow">MapAnything Reconstruction</span>
+          <h1>Reconstruction Console</h1>
+          <p class="subtitle">A cleaner workspace for mesh sampling, preview preparation, and point cloud inspection.</p>
+        </div>
 
-        <section>
-          <h2>Mesh Selection</h2>
-          <label for="mesh-root">Mesh Root</label>
-          <div class="row">
-            <select id="mesh-root"></select>
-            <button id="refresh-meshes" type="button">Refresh</button>
+        <div class="hero-stats">
+          <div class="stat-card">
+            <span class="stat-label">Current Run</span>
+            <strong id="run-id" class="stat-value">run: -</strong>
           </div>
-
-          <label for="mesh-filter">Filter</label>
-          <input id="mesh-filter" type="text" placeholder="Search by filename..." />
-
-          <label for="mesh-path">Mesh Path</label>
-          <select id="mesh-path"></select>
-          <p id="mesh-count" class="hint"></p>
-        </section>
-
-        <section>
-          <h2>Input Views</h2>
-          <div class="grid-two">
-            <div>
-              <label for="num-views">Images</label>
-              <input id="num-views" type="number" min="1" max="32" value="2" />
-            </div>
-            <div>
-              <label for="seed">Seed</label>
-              <input id="seed" type="number" value="42" />
-            </div>
+          <div class="stat-card">
+            <span class="stat-label">Mesh Inventory</span>
+            <strong id="mesh-count" class="stat-value">0 / 0 mesh files</strong>
           </div>
-
-          <label for="sampling-mode">Sampling Mode</label>
-          <select id="sampling-mode">
-            <option value="deterministic_per_call" selected>deterministic_per_call</option>
-            <option value="fully_random">fully_random</option>
-            <option value="fixed">fixed</option>
-          </select>
-
-          <div class="grid-three">
-            <div>
-              <label for="camera-radius">Radius</label>
-              <input id="camera-radius" type="number" step="0.1" value="1.6" />
-            </div>
-            <div>
-              <label for="camera-var">Variation</label>
-              <input id="camera-var" type="number" step="0.1" value="0.0" />
-            </div>
-            <div>
-              <label for="radius-mode">Radius Mode</label>
-              <select id="radius-mode">
-                <option value="random" selected>random</option>
-                <option value="constant">constant</option>
-              </select>
-            </div>
+          <div class="stat-card">
+            <span class="stat-label">Point Cloud</span>
+            <strong id="point-stats" class="stat-value">points: -</strong>
           </div>
-        </section>
+        </div>
+      </header>
 
-        <section>
-          <h2>Render Settings</h2>
-          <div class="grid-two">
-            <div>
-              <label for="image-size">Image Size</label>
-              <input id="image-size" type="number" min="70" max="1120" step="14" value="518" />
+      <div class="layout">
+        <aside class="control-panel">
+          <section class="panel form-card">
+            <div class="section-head">
+              <div>
+                <span class="section-kicker">Source</span>
+                <h2>Mesh Selection</h2>
+              </div>
             </div>
-            <div>
-              <label for="fov">FOV</label>
-              <input id="fov" type="number" min="10" max="150" step="1" value="60" />
+
+            <label for="mesh-root">Mesh Root</label>
+            <div class="inline-action">
+              <select id="mesh-root"></select>
+              <button id="refresh-meshes" class="button-secondary button-compact" type="button">Refresh</button>
             </div>
-          </div>
 
-          <div class="grid-two">
-            <div>
-              <label for="conf-threshold">Conf Threshold</label>
-              <input id="conf-threshold" type="number" min="0" max="1" step="0.05" value="0.0" />
+            <label for="mesh-filter">Filter</label>
+            <input id="mesh-filter" type="text" placeholder="Search by filename..." />
+
+            <label for="mesh-path">Mesh Path</label>
+            <select id="mesh-path"></select>
+            <p class="field-note">Refresh to sync the current server-side mesh index.</p>
+          </section>
+
+          <section class="panel form-card">
+            <div class="section-head">
+              <div>
+                <span class="section-kicker">Sampling</span>
+                <h2>Input Views</h2>
+              </div>
             </div>
-            <div>
-              <label for="max-points">Max Points</label>
-              <input id="max-points" type="number" min="1000" max="2000000" step="1000" value="300000" />
+
+            <div class="grid-two">
+              <div>
+                <label for="num-views">Images</label>
+                <input id="num-views" type="number" min="1" max="32" value="2" />
+              </div>
+              <div>
+                <label for="seed">Seed</label>
+                <input id="seed" type="number" value="42" />
+              </div>
             </div>
-          </div>
 
-          <label for="display-mode">Display Mode</label>
-          <select id="display-mode">
-            <option value="both" selected>both (GT+Recon)</option>
-            <option value="gt_only">gt_only (GT only)</option>
-            <option value="recon_only">recon_only (Recon only)</option>
-          </select>
+            <label for="sampling-mode">Sampling Mode</label>
+            <select id="sampling-mode">
+              <option value="deterministic_per_call" selected>deterministic_per_call</option>
+              <option value="fully_random">fully_random</option>
+              <option value="fixed">fixed</option>
+            </select>
 
-          <label class="checkbox-line">
-            <input id="show-depth" type="checkbox" />
-            <span>Preview depth images</span>
-          </label>
+            <div class="grid-three">
+              <div>
+                <label for="camera-radius">Radius</label>
+                <input id="camera-radius" type="number" step="0.1" value="1.6" />
+              </div>
+              <div>
+                <label for="camera-var">Variation</label>
+                <input id="camera-var" type="number" step="0.1" value="0.0" />
+              </div>
+              <div>
+                <label for="radius-mode">Radius Mode</label>
+                <select id="radius-mode">
+                  <option value="random" selected>random</option>
+                  <option value="constant">constant</option>
+                </select>
+              </div>
+            </div>
+          </section>
 
-          <label class="checkbox-line">
-            <input id="use-depth-recon" type="checkbox" checked />
-            <span>Use depth in reconstruction</span>
-          </label>
-        </section>
+          <section class="panel form-card">
+            <div class="section-head">
+              <div>
+                <span class="section-kicker">Render</span>
+                <h2>Reconstruction Settings</h2>
+              </div>
+            </div>
 
-        <section class="action-row">
-          <button id="prepare-btn" type="button">1) Prepare Inputs</button>
-          <button id="reconstruct-btn" type="button" disabled>2) Reconstruct</button>
-        </section>
+            <div class="grid-two">
+              <div>
+                <label for="image-size">Image Size</label>
+                <input id="image-size" type="number" min="70" max="1120" step="14" value="518" />
+              </div>
+              <div>
+                <label for="fov">FOV</label>
+                <input id="fov" type="number" min="10" max="150" step="1" value="60" />
+              </div>
+            </div>
 
-        <section>
-          <h2>Status</h2>
-          <p id="status">Idle</p>
-          <pre id="timings"></pre>
-        </section>
+            <div class="grid-two">
+              <div>
+                <label for="conf-threshold">Conf Threshold</label>
+                <input id="conf-threshold" type="number" min="0" max="1" step="0.05" value="0.0" />
+              </div>
+              <div>
+                <label for="max-points">Max Points</label>
+                <input id="max-points" type="number" min="1000" max="2000000" step="1000" value="300000" />
+              </div>
+            </div>
 
-        <section>
-          <div class="row">
-            <h2>History</h2>
-            <button id="clear-history" type="button">Clear</button>
-          </div>
-          <div id="history"></div>
-        </section>
-      </aside>
+            <label for="display-mode">Display Mode</label>
+            <select id="display-mode">
+              <option value="both" selected>both (GT+Recon)</option>
+              <option value="gt_only">gt_only (GT only)</option>
+              <option value="recon_only">recon_only (Recon only)</option>
+            </select>
 
-      <main class="workspace">
-        <section class="panel preview-panel">
-          <div class="row">
-            <h2>Input RGB</h2>
-            <span id="run-id" class="badge">run: -</span>
-          </div>
-          <div id="rgb-gallery" class="gallery"></div>
-        </section>
+            <label class="checkbox-line">
+              <input id="show-depth" type="checkbox" />
+              <span>Preview depth images</span>
+            </label>
 
-        <section class="panel preview-panel">
-          <h2>Depth (Optional)</h2>
-          <div id="depth-gallery" class="gallery"></div>
-        </section>
+            <label class="checkbox-line">
+              <input id="use-depth-recon" type="checkbox" checked />
+              <span>Use depth in reconstruction</span>
+            </label>
+          </section>
 
-        <section class="panel viewer-panel">
-          <div class="row">
-            <h2>Point Cloud Viewer (GT / Recon)</h2>
-            <span id="point-stats" class="badge">points: -</span>
-          </div>
-          <canvas id="pointcloud-canvas"></canvas>
-        </section>
-      </main>
+          <section class="panel action-card">
+            <div class="section-head">
+              <div>
+                <span class="section-kicker">Run</span>
+                <h2>Execution</h2>
+              </div>
+            </div>
+            <div class="action-row">
+              <button id="prepare-btn" class="button-primary" type="button">1. Prepare Inputs</button>
+              <button id="reconstruct-btn" class="button-accent" type="button" disabled>2. Reconstruct</button>
+            </div>
+          </section>
+
+          <section id="status-card" class="panel status-card" data-state="normal">
+            <div class="section-head">
+              <div>
+                <span class="section-kicker">State</span>
+                <h2>Run Status</h2>
+              </div>
+            </div>
+            <p id="status">Idle</p>
+            <pre id="timings"></pre>
+          </section>
+        </aside>
+
+        <main class="workspace">
+          <section class="panel preview-panel">
+            <div class="panel-head">
+              <div>
+                <span class="section-kicker">Prepared Inputs</span>
+                <h2>RGB Gallery</h2>
+              </div>
+              <span class="badge">Rendered Views</span>
+            </div>
+            <div id="rgb-gallery" class="gallery"></div>
+          </section>
+
+          <section class="panel preview-panel">
+            <div class="panel-head">
+              <div>
+                <span class="section-kicker">Optional Output</span>
+                <h2>Depth Gallery</h2>
+              </div>
+              <span class="badge">Depth Preview</span>
+            </div>
+            <div id="depth-gallery" class="gallery"></div>
+          </section>
+
+          <section class="panel viewer-panel">
+            <div class="panel-head">
+              <div>
+                <span class="section-kicker">Inspection</span>
+                <h2>Point Cloud Viewer</h2>
+              </div>
+              <span class="viewer-note">Orbit to inspect GT and reconstructed points.</span>
+            </div>
+            <canvas id="pointcloud-canvas"></canvas>
+          </section>
+
+          <section class="panel history-panel">
+            <div class="panel-head">
+              <div>
+                <span class="section-kicker">Stored Runs</span>
+                <h2>History</h2>
+              </div>
+              <button id="clear-history" class="button-secondary button-compact" type="button">Clear</button>
+            </div>
+            <div id="history"></div>
+          </section>
+        </main>
+      </div>
     </div>
 
-    <script type="module" src="/static/app.js"></script>
+    <script type="module" src="/static/app.js?v=20260309b"></script>
   </body>
 </html>
