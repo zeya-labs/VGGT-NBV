@@ -1,4 +1,4 @@
-"""Hydra-driven train/test entrypoint for NBV."""
+"""Hydra-driven training script entrypoint for NBV."""
 
 from __future__ import annotations
 

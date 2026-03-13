@@ -260,7 +260,7 @@ PY
 已执行：
 
 - `python -m compileall nbv_framework experiments/mapanything_recon_webui/backend third_party/Depth-Anything-3/src`
-- `python train.py --cfg job`
+- `python -m nbv_framework.scripts.train --cfg job`
 
 实际执行命令：
 
@@ -269,7 +269,7 @@ python -m compileall nbv_framework experiments/mapanything_recon_webui/backend t
 ```
 
 ```bash
-python train.py --cfg job
+python -m nbv_framework.scripts.train --cfg job
 ```
 
 验证结论：

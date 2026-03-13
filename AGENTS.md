@@ -2,7 +2,7 @@
 
 ## 项目结构与模块组织
 - `nbv_framework/`：主代码包，当前以训练流水线为主轴组织。
-- `nbv_framework/cli/`：CLI 入口；`nbv_framework.cli.train:main` 是当前 Hydra 训练入口。
+- `nbv_framework/scripts/`：脚本入口；`nbv_framework.scripts.train:main` 是当前 Hydra 训练入口。
 - `nbv_framework/training/`：Lightning module、datamodule、trainer、losses、装配工厂。
 - `nbv_framework/workflows/`：训练步骤编排与用例逻辑。
 - `nbv_framework/data/`：数据集、loader、collate、House3K 相关数据逻辑。
@@ -12,7 +12,7 @@
 - `nbv_framework/adapters/` 与 `nbv_framework/ports/`：外部依赖适配层与 Protocol 接口约定。
 - `nbv_framework/infrastructure/`：保留低层实现与通用能力，目前主要是 `rendering/`、`observability/`、`utils/`。
 - `configs/nbv/train.yaml`：根训练/评估配置。
-- `train.py`：仓库根训练入口，直接转发到 `nbv_framework.cli.train`。
+- `train.py`：仓库根训练入口，直接转发到 `nbv_framework.scripts.train`。
 - `third_party/`：外来源码；当前包含 `Density_aware_Chamfer_Distance/`、`Depth-Anything-3/`、`map-anything/`、`vggt/`，不要与主包代码混放。
 - `models/` 与 `outputs/`：本地资源与实验产物。
 - `third_party/map-anything/`、`third_party/vggt/`：Git 子模块；修改时需明确是改子模块源码还是仅更新子模块指针。
@@ -23,23 +23,23 @@
 source ./.venv/bin/activate
 
 # 仅检查 Hydra 配置是否可解析
-python train.py --cfg job
+python -m nbv_framework.scripts.train --cfg job
 
 # 4 卡分布式训练
-torchrun --nproc_per_node=4 train.py
+torchrun --nproc_per_node=4 -m nbv_framework.scripts.train
 
 # 从指定 checkpoint 执行评估
-torchrun --nproc_per_node=4 train.py \
+torchrun --nproc_per_node=4 -m nbv_framework.scripts.train \
   experiment.mode=test \
   experiment.resume_checkpoint=/abs/path/model.ckpt
 
 # 训练后立刻测试
-torchrun --nproc_per_node=4 train.py \
+torchrun --nproc_per_node=4 -m nbv_framework.scripts.train \
   experiment.mode=train_test \
   experiment.resume_checkpoint=/abs/path/model.ckpt
 
 # 快速单机烟雾验证
-python train.py \
+python -m nbv_framework.scripts.train \
   data.batch_size=1 \
   data.max_meshes=10 \
   runtime.trainer.devices=1 \
@@ -69,7 +69,7 @@ python -m pytest nbv_framework/tests
 ## 测试指南
 - 仓库没有统一覆盖率门槛；每次修复或功能变更都应补充针对性验证。
 - 优先写可复现的单元测试，尤其是几何、数据变换、workflow 编排和 loss 相关逻辑。
-- 训练入口或装配层改动，至少做一次 `python train.py --cfg job` 和一次单机烟雾验证。
+- 训练入口或装配层改动，至少做一次 `python -m nbv_framework.scripts.train --cfg job` 和一次单机烟雾验证。
 - 若环境中没有 `pytest`，至少执行 `python -m compileall nbv_framework third_party` 作为导入回归检查。
 - 测试命名遵循 `test_*.py` 或 `*_test.py`，尽量与被测模块靠近维护。
 
