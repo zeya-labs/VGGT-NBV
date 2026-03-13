@@ -3,8 +3,23 @@
 
 """NBV Framework package."""
 
+from pathlib import Path
+import sys
+
 __version__ = "0.1.0"
 __author__ = "NBV Research Team"
+
+
+def _append_vendored_source_roots() -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    for relative_path in ("third_party/map-anything", "third_party/vggt"):
+        source_root = repo_root / relative_path
+        source_root_str = str(source_root)
+        if source_root.is_dir() and source_root_str not in sys.path:
+            sys.path.append(source_root_str)
+
+
+_append_vendored_source_roots()
 
 __all__ = [
     "MapAnythingWrapper",

@@ -11,9 +11,12 @@ VGGT基础模型封装类
 - 移除不必要的复杂度评估和特征投影
 """
 
+from typing import Dict, Union
+from pathlib import Path
+import sys
+
 import torch
 import torch.nn as nn
-from typing import Dict, Union
 
 from loguru import logger
 
@@ -22,9 +25,20 @@ try:
     from vggt.utils.pose_enc import pose_encoding_to_extri_intri
     from vggt.utils.geometry_torch import unproject_depth_map_to_point_map_torch
 except ModuleNotFoundError:
-    from vggt.vggt.models.vggt import VGGT  # type: ignore
-    from vggt.vggt.utils.pose_enc import pose_encoding_to_extri_intri  # type: ignore
-    from vggt.vggt.utils.geometry_torch import unproject_depth_map_to_point_map_torch  # type: ignore
+    try:
+        from vggt.vggt.models.vggt import VGGT  # type: ignore
+        from vggt.vggt.utils.pose_enc import pose_encoding_to_extri_intri  # type: ignore
+        from vggt.vggt.utils.geometry_torch import (  # type: ignore
+            unproject_depth_map_to_point_map_torch,
+        )
+    except ModuleNotFoundError:
+        vendored_vggt_root = Path(__file__).resolve().parents[3] / "third_party" / "vggt"
+        vendored_vggt_root_str = str(vendored_vggt_root)
+        if vendored_vggt_root.is_dir() and vendored_vggt_root_str not in sys.path:
+            sys.path.append(vendored_vggt_root_str)
+        from vggt.models.vggt import VGGT  # type: ignore
+        from vggt.utils.pose_enc import pose_encoding_to_extri_intri  # type: ignore
+        from vggt.utils.geometry_torch import unproject_depth_map_to_point_map_torch  # type: ignore
 
 
 class VGGTWrapper(nn.Module):

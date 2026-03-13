@@ -1880,7 +1880,7 @@ wheels = [
 [[package]]
 name = "mapanything"
 version = "1.0"
-source = { editable = "map-anything" }
+source = { editable = "third_party/map-anything" }
 dependencies = [
     { name = "huggingface-hub" },
     { name = "hydra-core" },
@@ -1967,17 +1967,17 @@ requires-dist = [
     { name = "huggingface-hub" },
     { name = "hydra-core" },
     { name = "lightglue", marker = "extra == 'colmap'", git = "https://github.com/cvg/LightGlue.git" },
-    { name = "mapanything", extras = ["anycalib"], marker = "extra == 'all'", editable = "map-anything" },
-    { name = "mapanything", extras = ["colmap"], marker = "extra == 'all'", editable = "map-anything" },
-    { name = "mapanything", extras = ["data"], marker = "extra == 'all'", editable = "map-anything" },
-    { name = "mapanything", extras = ["dev"], marker = "extra == 'all'", editable = "map-anything" },
-    { name = "mapanything", extras = ["dust3r"], marker = "extra == 'all'", editable = "map-anything" },
-    { name = "mapanything", extras = ["gradio"], marker = "extra == 'all'", editable = "map-anything" },
-    { name = "mapanything", extras = ["mast3r"], marker = "extra == 'all'", editable = "map-anything" },
-    { name = "mapanything", extras = ["must3r"], marker = "extra == 'all'", editable = "map-anything" },
-    { name = "mapanything", extras = ["pow3r"], marker = "extra == 'all'", editable = "map-anything" },
-    { name = "mapanything", extras = ["radio"], marker = "extra == 'all'", editable = "map-anything" },
-    { name = "mapanything", extras = ["rmvd"], marker = "extra == 'all'", editable = "map-anything" },
+    { name = "mapanything", extras = ["anycalib"], marker = "extra == 'all'", editable = "third_party/map-anything" },
+    { name = "mapanything", extras = ["colmap"], marker = "extra == 'all'", editable = "third_party/map-anything" },
+    { name = "mapanything", extras = ["data"], marker = "extra == 'all'", editable = "third_party/map-anything" },
+    { name = "mapanything", extras = ["dev"], marker = "extra == 'all'", editable = "third_party/map-anything" },
+    { name = "mapanything", extras = ["dust3r"], marker = "extra == 'all'", editable = "third_party/map-anything" },
+    { name = "mapanything", extras = ["gradio"], marker = "extra == 'all'", editable = "third_party/map-anything" },
+    { name = "mapanything", extras = ["mast3r"], marker = "extra == 'all'", editable = "third_party/map-anything" },
+    { name = "mapanything", extras = ["must3r"], marker = "extra == 'all'", editable = "third_party/map-anything" },
+    { name = "mapanything", extras = ["pow3r"], marker = "extra == 'all'", editable = "third_party/map-anything" },
+    { name = "mapanything", extras = ["radio"], marker = "extra == 'all'", editable = "third_party/map-anything" },
+    { name = "mapanything", extras = ["rmvd"], marker = "extra == 'all'", editable = "third_party/map-anything" },
     { name = "mast3r", marker = "extra == 'mast3r'", git = "https://github.com/Nik-V9/mast3r.git?rev=main" },
     { name = "must3r", marker = "extra == 'must3r'", git = "https://github.com/naver/must3r.git?rev=main" },
     { name = "natsort" },
@@ -4572,7 +4572,7 @@ requires-dist = [
     { name = "lightning", specifier = ">=2.6.0" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "lovely-tensors", specifier = ">=0.1.20" },
-    { name = "mapanything", editable = "map-anything" },
+    { name = "mapanything", editable = "third_party/map-anything" },
     { name = "numpy" },
     { name = "pykeops" },
     { name = "pytorch3d", git = "https://github.com/facebookresearch/pytorch3d.git?rev=75ebeeaea0908c5527e7b1e305fbc7681382db47" },

@@ -13,9 +13,9 @@
 - `nbv_framework/infrastructure/`：保留低层实现与通用能力，目前主要是 `rendering/`、`observability/`、`utils/`。
 - `configs/nbv/train.yaml`：根训练/评估配置。
 - `train.py`：仓库根训练入口，直接转发到 `nbv_framework.cli.train`。
-- `third_party/`：外来源码；当前包含 `Density_aware_Chamfer_Distance/`，不要与主包代码混放。
+- `third_party/`：外来源码；当前包含 `Density_aware_Chamfer_Distance/`、`Depth-Anything-3/`、`map-anything/`、`vggt/`，不要与主包代码混放。
 - `models/` 与 `outputs/`：本地资源与实验产物。
-- `map-anything/`、`vggt/`：Git 子模块；修改时需明确是改子模块源码还是仅更新子模块指针。
+- `third_party/map-anything/`、`third_party/vggt/`：Git 子模块；修改时需明确是改子模块源码还是仅更新子模块指针。
 
 ## 构建、测试与开发命令
 ```bash
@@ -46,7 +46,7 @@ python train.py \
   runtime.trainer.limit_val_batches=0
 
 # 子模块格式化与检查
-cd map-anything && pre-commit run -a
+cd third_party/map-anything && pre-commit run -a
 
 # 可选：若环境已安装 pytest，执行针对性测试
 python -m pytest nbv_framework/tests
@@ -77,4 +77,4 @@ python -m pytest nbv_framework/tests
 - 优先使用 Conventional Commit，例如 `feat(nbv): ...`、`fix: ...`、`refactor(nbv): ...`、`docs: ...`。
 - 单次提交聚焦单一变更；提交说明中写明关键 Hydra 覆盖参数和运行前提。
 - PR 至少包含：变更目的、影响范围、验证步骤、相关 issue/任务。
-- 涉及 `third_party/`、`map-anything/` 或 `vggt/` 时，明确说明是修改第三方源码、修改子模块源码，还是仅更新指针。
+- 涉及 `third_party/`、`third_party/map-anything/` 或 `third_party/vggt/` 时，明确说明是修改第三方源码、修改子模块源码，还是仅更新指针。

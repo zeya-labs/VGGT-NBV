@@ -38,5 +38,5 @@ pytorch3d = [{ requirement = "torch", match-runtime = true }]
 
 [tool.uv.workspace]
 members = [
-    "map-anything",
+    "third_party/map-anything",
 ]
