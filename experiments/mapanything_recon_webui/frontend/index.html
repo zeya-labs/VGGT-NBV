@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>MapAnything Reconstruction Lab</title>
+    <title>Reconstruction Lab</title>
     <link rel="stylesheet" href="/static/style.css?v=20260309b" />
     <script type="importmap">
       {
@@ -17,9 +17,9 @@
     <div id="app">
       <header class="panel hero-panel">
         <div class="hero-copy">
-          <span class="eyebrow">MapAnything Reconstruction</span>
+          <span class="eyebrow">Multi-Backend Reconstruction</span>
           <h1>Reconstruction Console</h1>
-          <p class="subtitle">A cleaner workspace for mesh sampling, preview preparation, and point cloud inspection.</p>
+          <p class="subtitle">A cleaner workspace for mesh sampling, preview preparation, and point cloud inspection across MapAnything and Depth Anything 3.</p>
         </div>
 
         <div class="hero-stats">
@@ -117,9 +117,19 @@
 
             <div class="grid-two">
               <div>
+                <label for="reconstruction-model">Reconstruction Model</label>
+                <select id="reconstruction-model">
+                  <option value="depthanything3" selected>Depth Anything 3</option>
+                  <option value="mapanything">MapAnything</option>
+                </select>
+              </div>
+              <div>
                 <label for="image-size">Image Size</label>
                 <input id="image-size" type="number" min="70" max="1120" step="14" value="518" />
               </div>
+            </div>
+
+            <div class="grid-two">
               <div>
                 <label for="fov">FOV</label>
                 <input id="fov" type="number" min="10" max="150" step="1" value="60" />

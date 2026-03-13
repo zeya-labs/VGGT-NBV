@@ -11,6 +11,7 @@ TEMP/
 color_ball/
 .gradio/
 *.json
+workspace/
 
 # Python
 __pycache__/

@@ -30,3 +30,16 @@ def test_validate_config_rejects_invalid_candidate_reconstruction_mode() -> None
     cfg.model.candidate_reconstruction_mode = "invalid"
     with pytest.raises(ValueError, match="Unsupported model.candidate_reconstruction_mode"):
         validate_config(cfg)
+
+
+def test_validate_config_accepts_depthanything3_scene_encoder() -> None:
+    cfg = NBVConfig()
+    cfg.model.scene_encoder_type = "depthanything3"
+    validate_config(cfg)
+
+
+def test_validate_config_rejects_invalid_scene_encoder_type() -> None:
+    cfg = NBVConfig()
+    cfg.model.scene_encoder_type = "invalid"
+    with pytest.raises(ValueError, match="Unsupported model.scene_encoder_type"):
+        validate_config(cfg)

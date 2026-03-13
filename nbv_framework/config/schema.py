@@ -31,6 +31,7 @@ class ExperimentConfig:
 
 @dataclass
 class ModelConfig:
+    scene_encoder_type: str = "mapanything"
     scene_feature_dim: int = 768
     policy_hidden_dim: int = 512
     policy_num_heads: int = 4
@@ -41,6 +42,12 @@ class ModelConfig:
     mapanything_model_name: str = "facebook/map-anything"
     mapanything_revision: Optional[str] = "6f3a25bfbb8fcc799176bb01e9d07dfb49d5416a"
     mapanything_local_files_only: bool = True
+    depthanything3_model_name_or_path: str = "depth-anything/DA3-BASE"
+    depthanything3_revision: Optional[str] = None
+    depthanything3_local_files_only: bool = False
+    depthanything3_feature_layer: Optional[int] = None
+    depthanything3_use_ray_pose: bool = False
+    depthanything3_ref_view_strategy: str = "saddle_balanced"
     image_size: int = 518
     up_axis: str = "Y"
     pose_outer_radius: float = 2.0

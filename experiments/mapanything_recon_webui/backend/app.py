@@ -48,7 +48,7 @@ INDEX_PATH = RESULTS_DIR / "index.json"
 
 PREPARED_CACHE = PreparedRunCache(max_entries=8)
 
-app = FastAPI(title="MapAnything Reconstruction WebUI")
+app = FastAPI(title="Reconstruction WebUI")
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 app.mount("/results", StaticFiles(directory=RESULTS_DIR), name="results")
 
@@ -218,6 +218,7 @@ def reconstruct(payload: ReconstructRequest) -> ReconstructResponse:
             max_points=payload.max_points,
             use_depth_input=payload.use_depth_input,
             display_mode=payload.display_mode,
+            reconstruction_model=payload.reconstruction_model,
         )
     except Exception as exc:
         logger.exception("reconstruct failed for run_id=%s", payload.run_id)
@@ -229,11 +230,12 @@ def reconstruct(payload: ReconstructRequest) -> ReconstructResponse:
         "num_points_before_sampling": result.num_points_before_sampling,
         "num_points_gt": result.num_points_gt,
         "num_points_recon": result.num_points_recon,
+        "reconstruction_model": result.reconstruction_model,
         "display_mode": result.display_mode,
         "timings": result.timings,
         "conf_threshold": payload.conf_threshold,
         "max_points": payload.max_points,
-        "use_depth_input": payload.use_depth_input,
+        "used_depth_input": result.used_depth_input,
     }
     _upsert_history(payload.run_id, {"reconstruct": reconstruction_payload})
 
@@ -256,8 +258,9 @@ def reconstruct(payload: ReconstructRequest) -> ReconstructResponse:
         num_points_before_sampling=result.num_points_before_sampling,
         num_points_gt=result.num_points_gt,
         num_points_recon=result.num_points_recon,
+        reconstruction_model=result.reconstruction_model,
         display_mode=result.display_mode,
-        used_depth_input=payload.use_depth_input,
+        used_depth_input=result.used_depth_input,
         created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         timings=result.timings,
     )

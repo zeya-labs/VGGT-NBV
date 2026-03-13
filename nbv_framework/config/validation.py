@@ -22,6 +22,15 @@ def validate_config(cfg: Any) -> None:
     if mode not in {"train", "test", "train_test"}:
         raise ValueError(f"Unsupported experiment.mode={mode!r}. Expected train|test|train_test")
 
+    scene_encoder_type = str(
+        _get(cfg, "model", "scene_encoder_type", default="mapanything")
+    ).lower().strip()
+    if scene_encoder_type not in {"mapanything", "depthanything3"}:
+        raise ValueError(
+            "Unsupported model.scene_encoder_type="
+            f"{scene_encoder_type!r}. Expected mapanything|depthanything3"
+        )
+
     reconstruction_mode = str(
         _get(cfg, "model", "candidate_reconstruction_mode", default="scene_encoder")
     ).lower().strip()

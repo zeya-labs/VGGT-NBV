@@ -5,9 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import torch.nn as nn
+from loguru import logger
+
 from nbv_framework.adapters import (
     ChamferMetricsAdapter,
     DepthVisualizationAdapter,
+    DepthAnything3SceneEncoderAdapter,
     MapAnythingSceneEncoderAdapter,
     PyTorch3DMeshRepositoryAdapter,
     PyTorch3DRendererAdapter,
@@ -17,6 +21,7 @@ from nbv_framework.infrastructure.rendering.differentiable_renderer import Diffe
 from nbv_framework.training.lightning_module import LightningNBVModule
 from nbv_framework.training.losses import ReconstructionLoss
 from nbv_framework.models.policy.attention_policy_network import AttentionNBVPolicy
+from nbv_framework.models.scene_encoder.depthanything3_encoder import DepthAnything3Wrapper
 from nbv_framework.models.scene_encoder.mapanything_encoder import MapAnythingWrapper
 from nbv_framework.workflows import (
     BatchPreparationUseCase,
@@ -29,7 +34,9 @@ from nbv_framework.workflows import (
 
 @dataclass(frozen=True)
 class _CoreComponents:
-    mapanything: MapAnythingWrapper
+    scene_encoder_module: nn.Module
+    scene_encoder_adapter: Any
+    scene_feature_dim: int
     policy_network: AttentionNBVPolicy
     renderer: DifferentiableRenderer
     loss_module: ReconstructionLoss
@@ -38,7 +45,7 @@ class _CoreComponents:
 def build_lightning_module(cfg: Any) -> LightningNBVModule:
     components = _build_core_components(cfg)
 
-    scene_encoder = MapAnythingSceneEncoderAdapter(components.mapanything)
+    scene_encoder = components.scene_encoder_adapter
     renderer_adapter = PyTorch3DRendererAdapter(components.renderer)
     loss_adapter = ReconstructionLossAdapter(components.loss_module)
 
@@ -82,7 +89,7 @@ def build_lightning_module(cfg: Any) -> LightningNBVModule:
     )
 
     return LightningNBVModule(
-        mapanything_module=components.mapanything,
+        mapanything_module=components.scene_encoder_module,
         policy_network=components.policy_network,
         orchestrator=training_step,
         test_evaluator=test_evaluator,
@@ -95,13 +102,9 @@ def build_lightning_module(cfg: Any) -> LightningNBVModule:
 
 
 def _build_core_components(cfg: Any) -> _CoreComponents:
-    mapanything = MapAnythingWrapper(
-        model_name=cfg.model.mapanything_model_name,
-        revision=cfg.model.mapanything_revision,
-        local_files_only=cfg.model.mapanything_local_files_only,
-    )
+    scene_encoder_module, scene_encoder_adapter, scene_feature_dim = _build_scene_encoder(cfg)
     policy_network = AttentionNBVPolicy(
-        scene_feature_dim=cfg.model.scene_feature_dim,
+        scene_feature_dim=scene_feature_dim,
         hidden_dim=cfg.model.policy_hidden_dim,
         num_heads=cfg.model.policy_num_heads,
         num_layers=cfg.model.policy_num_layers,
@@ -116,8 +119,44 @@ def _build_core_components(cfg: Any) -> _CoreComponents:
         pose_floor_margin=cfg.model.pose_floor_margin,
     )
     return _CoreComponents(
-        mapanything=mapanything,
+        scene_encoder_module=scene_encoder_module,
+        scene_encoder_adapter=scene_encoder_adapter,
+        scene_feature_dim=scene_feature_dim,
         policy_network=policy_network,
         renderer=renderer,
         loss_module=loss_module,
+    )
+
+
+def _build_scene_encoder(cfg: Any) -> tuple[nn.Module, Any, int]:
+    scene_encoder_type = str(cfg.model.scene_encoder_type).lower().strip()
+    if scene_encoder_type == "mapanything":
+        wrapper = MapAnythingWrapper(
+            model_name=cfg.model.mapanything_model_name,
+            revision=cfg.model.mapanything_revision,
+            local_files_only=cfg.model.mapanything_local_files_only,
+        )
+        return wrapper, MapAnythingSceneEncoderAdapter(wrapper), int(cfg.model.scene_feature_dim)
+
+    if scene_encoder_type == "depthanything3":
+        wrapper = DepthAnything3Wrapper(
+            model_name_or_path=cfg.model.depthanything3_model_name_or_path,
+            revision=cfg.model.depthanything3_revision,
+            local_files_only=cfg.model.depthanything3_local_files_only,
+            feature_layer=cfg.model.depthanything3_feature_layer,
+            use_ray_pose=cfg.model.depthanything3_use_ray_pose,
+            ref_view_strategy=cfg.model.depthanything3_ref_view_strategy,
+        )
+        configured_dim = int(cfg.model.scene_feature_dim)
+        if configured_dim != int(wrapper.scene_feature_dim):
+            logger.warning(
+                "Overriding cfg.model.scene_feature_dim={} with DA3 feature dim={}",
+                configured_dim,
+                wrapper.scene_feature_dim,
+            )
+        return wrapper, DepthAnything3SceneEncoderAdapter(wrapper), int(wrapper.scene_feature_dim)
+
+    raise ValueError(
+        f"Unsupported model.scene_encoder_type={scene_encoder_type!r}. "
+        "Expected `mapanything` or `depthanything3`."
     )

@@ -8,6 +8,7 @@ __author__ = "NBV Research Team"
 
 __all__ = [
     "MapAnythingWrapper",
+    "DepthAnything3Wrapper",
     "BaseNBVPolicy",
     "AttentionNBVPolicy",
     "DifferentiableRenderer",
@@ -18,11 +19,22 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    if name in {"MapAnythingWrapper", "BaseNBVPolicy", "AttentionNBVPolicy"}:
-        from .models import AttentionNBVPolicy, BaseNBVPolicy, MapAnythingWrapper
+    if name in {
+        "MapAnythingWrapper",
+        "DepthAnything3Wrapper",
+        "BaseNBVPolicy",
+        "AttentionNBVPolicy",
+    }:
+        from .models import (
+            AttentionNBVPolicy,
+            BaseNBVPolicy,
+            DepthAnything3Wrapper,
+            MapAnythingWrapper,
+        )
 
         return {
             "MapAnythingWrapper": MapAnythingWrapper,
+            "DepthAnything3Wrapper": DepthAnything3Wrapper,
             "BaseNBVPolicy": BaseNBVPolicy,
             "AttentionNBVPolicy": AttentionNBVPolicy,
         }[name]

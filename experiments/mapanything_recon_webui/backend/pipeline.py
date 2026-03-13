@@ -1,4 +1,4 @@
-"""Core backend pipeline for input preparation and MapAnything reconstruction."""
+"""Core backend pipeline for input preparation and selectable reconstruction backends."""
 
 from __future__ import annotations
 
@@ -39,6 +39,7 @@ from nbv_framework.data.house3k_camera import (
     House3KCameraPlanner,
 )
 from nbv_framework.data.house3k_sample_builder import build_house3k_sample
+from nbv_framework.models.scene_encoder.depthanything3_encoder import DepthAnything3Wrapper
 from nbv_framework.models.scene_encoder.mapanything_encoder import MapAnythingWrapper
 from nbv_framework.infrastructure.rendering.differentiable_renderer import DifferentiableRenderer
 from nbv_framework.infrastructure.utils.mesh_utils import load_and_normalize_mesh
@@ -64,15 +65,25 @@ class ReconstructResult:
     num_points_gt: int
     num_points_recon: int
     display_mode: DisplayMode
+    used_depth_input: bool
+    reconstruction_model: ReconstructionModelName
     timings: Dict[str, float]
 
 
 DisplayMode = Literal["both", "gt_only", "recon_only"]
+ReconstructionModelName = Literal["mapanything", "depthanything3"]
 
 
 _MODEL_LOCK = Lock()
-_MODEL_INSTANCE: Optional[MapAnythingWrapper] = None
-_MODEL_DEVICE: Optional[str] = None
+_MODEL_INSTANCES: Dict[str, torch.nn.Module] = {}
+_MODEL_DEVICES: Dict[str, str] = {}
+_DA3_MODEL_NAME_OR_PATH = os.environ.get("NBV_DA3_MODEL_NAME_OR_PATH", "depth-anything/DA3-BASE")
+_DA3_REVISION = os.environ.get("NBV_DA3_REVISION") or None
+_DA3_LOCAL_FILES_ONLY = os.environ.get("NBV_DA3_LOCAL_FILES_ONLY", "").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 
 def discover_mesh_roots(repo_root: Path) -> List[Path]:
@@ -262,7 +273,7 @@ def prepare_inputs_for_run(
     image_size = int(request.render.image_size)
     if image_size % 14 != 0:
         raise ValueError(
-            f"render.image_size must be divisible by 14 for MapAnything (got {image_size})."
+            f"render.image_size must be divisible by 14 for ViT-based reconstruction backends (got {image_size})."
         )
 
     resolve_started = perf_counter()
@@ -389,26 +400,55 @@ def prepare_inputs_for_run(
 
 
 def _get_mapanything_model(device: torch.device) -> MapAnythingWrapper:
-    global _MODEL_INSTANCE
-    global _MODEL_DEVICE
-
     with _MODEL_LOCK:
-        if _MODEL_INSTANCE is None:
-            _MODEL_INSTANCE = MapAnythingWrapper(
+        instance = _MODEL_INSTANCES.get("mapanything")
+        if instance is None:
+            instance = MapAnythingWrapper(
                 model_name="facebook/map-anything",
                 revision="6f3a25bfbb8fcc799176bb01e9d07dfb49d5416a",
                 local_files_only=True,
             )
-            _MODEL_INSTANCE.eval()
-            _MODEL_INSTANCE.to(device)
-            _MODEL_DEVICE = str(device)
-            return _MODEL_INSTANCE
+            instance.eval()
+            _MODEL_INSTANCES["mapanything"] = instance
 
-        if _MODEL_DEVICE != str(device):
-            _MODEL_INSTANCE.to(device)
-            _MODEL_DEVICE = str(device)
+        if _MODEL_DEVICES.get("mapanything") != str(device):
+            instance.to(device)
+            _MODEL_DEVICES["mapanything"] = str(device)
 
-        return _MODEL_INSTANCE
+        return instance  # type: ignore[return-value]
+
+
+def _get_depthanything3_model(device: torch.device) -> DepthAnything3Wrapper:
+    with _MODEL_LOCK:
+        instance = _MODEL_INSTANCES.get("depthanything3")
+        if instance is None:
+            instance = DepthAnything3Wrapper(
+                model_name_or_path=_DA3_MODEL_NAME_OR_PATH,
+                revision=_DA3_REVISION,
+                local_files_only=_DA3_LOCAL_FILES_ONLY,
+            )
+            instance.eval()
+            _MODEL_INSTANCES["depthanything3"] = instance
+
+        if _MODEL_DEVICES.get("depthanything3") != str(device):
+            instance.to(device)
+            _MODEL_DEVICES["depthanything3"] = str(device)
+
+        return instance  # type: ignore[return-value]
+
+
+def _get_reconstruction_model(
+    reconstruction_model: ReconstructionModelName,
+    device: torch.device,
+) -> torch.nn.Module:
+    if reconstruction_model == "mapanything":
+        return _get_mapanything_model(device)
+    if reconstruction_model == "depthanything3":
+        return _get_depthanything3_model(device)
+    raise ValueError(
+        f"Unsupported reconstruction_model `{reconstruction_model}`. "
+        "Expected one of: mapanything, depthanything3."
+    )
 
 
 def _normalize_map_to_bshw(
@@ -642,19 +682,21 @@ def reconstruct_and_export(
     max_points: int,
     use_depth_input: bool,
     display_mode: DisplayMode,
+    reconstruction_model: ReconstructionModelName,
 ) -> ReconstructResult:
     timings: Dict[str, float] = {}
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model_started = perf_counter()
-    model = _get_mapanything_model(device)
+    model = _get_reconstruction_model(reconstruction_model, device)
     timings["load_model_s"] = perf_counter() - model_started
 
     run_started = perf_counter()
     images = prepared_run.initial_images.to(device=device, dtype=torch.float32)
     camera_poses = prepared_run.camera_poses.to(device=device, dtype=torch.float32)
+    effective_use_depth_input = bool(use_depth_input and reconstruction_model == "mapanything")
     depth_z = None
-    if use_depth_input and prepared_run.depth_z is not None:
+    if effective_use_depth_input and prepared_run.depth_z is not None:
         depth_z = prepared_run.depth_z.to(device=device, dtype=torch.float32)
 
     with torch.inference_mode():
@@ -685,11 +727,11 @@ def reconstruct_and_export(
     points_np = points.detach().cpu().numpy()
     colors_np = colors.detach().cpu().numpy()
 
-    depth_tag = "with_depth" if use_depth_input else "without_depth"
+    depth_tag = "with_depth" if effective_use_depth_input else "without_depth"
     ply_path = (
         prepared_run.output_dir
         / "reconstruction"
-        / f"point_cloud_{display_mode}_{depth_tag}.ply"
+        / f"point_cloud_{reconstruction_model}_{display_mode}_{depth_tag}.ply"
     )
     _write_colored_ply(ply_path, points_np, colors_np)
     timings["export_point_cloud_s"] = perf_counter() - cloud_started
@@ -701,5 +743,7 @@ def reconstruct_and_export(
         num_points_gt=num_points_gt,
         num_points_recon=num_points_recon,
         display_mode=display_mode,
+        used_depth_input=effective_use_depth_input,
+        reconstruction_model=reconstruction_model,
         timings=timings,
     )

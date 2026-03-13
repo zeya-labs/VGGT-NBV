@@ -13,16 +13,23 @@ experiment:
   output_dir: ${hydra:runtime.cwd}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
 
 model:
+  scene_encoder_type: mapanything  # mapanything | depthanything3
   scene_feature_dim: 768
   policy_hidden_dim: 512
   policy_num_heads: 4
   policy_num_layers: 3
   policy_output_mode: position_only
-  candidate_reconstruction_mode: depth_z  # scene_encoder | point_maps | depth_z
-  candidate_depth_z_detach: false  # only used when candidate_reconstruction_mode=depth_z
+  candidate_reconstruction_mode: point_maps  # scene_encoder | point_maps | depth_z
+  candidate_depth_z_detach: true  # only used when candidate_reconstruction_mode=depth_z
   mapanything_model_name: facebook/map-anything
   mapanything_revision: 6f3a25bfbb8fcc799176bb01e9d07dfb49d5416a
   mapanything_local_files_only: true
+  depthanything3_model_name_or_path: depth-anything/DA3-BASE
+  depthanything3_revision: null
+  depthanything3_local_files_only: false
+  depthanything3_feature_layer: null
+  depthanything3_use_ray_pose: false
+  depthanything3_ref_view_strategy: saddle_balanced
   image_size: 518
   up_axis: Y
   pose_outer_radius: 2.0

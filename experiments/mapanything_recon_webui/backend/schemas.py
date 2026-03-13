@@ -1,4 +1,4 @@
-"""Request/response models for the MapAnything reconstruction WebUI backend."""
+"""Request/response models for the reconstruction WebUI backend."""
 
 from __future__ import annotations
 
@@ -50,6 +50,7 @@ class PrepareInputsResponse(BaseModel):
 
 class ReconstructRequest(BaseModel):
     run_id: str
+    reconstruction_model: Literal["mapanything", "depthanything3"] = "depthanything3"
     conf_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
     max_points: int = Field(default=300000, ge=1000, le=2000000)
     use_depth_input: bool = True
@@ -63,6 +64,7 @@ class ReconstructResponse(BaseModel):
     num_points_before_sampling: int
     num_points_gt: int
     num_points_recon: int
+    reconstruction_model: Literal["mapanything", "depthanything3"]
     display_mode: Literal["both", "gt_only", "recon_only"]
     used_depth_input: bool
     created_at: str

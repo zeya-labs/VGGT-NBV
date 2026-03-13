@@ -17,6 +17,7 @@ const radiusModeSelect = document.getElementById("radius-mode");
 
 const imageSizeInput = document.getElementById("image-size");
 const fovInput = document.getElementById("fov");
+const reconstructionModelSelect = document.getElementById("reconstruction-model");
 const confThresholdInput = document.getElementById("conf-threshold");
 const maxPointsInput = document.getElementById("max-points");
 const displayModeSelect = document.getElementById("display-mode");
@@ -51,6 +52,7 @@ const criticalElements = {
   cameraRadiusInput,
   cameraVarInput,
   radiusModeSelect,
+  reconstructionModelSelect,
   imageSizeInput,
   fovInput,
   confThresholdInput,
@@ -267,6 +269,12 @@ function modeLabel(mode) {
   return "unknown";
 }
 
+function modelLabel(model) {
+  if (model === "depthanything3") return "Depth Anything 3";
+  if (model === "mapanything") return "MapAnything";
+  return model || "unknown";
+}
+
 function setPointStats(total, raw, gtCount, reconCount) {
   const totalSafe = Number.isFinite(Number(total)) ? Number(total) : 0;
   const rawSafe = Number.isFinite(Number(raw)) ? Number(raw) : totalSafe;
@@ -433,13 +441,15 @@ async function handleReconstruct() {
   }
 
   reconstructButton.disabled = true;
-  setStatus("Running MapAnything reconstruction. Please wait...");
+  const reconstructionModel = reconstructionModelSelect.value;
+  setStatus(`Running ${modelLabel(reconstructionModel)} reconstruction. Please wait...`);
 
   try {
     const useDepthInput = !!useDepthReconInput.checked;
     const displayMode = displayModeSelect.value;
     const payload = {
       run_id: currentRunId,
+      reconstruction_model: reconstructionModel,
       conf_threshold: Number.parseFloat(confThresholdInput.value),
       max_points: Number.parseInt(maxPointsInput.value, 10),
       use_depth_input: useDepthInput,
@@ -462,7 +472,9 @@ async function handleReconstruct() {
     setTimings(result.timings);
     const depthMode = result.used_depth_input ? "enabled" : "disabled";
     const mode = modeLabel(result.display_mode);
-    setStatus(`Reconstruction done. mode=${mode}, depth=${depthMode}.`);
+    setStatus(
+      `Reconstruction done. model=${modelLabel(result.reconstruction_model)}, mode=${mode}, depth=${depthMode}.`
+    );
     await loadHistory();
   } catch (error) {
     setStatus(`Reconstruct failed: ${error.message}`, true);
@@ -479,6 +491,12 @@ function applyHistoryRun(record) {
 
   const reconstruct = record.reconstruct;
   if (reconstruct && reconstruct.ply_url) {
+    if (
+      reconstruct.reconstruction_model &&
+      reconstructionModelSelect.querySelector(`option[value="${reconstruct.reconstruction_model}"]`)
+    ) {
+      reconstructionModelSelect.value = reconstruct.reconstruction_model;
+    }
     if (reconstruct.display_mode && displayModeSelect.querySelector(`option[value="${reconstruct.display_mode}"]`)) {
       displayModeSelect.value = reconstruct.display_mode;
     }
@@ -491,7 +509,8 @@ function applyHistoryRun(record) {
     loadPointCloud(withCacheBust(reconstruct.ply_url))
       .then(() => {
         const mode = modeLabel(reconstruct.display_mode);
-        setStatus(`Loaded point cloud from run ${record.run_id} (mode=${mode})`);
+        const model = modelLabel(reconstruct.reconstruction_model);
+        setStatus(`Loaded point cloud from run ${record.run_id} (${model}, mode=${mode})`);
       })
       .catch((err) => setStatus(`Failed to load point cloud: ${err.message}`, true));
   }
@@ -524,13 +543,23 @@ function renderHistory(records) {
       meta.className = "history-meta";
       const rec = record.reconstruct;
       const pointInfo = rec ? ` | points=${rec.num_points}` : " | not reconstructed";
+      const modelInfo = rec && rec.reconstruction_model
+        ? ` | model=${modelLabel(rec.reconstruction_model)}`
+        : "";
       const modeInfo = rec && rec.display_mode
         ? ` | mode=${modeLabel(rec.display_mode)}`
         : "";
-      const depthInfo = rec && typeof rec.use_depth_input === "boolean"
-        ? ` | depth=${rec.use_depth_input ? "on" : "off"}`
+      const depthUsed =
+        rec && typeof rec.used_depth_input === "boolean"
+          ? rec.used_depth_input
+          : rec && typeof rec.use_depth_input === "boolean"
+            ? rec.use_depth_input
+            : null;
+      const depthInfo = depthUsed !== null
+        ? ` | depth=${depthUsed ? "on" : "off"}`
         : "";
-      meta.textContent = `${record.model_name} | views=${record.num_views}${pointInfo}${modeInfo}${depthInfo}`;
+      meta.textContent =
+        `${record.model_name} | views=${record.num_views}${pointInfo}${modelInfo}${modeInfo}${depthInfo}`;
 
       const actions = document.createElement("div");
       actions.className = "history-actions";
@@ -553,7 +582,8 @@ function renderHistory(records) {
               rec.num_points_recon
             );
             const mode = modeLabel(rec.display_mode);
-            setStatus(`Loaded point cloud from run ${record.run_id} (mode=${mode})`);
+            const model = modelLabel(rec.reconstruction_model);
+            setStatus(`Loaded point cloud from run ${record.run_id} (${model}, mode=${mode})`);
           } catch (error) {
             setStatus(`Load cloud failed: ${error.message}`, true);
           }
