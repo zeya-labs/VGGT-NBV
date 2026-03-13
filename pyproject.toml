@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "vggt-nbv"
 version = "0.1.0"
@@ -40,3 +44,6 @@ pytorch3d = [{ requirement = "torch", match-runtime = true }]
 members = [
     "third_party/map-anything",
 ]
+
+[tool.setuptools.packages.find]
+include = ["nbv_framework*"]
