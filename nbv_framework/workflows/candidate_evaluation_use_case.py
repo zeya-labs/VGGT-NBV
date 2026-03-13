@@ -63,10 +63,27 @@ class CandidateEvaluationUseCase:
             out_mask=True,
             out_depth=True,
         )
-        new_images = new_render["rgb"]
-        new_depth_z = new_render["depth"]
-        new_point_maps_render = new_render["points"].permute(0, 2, 3, 1).unsqueeze(1)
-        new_valid_masks = new_render["mask"]
+        new_images = new_render.rgb
+        new_depth_z = new_render.depth
+        new_point_maps = new_render.points
+        new_valid_masks = new_render.mask
+        if (
+            new_images is None
+            or new_depth_z is None
+            or new_point_maps is None
+            or new_valid_masks is None
+        ):
+            raise RuntimeError("Renderer returned incomplete candidate outputs for pose evaluation.")
+
+        new_point_maps_render = new_point_maps.unsqueeze(1)
+        if new_valid_masks.dim() == gt_valid_masks.dim() - 1:
+            new_valid_masks = new_valid_masks.unsqueeze(1)
+        if new_valid_masks.shape[0] != gt_valid_masks.shape[0] or new_valid_masks.shape[-2:] != gt_valid_masks.shape[-2:]:
+            raise RuntimeError(
+                "Renderer returned candidate mask with incompatible shape. "
+                f"Expected batch/spatial dims matching {tuple(gt_valid_masks.shape)}, "
+                f"got {tuple(new_valid_masks.shape)}."
+            )
 
         if on_new_point_maps is not None:
             try:
@@ -84,7 +101,11 @@ class CandidateEvaluationUseCase:
         depth_z_batch = gt_mesh_data.get("depth_z")
         updated_depth_z = None
         if depth_z_batch is not None:
-            updated_depth_z = torch.cat([depth_z_batch, new_depth_z.unsqueeze(-1)], dim=1).contiguous()
+            if depth_z_batch.dim() == 4 and new_depth_z.dim() == 4 and new_depth_z.shape[-1] == 1:
+                next_depth = new_depth_z.squeeze(-1).unsqueeze(1)
+            else:
+                next_depth = new_depth_z.unsqueeze(1)
+            updated_depth_z = torch.cat([depth_z_batch, next_depth], dim=1).contiguous()
             updated_gt_mesh_data["depth_z"] = updated_depth_z
 
         combined_images_batch = torch.cat([initial_images, new_images.unsqueeze(1)], dim=1)

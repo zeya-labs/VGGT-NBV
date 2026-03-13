@@ -3,26 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 import torch.nn as nn
 from loguru import logger
 
-from nbv_framework.adapters import (
-    ChamferMetricsAdapter,
-    DepthVisualizationAdapter,
-    DepthAnything3SceneEncoderAdapter,
-    MapAnythingSceneEncoderAdapter,
-    PyTorch3DMeshRepositoryAdapter,
-    PyTorch3DRendererAdapter,
-    ReconstructionLossAdapter,
-)
+from nbv_framework.config import NBVConfig
+from nbv_framework.adapters.depth import DepthVisualizationAdapter
+from nbv_framework.adapters.loss import ReconstructionLossAdapter
+from nbv_framework.adapters.mesh_repository import PyTorch3DMeshRepositoryAdapter
+from nbv_framework.adapters.metrics import ChamferMetricsAdapter
+from nbv_framework.adapters.renderer import PyTorch3DRendererAdapter
 from nbv_framework.infrastructure.rendering.differentiable_renderer import DifferentiableRenderer
+from nbv_framework.ports import SceneEncoderPort
 from nbv_framework.training.lightning_module import LightningNBVModule
 from nbv_framework.training.losses import ReconstructionLoss
 from nbv_framework.models.policy.attention_policy_network import AttentionNBVPolicy
-from nbv_framework.models.scene_encoder.depthanything3_encoder import DepthAnything3Wrapper
-from nbv_framework.models.scene_encoder.mapanything_encoder import MapAnythingWrapper
 from nbv_framework.workflows import (
     BatchPreparationUseCase,
     CandidateEvaluationUseCase,
@@ -35,14 +30,14 @@ from nbv_framework.workflows import (
 @dataclass(frozen=True)
 class _CoreComponents:
     scene_encoder_module: nn.Module
-    scene_encoder_adapter: Any
+    scene_encoder_adapter: SceneEncoderPort
     scene_feature_dim: int
     policy_network: AttentionNBVPolicy
     renderer: DifferentiableRenderer
     loss_module: ReconstructionLoss
 
 
-def build_lightning_module(cfg: Any) -> LightningNBVModule:
+def build_lightning_module(cfg: NBVConfig) -> LightningNBVModule:
     components = _build_core_components(cfg)
 
     scene_encoder = components.scene_encoder_adapter
@@ -89,7 +84,7 @@ def build_lightning_module(cfg: Any) -> LightningNBVModule:
     )
 
     return LightningNBVModule(
-        mapanything_module=components.scene_encoder_module,
+        scene_encoder_module=components.scene_encoder_module,
         policy_network=components.policy_network,
         orchestrator=training_step,
         test_evaluator=test_evaluator,
@@ -101,7 +96,7 @@ def build_lightning_module(cfg: Any) -> LightningNBVModule:
     )
 
 
-def _build_core_components(cfg: Any) -> _CoreComponents:
+def _build_core_components(cfg: NBVConfig) -> _CoreComponents:
     scene_encoder_module, scene_encoder_adapter, scene_feature_dim = _build_scene_encoder(cfg)
     policy_network = AttentionNBVPolicy(
         scene_feature_dim=scene_feature_dim,
@@ -128,9 +123,14 @@ def _build_core_components(cfg: Any) -> _CoreComponents:
     )
 
 
-def _build_scene_encoder(cfg: Any) -> tuple[nn.Module, Any, int]:
+def _build_scene_encoder(cfg: NBVConfig) -> tuple[nn.Module, SceneEncoderPort, int]:
     scene_encoder_type = str(cfg.model.scene_encoder_type).lower().strip()
     if scene_encoder_type == "mapanything":
+        from nbv_framework.adapters.scene_encoder.mapanything_adapter import (
+            MapAnythingSceneEncoderAdapter,
+        )
+        from nbv_framework.models.scene_encoder.mapanything_encoder import MapAnythingWrapper
+
         wrapper = MapAnythingWrapper(
             model_name=cfg.model.mapanything_model_name,
             revision=cfg.model.mapanything_revision,
@@ -139,6 +139,13 @@ def _build_scene_encoder(cfg: Any) -> tuple[nn.Module, Any, int]:
         return wrapper, MapAnythingSceneEncoderAdapter(wrapper), int(cfg.model.scene_feature_dim)
 
     if scene_encoder_type == "depthanything3":
+        from nbv_framework.adapters.scene_encoder.depthanything3_adapter import (
+            DepthAnything3SceneEncoderAdapter,
+        )
+        from nbv_framework.models.scene_encoder.depthanything3_encoder import (
+            DepthAnything3Wrapper,
+        )
+
         wrapper = DepthAnything3Wrapper(
             model_name_or_path=cfg.model.depthanything3_model_name_or_path,
             revision=cfg.model.depthanything3_revision,

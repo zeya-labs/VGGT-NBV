@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
-from nbv_framework.models.scene_encoder.depthanything3_encoder import DepthAnything3Wrapper
+from nbv_framework.dto import SceneFeatureBatch
 from nbv_framework.reconstruction import ReconstructionData
+
+if TYPE_CHECKING:
+    from nbv_framework.models.scene_encoder.depthanything3_encoder import DepthAnything3Wrapper
 
 
 class DepthAnything3SceneEncoderAdapter:
-    def __init__(self, wrapper: DepthAnything3Wrapper) -> None:
+    def __init__(self, wrapper: "DepthAnything3Wrapper") -> None:
         self.wrapper = wrapper
 
     def extract_scene_features(
@@ -20,7 +23,7 @@ class DepthAnything3SceneEncoderAdapter:
         camera_poses: torch.Tensor,
         *,
         depth_z: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, List[Dict[str, Any]]]:
+    ) -> SceneFeatureBatch:
         return self.wrapper.extract_scene_features(
             images,
             camera_poses,

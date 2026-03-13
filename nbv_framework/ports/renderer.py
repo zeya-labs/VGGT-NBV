@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Dict, Protocol
+from typing import Protocol
 
 import torch
+
+from nbv_framework.dto import CandidateRenderBatch, MultiViewRenderBatch
 
 
 class RendererPort(Protocol):
@@ -17,7 +19,7 @@ class RendererPort(Protocol):
         out_points: bool,
         out_mask: bool,
         out_depth: bool,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> MultiViewRenderBatch:
         """Render multiple known views."""
 
     def render_candidate(
@@ -29,5 +31,5 @@ class RendererPort(Protocol):
         out_points: bool,
         out_mask: bool,
         out_depth: bool,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> CandidateRenderBatch:
         """Render one candidate pose per sample."""

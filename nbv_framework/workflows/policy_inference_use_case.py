@@ -31,14 +31,19 @@ class PolicyInferenceUseCase:
         camera_poses_batch: torch.Tensor,
         depth_z_batch: Optional[torch.Tensor],
     ) -> PolicyInferenceResult:
-        scene_features, views = self.scene_encoder.extract_scene_features(
+        scene_feature_batch = self.scene_encoder.extract_scene_features(
             initial_images,
             camera_poses_batch,
             depth_z=depth_z_batch,
         )
 
-        camera_poses_batch_across_views = compute_pose_for_across_views_in_ref_view(views)
-        policy_output = self.policy_network(scene_features, camera_poses_batch_across_views)
+        camera_poses_batch_across_views = compute_pose_for_across_views_in_ref_view(
+            scene_feature_batch.views
+        )
+        policy_output = self.policy_network(
+            scene_feature_batch.features,
+            camera_poses_batch_across_views,
+        )
 
         next_camera_pose, predicted_relative_position, _ = compute_policy_pose(
             policy_output,
@@ -48,4 +53,3 @@ class PolicyInferenceUseCase:
             next_camera_pose=next_camera_pose,
             predicted_relative_position=predicted_relative_position,
         )
-

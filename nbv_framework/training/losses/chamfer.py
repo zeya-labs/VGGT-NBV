@@ -7,8 +7,9 @@ import torch.nn as nn
 import torch.nn.utils.rnn as rnn_utils
 from geomloss import SamplesLoss
 
-from mapanything.utils.geometry import apply_log_to_norm
 import trimesh
+
+from nbv_framework.geometry.quaternion_ops import apply_log_to_norm
 
 try:
     from third_party.Density_aware_Chamfer_Distance.utils_v2.model_utils import (  # type: ignore

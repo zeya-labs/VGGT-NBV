@@ -200,13 +200,16 @@ class BatchPreparationUseCase:
             out_depth=True,
         )
 
-        subset_images = subset_render_out["rgb"]
+        subset_images = subset_render_out.rgb
+        subset_points = subset_render_out.points
+        subset_masks = subset_render_out.mask
+        subset_depth = subset_render_out.depth
+        if subset_images is None or subset_points is None or subset_masks is None or subset_depth is None:
+            raise RuntimeError("Renderer returned incomplete multi-view outputs for batch preparation.")
         if subset_images.is_floating_point() and subset_images.dtype != torch.float32:
             subset_images = subset_images.to(dtype=torch.float32)
 
-        subset_points = subset_render_out["points"]
-        subset_masks = subset_render_out["mask"].to(dtype=torch.bool)
-        subset_depth = subset_render_out["depth"]
+        subset_masks = subset_masks.to(dtype=torch.bool)
         subset_depth_viz = self.depth_visualizer.normalize_depth_for_visualization(
             subset_depth,
             subset_masks,
@@ -230,4 +233,3 @@ class BatchPreparationUseCase:
         gt_mesh_data["depth_z"] = torch.stack(depth_list, dim=0)
         gt_mesh_data["depth_z_viz"] = torch.stack(depth_viz_list, dim=0)
         return torch.stack(initial_images_list, dim=0), gt_mesh_data
-

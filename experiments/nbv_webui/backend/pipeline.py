@@ -9,12 +9,15 @@ import threading
 import torch
 from pytorch3d.structures import Meshes
 
-from nbv_framework.models.direct_reconstruction import build_recon_from_point_maps
-from nbv_framework.rendering.differentiable_renderer import DifferentiableRenderer
-from nbv_framework.training.loss.reconstruction import ReconstructionLoss
-from nbv_framework.utils.camera_utils import position_to_pose_tensor
-from nbv_framework.utils.mesh_utils import load_and_normalize_mesh, load_mesh_as_pytorch3d
-from nbv_framework.utils.render_utils import render_mesh_views
+from nbv_framework.adapters.renderer import PyTorch3DRendererAdapter
+from nbv_framework.infrastructure.rendering.differentiable_renderer import DifferentiableRenderer
+from nbv_framework.infrastructure.utils.camera_utils import position_to_pose_tensor
+from nbv_framework.infrastructure.utils.mesh_utils import (
+    load_and_normalize_mesh,
+    load_mesh_as_pytorch3d,
+)
+from nbv_framework.reconstruction import build_recon_from_point_maps
+from nbv_framework.training.losses import ReconstructionLoss
 
 _MESH_SAMPLE_CACHE: dict[tuple[str, str, int], dict] = {}
 _MESH_SAMPLE_CACHE_LOCK = threading.Lock()
@@ -149,23 +152,29 @@ def compute_chamfer_record(
 
     camera_poses = _camera_poses_from_inputs(cameras, device=device)
 
-    renderer = DifferentiableRenderer(image_size=image_size, fov=fov)
-    render_out = render_mesh_views(
-        renderer,
-        normalized_mesh,
-        camera_poses,
+    renderer = PyTorch3DRendererAdapter(
+        DifferentiableRenderer(image_size=image_size, fov=fov).to(device)
+    )
+    render_out = renderer.render_views(
+        mesh_batch=normalized_mesh,
+        camera_poses=camera_poses,
         out_rgb=True,
         out_points=True,
         out_mask=True,
+        out_depth=False,
     )
 
-    rgb = render_out["rgb"].contiguous()
-    point_maps = render_out["points"].contiguous()
-    masks = render_out["mask"].contiguous()
+    rgb = render_out.rgb
+    point_maps = render_out.points
+    masks = render_out.mask
+    if rgb is None or point_maps is None or masks is None:
+        raise RuntimeError("Renderer returned incomplete outputs for NBV WebUI Chamfer evaluation.")
+    rgb = rgb.contiguous()
+    point_maps = point_maps.contiguous()
+    masks = masks.contiguous()
 
     recon_data = build_recon_from_point_maps(
-        point_maps,
-        camera_poses,
+        point_maps=point_maps,
         valid_masks=masks,
     )
 

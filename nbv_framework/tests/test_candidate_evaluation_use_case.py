@@ -4,6 +4,7 @@ from typing import Dict, Optional, Tuple
 
 import torch
 
+from nbv_framework.dto import CandidateRenderBatch
 from nbv_framework.workflows.candidate_evaluation_use_case import (
     CandidateEvaluationUseCase,
 )
@@ -18,12 +19,12 @@ class _Renderer:
     def render_candidate(self, **kwargs):
         _ = kwargs
         batch_size, height, width = 1, 4, 4
-        return {
-            "rgb": torch.full((batch_size, 3, height, width), 0.25, dtype=torch.float32),
-            "depth": torch.full((batch_size, 1, height, width), 0.6, dtype=torch.float32),
-            "points": torch.full((batch_size, 3, height, width), 0.1, dtype=torch.float32),
-            "mask": torch.ones((batch_size, 1, height, width), dtype=torch.bool),
-        }
+        return CandidateRenderBatch(
+            rgb=torch.full((batch_size, 3, height, width), 0.25, dtype=torch.float32),
+            depth=torch.full((batch_size, height, width, 1), 0.6, dtype=torch.float32),
+            points=torch.full((batch_size, height, width, 3), 0.1, dtype=torch.float32),
+            mask=torch.ones((batch_size, height, width), dtype=torch.bool),
+        )
 
 
 class _GradRenderer(_Renderer):
@@ -32,10 +33,11 @@ class _GradRenderer(_Renderer):
 
     def render_candidate(self, **kwargs):
         outputs = super().render_candidate(**kwargs)
-        depth = outputs["depth"].clone().requires_grad_(True)
+        assert outputs.depth is not None
+        depth = outputs.depth.clone().requires_grad_(True)
         depth.retain_grad()
         self.last_depth = depth
-        outputs["depth"] = depth
+        outputs.depth = depth
         return outputs
 
 
@@ -138,6 +140,7 @@ def test_candidate_evaluation_uses_scene_encoder_reconstruction() -> None:
     assert combined_camera_poses.shape == (batch_size, num_views + 1, 7)
     assert combined_depth_z is not None
     assert combined_depth_z.shape == (batch_size, num_views + 1, height, width, 1)
+    assert result.gt_mesh_data["gt_valid_masks"].shape == (batch_size, num_views + 1, height, width)
 
     assert len(loss.compute_calls) == 1
     used_recon, _, _, _ = loss.compute_calls[0]

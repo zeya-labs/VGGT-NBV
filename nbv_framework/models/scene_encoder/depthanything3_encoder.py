@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import sys
 import types
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
@@ -17,6 +16,7 @@ from pytorch3d.transforms import quaternion_to_matrix
 from pytorch3d.utils.camera_conversions import opencv_from_cameras_projection
 from safetensors.torch import load_file
 
+from nbv_framework.dto import SceneFeatureBatch
 from nbv_framework.reconstruction import ReconstructionData
 
 TensorDict = Dict[str, torch.Tensor]
@@ -82,22 +82,8 @@ def _ensure_addict_compat() -> None:
     sys.modules["addict"] = module
 
 
-def _ensure_depthanything3_import_path() -> None:
-    repo_root = Path(__file__).resolve().parents[3]
-    src_dir = repo_root / "third_party" / "Depth-Anything-3" / "src"
-    if not src_dir.exists():
-        raise FileNotFoundError(
-            f"Depth Anything 3 source not found: {src_dir}. "
-            "Expected third_party/Depth-Anything-3/src to exist."
-        )
-    src_dir_str = str(src_dir)
-    if src_dir_str not in sys.path:
-        sys.path.insert(0, src_dir_str)
-
-
 def _ensure_depthanything3_runtime() -> None:
     _ensure_addict_compat()
-    _ensure_depthanything3_import_path()
 
 
 def _resolve_pretrained_artifact(
@@ -143,7 +129,13 @@ def _load_pretrained_config(
 
 def _instantiate_da3_model(config_payload: Dict[str, Any]) -> nn.Module:
     _ensure_depthanything3_runtime()
-    from depth_anything_3.cfg import create_object
+    try:
+        from depth_anything_3.cfg import create_object
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "Depth Anything 3 runtime is not installed. Install it with "
+            "`uv pip install -e './third_party/Depth-Anything-3[app]'`."
+        ) from exc
     from omegaconf import OmegaConf
 
     config = config_payload.get("config")
@@ -509,7 +501,7 @@ class DepthAnything3Wrapper(nn.Module):
         fov_degrees: Optional[float] = None,
         view_save_dir: Optional[str] = None,
         mesh_paths: Optional[Sequence[Optional[str]]] = None,
-    ) -> Tuple[torch.Tensor, ViewList]:
+    ) -> SceneFeatureBatch:
         del is_metric_scale, view_save_dir, mesh_paths
         if depth_z is not None and not self._depth_input_warned:
             logger.warning("DepthAnything3Wrapper ignores depth_z input during feature extraction")
@@ -542,7 +534,10 @@ class DepthAnything3Wrapper(nn.Module):
             )
         batch_size, num_views, feat_h, feat_w, feat_dim = feature_map.shape
         scene_features = feature_map.reshape(batch_size, num_views, feat_h * feat_w, feat_dim)
-        return scene_features, _build_policy_views(images, camera_poses)
+        return SceneFeatureBatch(
+            features=scene_features,
+            views=_build_policy_views(images, camera_poses),
+        )
 
     def reconstruct_and_evaluate(
         self,
@@ -642,7 +637,7 @@ class DepthAnything3Wrapper(nn.Module):
         view_save_dir: Optional[str] = None,
         mesh_paths: Optional[Sequence[Optional[str]]] = None,
         align_pts3d_to_input_world: bool = True,
-    ) -> Union[Tuple[torch.Tensor, ViewList], ReconstructionData]:
+    ) -> Union[SceneFeatureBatch, ReconstructionData]:
         if mode == "encode":
             return self.extract_scene_features(
                 images,

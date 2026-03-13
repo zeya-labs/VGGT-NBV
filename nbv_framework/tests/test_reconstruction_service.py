@@ -153,19 +153,21 @@ def test_build_recon_from_depth_z_matches_renderer_output_with_default_signs() -
         out_mask=True,
         out_depth=True,
     )
+    if render_out.points is None or render_out.mask is None or render_out.depth is None:
+        raise AssertionError("Renderer returned incomplete outputs for reconstruction service test")
 
     recon_from_points = build_recon_from_point_maps(
-        point_maps=render_out["points"],
-        valid_masks=render_out["mask"],
+        point_maps=render_out.points,
+        valid_masks=render_out.mask,
     )
     recon_from_depth = build_recon_from_depth_z(
         camera_poses=camera_poses,
-        depth_z=render_out["depth"],
-        valid_masks=render_out["mask"],
+        depth_z=render_out.depth,
+        valid_masks=render_out.mask,
         fov_degrees=fov_degrees,
     )
 
-    mask = render_out["mask"].unsqueeze(-1)
+    mask = render_out.mask.unsqueeze(-1)
     diff = (recon_from_depth.recon_world_points - recon_from_points.recon_world_points).abs()
     valid_diff = diff.masked_select(mask)
 

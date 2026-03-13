@@ -1,0 +1,7 @@
+__pycache__/
+logs/
+outputs/
+*.log
+*.rrd
+*.glb
+*.mp4

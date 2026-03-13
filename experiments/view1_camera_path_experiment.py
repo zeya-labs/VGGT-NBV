@@ -25,7 +25,7 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 import torch
 
-from nbv_framework.utils.mesh_utils import load_mesh_as_pytorch3d, normalize_mesh
+from nbv_framework.infrastructure.utils.mesh_utils import load_mesh_as_pytorch3d, normalize_mesh
 
 
 @dataclass
@@ -97,7 +97,7 @@ def parse_args() -> argparse.Namespace:
         "--normalize_method",
         type=str,
         default="none",
-        help="Normalization method applied to the mesh (see nbv_framework.utils.mesh_utils.normalize_mesh).",
+        help="Normalization method applied to the mesh (see nbv_framework.infrastructure.utils.mesh_utils.normalize_mesh).",
     )
     parser.add_argument(
         "--orientation_stride",

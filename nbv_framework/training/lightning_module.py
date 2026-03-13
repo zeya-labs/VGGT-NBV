@@ -27,7 +27,7 @@ class LightningNBVModule(LightningModule):
     def __init__(
         self,
         *,
-        mapanything_module,
+        scene_encoder_module,
         policy_network,
         orchestrator,
         test_evaluator,
@@ -40,7 +40,7 @@ class LightningNBVModule(LightningModule):
         super().__init__()
         # Register frozen scene encoder as a submodule so Lightning strategy/precision
         # plugins can move/cast it consistently with the training graph.
-        self.mapanything_module = mapanything_module
+        self.scene_encoder_module = scene_encoder_module
         self.policy_network = policy_network
         self.orchestrator = orchestrator
         self.test_evaluator = test_evaluator
@@ -58,7 +58,7 @@ class LightningNBVModule(LightningModule):
 
         self.save_hyperparameters(
             ignore=[
-                "mapanything_module",
+                "scene_encoder_module",
                 "policy_network",
                 "orchestrator",
                 "test_evaluator",

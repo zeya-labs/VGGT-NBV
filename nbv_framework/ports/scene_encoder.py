@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Protocol, Tuple
+from typing import Optional, Protocol
 
 import torch
 
+from nbv_framework.dto import SceneFeatureBatch
 from nbv_framework.reconstruction import ReconstructionData
 
 
@@ -16,7 +17,7 @@ class SceneEncoderPort(Protocol):
         camera_poses: torch.Tensor,
         *,
         depth_z: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, List[Dict[str, Any]]]:
+    ) -> SceneFeatureBatch:
         """Extract scene-level features and auxiliary per-view metadata."""
 
     def reconstruct_and_evaluate(

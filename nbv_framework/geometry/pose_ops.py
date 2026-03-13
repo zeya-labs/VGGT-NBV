@@ -6,10 +6,10 @@ from typing import Any, Dict, List, Tuple
 import torch
 from pytorch3d.transforms import quaternion_to_matrix
 
-from mapanything.utils.geometry import (
+from nbv_framework.geometry.quaternion_ops import (
     normalize_pose_translations,
-    quaternion_to_rotation_matrix,
-    rotation_matrix_to_quaternion,
+    quaternion_to_rotation_matrix_xyzw,
+    rotation_matrix_to_quaternion_xyzw,
     transform_pose_using_quats_and_trans_2_to_1,
 )
 from nbv_framework.geometry.camera_pose import position_to_pose_tensor
@@ -109,9 +109,9 @@ def compute_pose_scale_factor(
     quats_world_to_cam = camera_poses_batch[..., 3:]
 
     B, S, _ = positions_world.shape
-    R_wc = quaternion_to_rotation_matrix(quats_world_to_cam.reshape(-1, 4)).view(B, S, 3, 3)
+    R_wc = quaternion_to_rotation_matrix_xyzw(quats_world_to_cam.reshape(-1, 4)).view(B, S, 3, 3)
     R_cw = R_wc.transpose(-1, -2)
-    quats_cam2world = rotation_matrix_to_quaternion(R_cw.reshape(-1, 3, 3)).view(B, S, 4)
+    quats_cam2world = rotation_matrix_to_quaternion_xyzw(R_cw.reshape(-1, 3, 3)).view(B, S, 4)
     trans_cam2world = positions_world
 
     ref_quat = quats_cam2world[:, 0]

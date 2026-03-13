@@ -2,7 +2,7 @@ import sys
 
 import torch
 
-from nbv_framework.training.loss.Density_aware_Chamfer_Distance.utils_v2.model_utils import calc_emd
+from third_party.Density_aware_Chamfer_Distance.utils_v2.model_utils import calc_emd
 
 
 def main() -> None:

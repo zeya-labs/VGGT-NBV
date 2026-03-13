@@ -270,7 +270,9 @@ def _render_rgb_frames(
                 out_mask=False,
                 out_depth=False,
             )
-            chunk_rgb = render_out["rgb"][0].detach().cpu()
+            if render_out.rgb is None:
+                raise RuntimeError("Renderer returned no RGB frames for mesh render video export.")
+            chunk_rgb = render_out.rgb[0].detach().cpu()
             frames.extend(chunk_rgb[frame_idx] for frame_idx in range(chunk_rgb.shape[0]))
 
     return frames
@@ -435,4 +437,3 @@ __all__ = [
     "render_video_record",
     "resolve_mesh_path",
 ]
-

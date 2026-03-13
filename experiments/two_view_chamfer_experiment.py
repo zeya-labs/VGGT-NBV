@@ -47,19 +47,17 @@ try:
 except ImportError as exc:  # pragma: no cover - torchvision required for image dumps
     raise ImportError("torchvision is required to save rendered images.") from exc
 
-from nbv_framework.models.mapanything_wrapper import MapAnythingWrapper
-from nbv_framework.rendering.differentiable_renderer import DifferentiableRenderer
-from nbv_framework.training.loss import ReconstructionLoss
+from nbv_framework.infrastructure.rendering.differentiable_renderer import DifferentiableRenderer
+from nbv_framework.infrastructure.utils.camera_pose_generator import CameraPoseGenerator
 from mapanything.utils.inference import postprocess_model_outputs_for_inference
-from nbv_framework.utils.camera_utils import (
-    CameraPoseGenerator,
-    world_points_to_camera_depth,
-)
-from nbv_framework.utils.mesh_utils import load_and_normalize_mesh
-from nbv_framework.utils.mapanything_views import (
+from nbv_framework.infrastructure.utils.camera_utils import world_points_to_camera_depth
+from nbv_framework.infrastructure.utils.mapanything_views import (
     pose7d_to_opencv_cam2world_with_official_func,
     prepare_mapanything_views,
 )
+from nbv_framework.infrastructure.utils.mesh_utils import load_and_normalize_mesh
+from nbv_framework.models.scene_encoder.mapanything_encoder import MapAnythingWrapper
+from nbv_framework.training.losses import ReconstructionLoss
 from mapanything.utils.hf_utils.viz import predictions_to_glb
 from pytorch3d.renderer.mesh import TexturesVertex, TexturesUV
 from pytorch3d.structures import Meshes

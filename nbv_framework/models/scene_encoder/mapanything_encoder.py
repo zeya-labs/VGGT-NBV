@@ -9,25 +9,47 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
 
 from loguru import logger
 
-from mapanything.models import MapAnything
-from uniception.models.info_sharing.base import MultiViewTransformerInput
-
+from nbv_framework.dto import SceneFeatureBatch
 from nbv_framework.reconstruction import ReconstructionData
-from nbv_framework.infrastructure.utils.mapanything_views import (
-    dump_mapanything_views_for_debug,
-    prepare_mapanything_views,
-    transform_prediction_pts3d_ref0_to_global,
-)
+
+if TYPE_CHECKING:
+    from mapanything.models import MapAnything
 
 TensorDict = Dict[str, torch.Tensor]
 PredList = List[TensorDict]
+
+
+def _import_mapanything_runtime() -> tuple[type["MapAnything"], type[Any]]:
+    try:
+        from mapanything.models import MapAnything
+        from uniception.models.info_sharing.base import MultiViewTransformerInput
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "MapAnything runtime is not installed. Install it with "
+            "`uv pip install -e ./third_party/map-anything`."
+        ) from exc
+    return MapAnything, MultiViewTransformerInput
+
+
+def _import_mapanything_view_utils():
+    from nbv_framework.infrastructure.utils.mapanything_views import (
+        dump_mapanything_views_for_debug,
+        prepare_mapanything_views,
+        transform_prediction_pts3d_ref0_to_global,
+    )
+
+    return (
+        dump_mapanything_views_for_debug,
+        prepare_mapanything_views,
+        transform_prediction_pts3d_ref0_to_global,
+    )
 
 
 class MapAnythingWrapper(nn.Module):
@@ -49,6 +71,7 @@ class MapAnythingWrapper(nn.Module):
         self.memory_efficient_inference = memory_efficient_inference
 
         logger.info(f"Loading MapAnything model: {model_name}")
+        MapAnything, _ = _import_mapanything_runtime()
         from_pretrained_kwargs = {"local_files_only": bool(local_files_only)}
         if revision is not None:
             from_pretrained_kwargs["revision"] = revision
@@ -77,9 +100,11 @@ class MapAnythingWrapper(nn.Module):
         fov_degrees: Optional[float] = None,
         view_save_dir: Optional[str] = None,
         mesh_paths: Optional[Sequence[Optional[str]]] = None,
-    ) -> Tuple[torch.Tensor, List[Dict[str, Any]]]:
+    ) -> SceneFeatureBatch:
         """提取多视角场景特征, 返回形状 [B, S, P, D]."""
         effective_fov = self.default_fov_degrees if fov_degrees is None else fov_degrees
+        dump_mapanything_views_for_debug, prepare_mapanything_views, _ = _import_mapanything_view_utils()
+        _, MultiViewTransformerInput = _import_mapanything_runtime()
         views, normalized = prepare_mapanything_views(
             images,
             camera_poses,
@@ -133,7 +158,7 @@ class MapAnythingWrapper(nn.Module):
         # [Slist][B,C,Hf,Wf]
         scene_features = self._gather_tokens(final_feat.features) # [B, S, P=Hf*Wf, C]
         # print("scene_features shape:", scene_features.shape)
-        return scene_features, views
+        return SceneFeatureBatch(features=scene_features, views=views)
 
     def reconstruct_and_evaluate(
         self,
@@ -153,6 +178,7 @@ class MapAnythingWrapper(nn.Module):
         ``camera_poses`` 对应的全局世界坐标系。
         """
         effective_fov = self.default_fov_degrees if fov_degrees is None else fov_degrees
+        dump_mapanything_views_for_debug, prepare_mapanything_views, transform_prediction_pts3d_ref0_to_global = _import_mapanything_view_utils()
         views, normalized = prepare_mapanything_views(
             images,
             camera_poses,
@@ -278,7 +304,7 @@ class MapAnythingWrapper(nn.Module):
         view_save_dir: Optional[str] = None,
         mesh_paths: Optional[Sequence[Optional[str]]] = None,
         align_pts3d_to_input_world: bool = True,
-    ) -> Union[Tuple[torch.Tensor, List[Dict[str, Any]]], ReconstructionData]:
+    ) -> Union[SceneFeatureBatch, ReconstructionData]:
         if mode == "encode":
             return self.extract_scene_features(
                 images,

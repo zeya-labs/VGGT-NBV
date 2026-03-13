@@ -16,10 +16,11 @@ from nbv_framework.data.data_loaders import (
 )
 from nbv_framework.data.mixed_dataset import MixedDataset
 from nbv_framework.data.repeated_dataset import RepeatedDataset
+from nbv_framework.config import NBVConfig
 
 
 class NBVDataModule(pl.LightningDataModule):
-    def __init__(self, cfg: Any) -> None:
+    def __init__(self, cfg: NBVConfig) -> None:
         super().__init__()
         self.cfg = cfg
         self.train_dataset: Optional[Dataset] = None

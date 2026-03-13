@@ -12,8 +12,6 @@ VGGT基础模型封装类
 """
 
 from typing import Dict, Union
-from pathlib import Path
-import sys
 
 import torch
 import torch.nn as nn
@@ -24,21 +22,11 @@ try:
     from vggt.models.vggt import VGGT
     from vggt.utils.pose_enc import pose_encoding_to_extri_intri
     from vggt.utils.geometry_torch import unproject_depth_map_to_point_map_torch
-except ModuleNotFoundError:
-    try:
-        from vggt.vggt.models.vggt import VGGT  # type: ignore
-        from vggt.vggt.utils.pose_enc import pose_encoding_to_extri_intri  # type: ignore
-        from vggt.vggt.utils.geometry_torch import (  # type: ignore
-            unproject_depth_map_to_point_map_torch,
-        )
-    except ModuleNotFoundError:
-        vendored_vggt_root = Path(__file__).resolve().parents[3] / "third_party" / "vggt"
-        vendored_vggt_root_str = str(vendored_vggt_root)
-        if vendored_vggt_root.is_dir() and vendored_vggt_root_str not in sys.path:
-            sys.path.append(vendored_vggt_root_str)
-        from vggt.models.vggt import VGGT  # type: ignore
-        from vggt.utils.pose_enc import pose_encoding_to_extri_intri  # type: ignore
-        from vggt.utils.geometry_torch import unproject_depth_map_to_point_map_torch  # type: ignore
+except ModuleNotFoundError as exc:
+    raise ModuleNotFoundError(
+        "VGGT is not installed. Install it with `uv pip install -e ./third_party/vggt` "
+        "before using nbv_framework.models.scene_encoder.vggt_encoder."
+    ) from exc
 
 
 class VGGTWrapper(nn.Module):

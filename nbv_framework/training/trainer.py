@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Optional
+from typing import Optional
 
 from lightning.pytorch import Trainer
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
@@ -12,8 +12,10 @@ from lightning.pytorch.profilers.profiler import Profiler
 from loguru import logger
 from omegaconf import OmegaConf
 
+from nbv_framework.config import NBVConfig
 
-def build_trainer(cfg: Any, profiler: Optional[Profiler] = None) -> Trainer:
+
+def build_trainer(cfg: NBVConfig, profiler: Optional[Profiler] = None) -> Trainer:
     trainer_conf = OmegaConf.to_container(cfg.runtime.trainer, resolve=True)
     limit_val_batches = trainer_conf.get("limit_val_batches", 1.0)
     val_enabled = float(limit_val_batches) != 0.0

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Dict, Optional, Protocol, Tuple
 
 import torch
+from nbv_framework.dto import MetricPointCloudBatch
 from nbv_framework.reconstruction import ReconstructionData
 
 
@@ -33,5 +34,5 @@ class LossPort(Protocol):
         recon_data: ReconstructionData,
         gt_data: Dict[str, torch.Tensor],
         combined_images_batch: Optional[torch.Tensor],
-    ):
+    ) -> MetricPointCloudBatch:
         """Return predicted point clouds for metric computation."""

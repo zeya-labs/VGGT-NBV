@@ -34,12 +34,13 @@ class TestEvaluationUseCase:
             valid_masks=valid_masks,
         )
 
-        pred_points_list, gt_points = self.loss.extract_pred_points(
+        metric_inputs = self.loss.extract_pred_points(
             recon_data,
             gt_mesh_data,
             combined_images_batch,
         )
+        gt_points = metric_inputs.gt_points
         if gt_points is None:
             raise RuntimeError("gt_points missing for test metrics")
 
-        return self.metrics.compute(pred_points_list, gt_points)
+        return self.metrics.compute(metric_inputs.pred_points_list, gt_points)

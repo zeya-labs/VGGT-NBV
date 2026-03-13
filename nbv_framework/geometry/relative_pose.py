@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import Any, Dict, List, Tuple
 
 import torch
-from mapanything.utils.geometry import transform_pose_using_quats_and_trans_2_to_1
+
+from nbv_framework.geometry.quaternion_ops import transform_pose_using_quats_and_trans_2_to_1
 
 
 def compute_relative_pose_quats_and_trans(

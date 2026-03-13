@@ -6,6 +6,7 @@ from typing import Dict, Optional, Tuple
 
 import torch
 
+from nbv_framework.dto import MetricPointCloudBatch
 from nbv_framework.reconstruction import ReconstructionData
 from nbv_framework.training.losses import ReconstructionLoss
 
@@ -51,7 +52,7 @@ class ReconstructionLossAdapter:
         recon_data: ReconstructionData,
         gt_data: Dict[str, torch.Tensor],
         combined_images_batch: Optional[torch.Tensor],
-    ):
+    ) -> MetricPointCloudBatch:
         chamfer_reg = self.loss_module.chamfer_regularizer
         pred_points_list, _ = chamfer_reg.extractor(
             recon_data=recon_data,
@@ -59,4 +60,4 @@ class ReconstructionLossAdapter:
             confidence_threshold=chamfer_reg.confidence_threshold,
         )
         gt_points = gt_data.get("gt_points")
-        return pred_points_list, gt_points
+        return MetricPointCloudBatch(pred_points_list=pred_points_list, gt_points=gt_points)
