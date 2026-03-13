@@ -20,6 +20,7 @@ data processing, and result preparation.
 """
 
 import glob
+import json
 import os
 from typing import Any, Dict, Optional, Tuple
 import numpy as np
@@ -148,6 +149,14 @@ class ModelInference:
             conf_thresh_percentile=save_percentage,
             num_max_points=int(num_max_points),
         )
+        self._save_visualization_config(
+            target_dir=target_dir,
+            show_camera=show_camera,
+            filter_black_bg=filter_black_bg,
+            filter_white_bg=filter_white_bg,
+            save_percentage=save_percentage,
+            num_max_points=int(num_max_points),
+        )
 
         # export to gs video if needed
         if infer_gs:
@@ -195,6 +204,7 @@ class ModelInference:
             # Save depth data
             if prediction.depth is not None:
                 save_dict["depths"] = np.round(prediction.depth, 6)
+                save_dict["is_metric"] = np.array(prediction.is_metric, dtype=np.int32)
 
             # Save confidence if available
             if prediction.conf is not None:
@@ -212,6 +222,33 @@ class ModelInference:
 
         except Exception as e:
             print(f"Warning: Failed to save predictions cache: {e}")
+
+    def _save_visualization_config(
+        self,
+        target_dir: str,
+        show_camera: bool,
+        filter_black_bg: bool,
+        filter_white_bg: bool,
+        save_percentage: float,
+        num_max_points: int,
+    ) -> None:
+        """Persist the last export settings so UI toggles can rebuild the GLB consistently."""
+        try:
+            output_file = os.path.join(target_dir, "visualization_config.json")
+            with open(output_file, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "show_camera": bool(show_camera),
+                        "filter_black_bg": bool(filter_black_bg),
+                        "filter_white_bg": bool(filter_white_bg),
+                        "save_percentage": float(save_percentage),
+                        "num_max_points": int(num_max_points),
+                    },
+                    f,
+                    indent=2,
+                )
+        except Exception as e:
+            print(f"Warning: Failed to save visualization config: {e}")
 
     def _process_results(
         self, target_dir: str, prediction: Any, image_paths: list

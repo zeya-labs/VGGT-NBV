@@ -38,11 +38,21 @@ def get_conf_thresh(
     conf_thresh: float,
     conf_thresh_percentile: float = 10.0,
     ensure_thresh_percentile: float = 90.0,
+    exclude_mask: np.ndarray | None = None,
 ):
-    if sky_mask is not None and (~sky_mask).sum() > 10:
+    conf_mask = np.ones_like(prediction.conf, dtype=bool)
+    if sky_mask is not None:
+        conf_mask &= ~sky_mask
+    if exclude_mask is not None:
+        conf_mask &= ~exclude_mask
+
+    if conf_mask.sum() > 10:
+        conf_pixels = prediction.conf[conf_mask]
+    elif sky_mask is not None and (~sky_mask).sum() > 10:
         conf_pixels = prediction.conf[~sky_mask]
     else:
         conf_pixels = prediction.conf
+
     lower = np.percentile(conf_pixels, conf_thresh_percentile)
     upper = np.percentile(conf_pixels, ensure_thresh_percentile)
     conf_thresh = min(max(conf_thresh, lower), upper)
@@ -116,17 +126,20 @@ def export_to_glb(
     if getattr(prediction, "sky_mask", None) is not None:
         set_sky_depth(prediction, prediction.sky_mask, sky_depth_def)
 
-    # 3) Confidence threshold (if no conf, then no filtering)
+    # 3) Build an explicit background mask instead of mutating confidence in place.
+    background_mask = np.zeros(images_u8.shape[:3], dtype=bool)
     if filter_black_bg:
-        prediction.conf[(prediction.processed_images < 16).all(axis=-1)] = 1.0
+        background_mask |= (images_u8 < 16).all(axis=-1)
     if filter_white_bg:
-        prediction.conf[(prediction.processed_images >= 240).all(axis=-1)] = 1.0
+        background_mask |= (images_u8 >= 240).all(axis=-1)
+
     conf_thr = get_conf_thresh(
         prediction,
         getattr(prediction, "sky_mask", None),
         conf_thresh,
         conf_thresh_percentile,
         ensure_thresh_percentile,
+        exclude_mask=background_mask if background_mask.any() else None,
     )
 
     # 4) Back-project to world coordinates and get colors (world frame)
@@ -137,6 +150,7 @@ def export_to_glb(
         images_u8,
         prediction.conf,
         conf_thr,
+        exclude_mask=background_mask if background_mask.any() else None,
     )
 
     # 5) Based on first camera orientation + glTF axis system, center by point cloud,
@@ -209,6 +223,7 @@ def _depths_to_world_points_with_colors(
     images_u8: np.ndarray,
     conf: np.ndarray | None,
     conf_thr: float,
+    exclude_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     For each frame, transform (u,v,1) through K^{-1} to get rays,
@@ -227,6 +242,8 @@ def _depths_to_world_points_with_colors(
         valid = np.isfinite(d) & (d > 0)
         if conf is not None:
             valid &= conf[i] >= conf_thr
+        if exclude_mask is not None:
+            valid &= ~exclude_mask[i]
         if not np.any(valid):
             continue
 

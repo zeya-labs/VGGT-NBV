@@ -20,6 +20,7 @@ This module handles all event callbacks and user interactions.
 
 import os
 import time
+import json
 from glob import glob
 from typing import Any, Dict, List, Optional, Tuple
 import gradio as gr
@@ -30,6 +31,8 @@ from depth_anything_3.app.modules.file_handlers import FileHandler
 from depth_anything_3.app.modules.model_inference import ModelInference
 from depth_anything_3.utils.memory import cleanup_cuda_memory
 from depth_anything_3.app.modules.visualization import VisualizationHandler
+from depth_anything_3.specs import Prediction
+from depth_anything_3.utils.export.glb import export_to_glb
 
 
 class EventHandlers:
@@ -203,6 +206,8 @@ class EventHandlers:
         with torch.no_grad():
             prediction, processed_data = self.model_inference.run_inference(
                 target_dir,
+                filter_black_bg=filter_black_bg,
+                filter_white_bg=filter_white_bg,
                 process_res_method=process_res_method,
                 show_camera=show_cam,
                 save_percentage=save_percentage,
@@ -290,41 +295,57 @@ class EventHandlers:
                 "No reconstruction available. Please click the Reconstruct button first.",
             )
 
-        # Check if GLB exists (could be cached example or reconstructed scene)
         glbfile = os.path.join(target_dir, "scene.glb")
-        if os.path.exists(glbfile):
-            return (
-                glbfile,
-                (
-                    "Visualization loaded from cache."
-                    if is_example == "True"
-                    else "Visualization updated."
-                ),
-            )
-
-        # If no GLB but it's an example that hasn't been reconstructed yet
-        if is_example == "True":
-            return (
-                gr.update(),
-                "No reconstruction available. Please click the Reconstruct button first.",
-            )
-
-        # For non-examples, check predictions.npz
         predictions_path = os.path.join(target_dir, "predictions.npz")
-        if not os.path.exists(predictions_path):
+        if os.path.exists(predictions_path):
+            prediction = self._load_prediction_cache(predictions_path)
+            vis_config = self._load_visualization_config(target_dir)
+            export_to_glb(
+                prediction,
+                export_dir=target_dir,
+                show_cameras=show_cam,
+                filter_black_bg=filter_black_bg,
+                filter_white_bg=filter_white_bg,
+                conf_thresh_percentile=float(vis_config.get("save_percentage", 30.0)),
+                num_max_points=int(vis_config.get("num_max_points", 1_000_000)),
+            )
+        elif not os.path.exists(glbfile):
             error_message = (
                 f"No reconstruction available at {predictions_path}. "
                 "Please run 'Reconstruct' first."
             )
             return gr.update(), error_message
 
-        loaded = np.load(predictions_path, allow_pickle=True)
-        predictions = {key: loaded[key] for key in loaded.keys()}  # noqa: F841
-
         return (
             glbfile,
-            "Visualization updated.",
+            (
+                "Visualization loaded from cache."
+                if is_example == "True" and not os.path.exists(predictions_path)
+                else "Visualization updated."
+            ),
         )
+
+    def _load_prediction_cache(self, predictions_path: str) -> Prediction:
+        """Rebuild a Prediction object from cached numpy arrays."""
+        loaded = np.load(predictions_path, allow_pickle=True)
+        predictions = {key: loaded[key] for key in loaded.keys()}
+        return Prediction(
+            depth=predictions["depths"],
+            is_metric=int(predictions.get("is_metric", 0)),
+            conf=predictions.get("conf"),
+            extrinsics=predictions.get("extrinsics"),
+            intrinsics=predictions.get("intrinsics"),
+            processed_images=predictions.get("images"),
+        )
+
+    def _load_visualization_config(self, target_dir: str) -> Dict[str, Any]:
+        """Load the latest visualization export config, falling back to the legacy defaults."""
+        config_path = os.path.join(target_dir, "visualization_config.json")
+        if not os.path.exists(config_path):
+            return {"save_percentage": 30.0, "num_max_points": 1_000_000}
+
+        with open(config_path, "r", encoding="utf-8") as f:
+            return json.load(f)
 
     def handle_uploads(
         self,

@@ -274,8 +274,16 @@ class UIComponents:
 
             gr.Markdown("### Visualization Options: (Click Reconstruct to update)")
             show_cam = gr.Checkbox(label="Show Camera", value=True)
-            filter_black_bg = gr.Checkbox(label="Filter Black Background", value=False)
-            filter_white_bg = gr.Checkbox(label="Filter White Background", value=False)
+            filter_black_bg = gr.Checkbox(
+                label="Filter Black Background",
+                value=False,
+                info="Applied to point cloud export only.",
+            )
+            filter_white_bg = gr.Checkbox(
+                label="Filter White Background",
+                value=False,
+                info="Applied to point cloud export only.",
+            )
             save_percentage = gr.Slider(
                 minimum=0,
                 maximum=100,
@@ -340,8 +348,16 @@ class UIComponents:
                 gr.Markdown("### Visualization Option: (Click Reconstruct to update)")
                 show_cam = gr.Checkbox(label="Show Camera", value=True)
                 show_mesh = gr.Checkbox(label="Show Mesh", value=True)
-                filter_black_bg = gr.Checkbox(label="Filter Black Background", value=False)
-                filter_white_bg = gr.Checkbox(label="Filter White Background", value=False)
+                filter_black_bg = gr.Checkbox(
+                    label="Filter Black Background",
+                    value=False,
+                    info="Applied to point cloud export only.",
+                )
+                filter_white_bg = gr.Checkbox(
+                    label="Filter White Background",
+                    value=False,
+                    info="Applied to point cloud export only.",
+                )
                 gr.Markdown("### Reconstruction Options: (updated on next run)")
                 apply_mask_checkbox = gr.Checkbox(
                     label="Apply mask for predicted ambiguous depth classes & edges",
