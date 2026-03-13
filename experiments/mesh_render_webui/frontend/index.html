@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mesh Render WebUI</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/static/style.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="app-shell">
+      <aside id="sidebar">
+        <div class="hero">
+          <p class="eyebrow">PyTorch3D Mesh Viewer</p>
+          <h1>Mesh Render WebUI</h1>
+          <p class="subcopy">
+            Browse House3K meshes, inspect them interactively, then capture stills or render
+            videos from the current camera view.
+          </p>
+        </div>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Mesh Browser</h2>
+            <button id="refresh-meshes" class="ghost">Refresh</button>
+          </div>
+          <label class="field">
+            <span>Search</span>
+            <input id="mesh-search" type="search" placeholder="Search mesh path..." />
+          </label>
+          <label class="field">
+            <span>Available Meshes</span>
+            <select id="mesh-list" size="12"></select>
+          </label>
+          <div class="button-row">
+            <button id="load-mesh" class="primary">Load Mesh</button>
+            <button id="reset-view" class="ghost">Reset View</button>
+          </div>
+          <div id="mesh-status" class="status"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Render Controls</h2>
+          </div>
+          <div class="grid two-up">
+            <label class="field">
+              <span>Image Size</span>
+              <input id="image-size" type="number" min="64" max="2048" step="2" value="512" />
+            </label>
+            <label class="field">
+              <span>FOV</span>
+              <input id="fov" type="number" min="15" max="120" step="1" value="60" />
+            </label>
+          </div>
+          <div class="grid three-up">
+            <label class="field">
+              <span>Video Mode</span>
+              <select id="trajectory-mode">
+                <option value="orbit">Orbit</option>
+                <option value="swing">Swing</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Duration (s)</span>
+              <input id="duration-sec" type="number" min="1" max="30" step="0.5" value="4" />
+            </label>
+            <label class="field">
+              <span>FPS</span>
+              <input id="fps" type="number" min="4" max="60" step="1" value="24" />
+            </label>
+          </div>
+          <div class="button-row">
+            <button id="capture-image" class="primary">Capture Photo</button>
+            <button id="render-video" class="accent">Render Video</button>
+          </div>
+          <div id="render-status" class="status"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Current Camera</h2>
+          </div>
+          <div id="camera-readout" class="camera-readout"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>History</h2>
+            <button id="clear-history" class="ghost">Clear</button>
+          </div>
+          <div id="history" class="history"></div>
+        </section>
+      </aside>
+
+      <main id="viewer-pane">
+        <div class="viewer-head">
+          <div>
+            <p class="eyebrow">Interactive Preview</p>
+            <h2 id="viewer-title">No mesh loaded</h2>
+          </div>
+          <div class="viewer-meta">
+            <span id="viewer-badge">Idle</span>
+          </div>
+        </div>
+        <div id="viewer-stage">
+          <canvas id="viewer-canvas"></canvas>
+          <div id="viewer-overlay">Load a mesh to begin.</div>
+        </div>
+      </main>
+    </div>
+
+    <script type="module" src="/static/app.js"></script>
+  </body>
+</html>
