@@ -1,0 +1,39 @@
+\section{Appendix}
+\label{sec:appendix}
+
+\subsection{Repository-to-Paper Mapping}
+\label{sec:repo_mapping}
+
+Table~\ref{tab:repo_mapping} maps the main scientific concepts in the manuscript to the corresponding implementation modules. This appendix is intentionally concrete because the repository architecture is itself part of the reproducibility story.
+
+\begin{table*}[h]
+    \centering
+    \scriptsize
+    \begin{tabular}{>{\raggedright\arraybackslash}p{0.16\linewidth} >{\raggedright\arraybackslash}p{0.29\linewidth} >{\raggedright\arraybackslash}p{0.47\linewidth}}
+        \toprule
+        Paper concept & Main implementation modules & Role in the released code \\
+        \midrule
+        Frozen geometry prior & \texttt{training/factory.py}; \texttt{models/scene\_encoder/*}; \texttt{adapters/scene\_encoder/*} & Builds a frozen MapAnything or Depth Anything 3 encoder and exposes a uniform feature/reconstruction interface. \\
+        Cross-view policy & \texttt{models/policy/attention\_policy\_network.py}; \texttt{geometry/pose\_ops.py} & Predicts a relative translation, transforms it to world coordinates, and converts it into a valid look-at pose. \\
+        Batch preparation & \texttt{workflows/batch\_preparation\_use\_case.py}; \texttt{data/*} & Loads meshes, renders missing inputs when necessary, and selects the initial observation subset used by the policy. \\
+        Candidate evaluation & \texttt{workflows/candidate\_evaluation\_use\_case.py}; \texttt{infrastructure/rendering/differentiable\_renderer.py} & Renders the predicted candidate view, fuses it with history, and constructs reconstruction inputs. \\
+        Reconstruction-aware loss & \texttt{training/losses/reconstruction.py}; \texttt{chamfer\_regularizer.py}; \texttt{pose\_penalty.py} & Computes Chamfer-based reconstruction loss and geometric pose penalties. \\
+        Training orchestration & \texttt{workflows/training\_step\_use\_case.py}; \texttt{training/lightning\_module.py} & Connects batch preparation, policy inference, candidate evaluation, optimization, logging, and test-time aggregation. \\
+        Test protocol & \texttt{workflows/test\_evaluation\_use\_case.py}; \texttt{training/test\_metrics.py} & Computes GeomLoss, CD, DCD, and EMD for both the learned policy and a random-view baseline. \\
+        \bottomrule
+    \end{tabular}
+    \caption{Mapping from paper concepts to code modules.}
+    \label{tab:repo_mapping}
+\end{table*}
+
+\subsection{Recommended Finalization Checklist}
+\label{sec:checklist}
+
+Before turning this draft into a submission, we recommend the following concrete steps:
+\begin{itemize}
+    \item Run the default MapAnything + \texttt{point\_maps} configuration to convergence and populate Table~\ref{tab:main_results}.
+    \item Run encoder and reconstruction-backend ablations to populate Table~\ref{tab:ablations}.
+    \item Export qualitative results from the repository's observability pipeline and replace the placeholder figure in Fig.~\ref{fig:qualitative}.
+    \item Decide whether the final paper should remain a frozen-prior NBV paper or become a VGGT-specific paper by wiring VGGT into the validated configuration and repeating the main experiments.
+    \item Replace anonymous metadata, add acknowledgements, and expand the bibliography once the final baseline set is fixed.
+\end{itemize}

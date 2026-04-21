@@ -1,0 +1,6 @@
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented \method, a reconstruction-aware NBV framework written from the actual architecture of the \codebase repository. The method combines frozen multi-view geometry priors, a lightweight cross-view attention policy, differentiable candidate rendering, and mesh-supervised reconstruction losses. Its main practical advantage is modularity: the geometry prior, reconstruction backend, and evaluation protocol are decoupled cleanly enough to support meaningful ablations without rewriting the pipeline.
+
+Equally importantly, this paper project converts a working research codebase into a paper-ready artifact. The manuscript, tables, appendix, and build scaffold are all in place, and the remaining work is to execute full experiments, populate the placeholder results, and, if desired, extend the validated training path to additional priors such as VGGT. In that sense, the contribution is both methodological and editorial: it turns an implementation into a submission-ready story without misrepresenting what the current code already does.

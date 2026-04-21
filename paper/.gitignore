@@ -1,0 +1,12 @@
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.brf
+*.log
+*.out
+*.run.xml
+*.synctex.gz
+*.toc
+*.xdv
+main.pdf

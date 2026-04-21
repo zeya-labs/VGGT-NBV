@@ -1,0 +1,17 @@
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\paragraph{One-step greedy policy.}
+The present system predicts a single next pose conditioned on the currently selected initial views. This makes training simple and keeps the supervision aligned with the one-step renderer, but it also limits long-horizon reasoning. Methods such as GenNBV~\cite{chen2024gennbv} and Hestia~\cite{lu2025hestia} devote more modeling capacity to sequential exploration, whereas \method currently optimizes a myopic but differentiable objective.
+
+\paragraph{Orientation is not learned explicitly.}
+The default policy predicts only position, and the camera orientation is synthesized analytically by looking at the scene center. This is a reasonable inductive bias for object-centric reconstruction but may be suboptimal for cluttered scenes, off-center targets, or semantic acquisition tasks where the best look direction is not toward the origin.
+
+\paragraph{Current released encoder boundary.}
+Although the repository contains an initial VGGT wrapper, the validated training path currently exposes only MapAnything and Depth Anything 3 through the configuration schema and training factory. The paper should state this boundary clearly. The framework is best understood today as a frozen-geometry-prior NBV system, not yet as a fully benchmarked VGGT-specific method.
+
+\paragraph{Evaluation breadth.}
+The released test pipeline compares against a random-view policy and reports multiple point-cloud metrics. This is a useful sanity check, but a complete paper should expand the baseline set to include projection-based planners, learned candidate-scoring methods, and recent active 3DGS systems. Fortunately, the software architecture already makes these additions mostly an experimental burden rather than a structural rewrite.
+
+\paragraph{Mesh-dependent supervision.}
+Training uses normalized meshes and differentiable rendering to obtain candidate observations and ground-truth point samples. This is appropriate for simulation and for controlled benchmarking, but it also means the current formulation assumes access to meshes during training. Extending the system to self-supervised or real-capture settings will require replacing mesh-based supervision with photometric consistency, uncertainty signals, or teacher-generated geometry labels.

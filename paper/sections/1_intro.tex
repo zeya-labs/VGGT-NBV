@@ -1,0 +1,30 @@
+\section{Introduction}
+\label{sec:intro}
+
+Next-best-view (NBV) selection asks a simple but consequential question: given a partial observation of a scene or object, where should the camera move next to improve 3D reconstruction most effectively? The question appears in active scanning, embodied mapping, robotic inspection, and sparse-view reconstruction. Yet the answer remains difficult because a useful viewpoint depends jointly on already observed geometry, occlusion patterns, camera feasibility, and the downstream reconstruction model. Recent NBV methods have explored projection-based planning~\cite{jia2025pbnbv}, learned reconstruction-improvement prediction~\cite{frahm2025vinnbv}, generalized active reconstruction policies~\cite{chen2024gennbv}, hierarchical reinforcement-learning planners~\cite{lu2025hestia}, and uncertainty-driven planning for radiance or Gaussian representations~\cite{xie2025gaussmi,ye2024pvprecon}. Even so, most methods still commit to a task-specific geometric state and tightly couple the policy to a single reconstruction backend.
+
+In parallel, feed-forward geometry models such as MapAnything~\cite{keetha2025mapanything}, Depth Anything 3~\cite{lin2025depthanything3}, and VGGT~\cite{wang2025vggt} have made multi-view geometry estimation dramatically easier to deploy. These models can produce scene tokens, point maps, depth, and camera-aware geometry from only a few input views. This creates a natural opportunity for NBV: instead of learning scene understanding from scratch, one can freeze a strong geometry prior and train only the decision layer responsible for choosing the next observation. The \codebase repository already embodies this direction in code, but its structure is distributed across configuration schemas, workflow orchestration modules, scene-encoder adapters, differentiable rendering, and reconstruction losses. Our goal in this draft is to convert that architecture into a coherent paper-ready method description.
+
+\begin{figure*}[t]
+    \centering
+    \small
+    \setlength{\fboxsep}{6pt}
+    \begin{tabular}{c@{\hspace{4mm}}c@{\hspace{4mm}}c}
+        \fbox{\parbox[c][19mm][c]{0.28\linewidth}{\centering\textbf{Observed Views}\\A small set of posed RGB or RGB-D observations is prepared from dynamically rendered House3K meshes.}} &
+        \fbox{\parbox[c][19mm][c]{0.30\linewidth}{\centering\textbf{Frozen Geometry Prior + Policy}\\A pretrained multi-view encoder produces cross-view tokens, and a lightweight attention policy predicts the next camera position.}} &
+        \fbox{\parbox[c][19mm][c]{0.28\linewidth}{\centering\textbf{Reconstruction-Aware Supervision}\\The candidate view is rendered differentiably, fused with prior observations, and optimized against ground-truth surface samples.}}
+    \end{tabular}
+    \caption{High-level pipeline of \method. The central design decision is to keep the geometry prior frozen and learn only the NBV policy, while still supervising the policy through rendered one-step reconstruction quality.}
+    \label{fig:teaser}
+\end{figure*}
+
+We therefore present \method, a reconstruction-aware NBV framework written directly from the implemented repository architecture. The method takes a small set of initial views and 7D camera poses, extracts cross-view features using a frozen geometry prior, predicts a relative 3D translation with a transformer-based policy, converts that translation into a valid look-at pose, and renders the candidate view using PyTorch3D~\cite{ravi2020pytorch3d}. The newly rendered observation is then fused with the previous views, reconstructed through a pluggable backend, and compared to point samples from the normalized ground-truth mesh using a Chamfer-based loss and geometric pose penalties. Importantly, the framework supports three reconstruction modes already exposed by the codebase: reconstruction directly from the scene encoder, from rendered point maps, or from backprojected depth.
+
+This paper does not invent a new algorithm disconnected from the released software. Instead, it organizes the current implementation into a paper-ready narrative and a reproducible \LaTeX{} project. The manuscript is intentionally faithful to the code, including its current strengths and boundaries: the main training path supports MapAnything and Depth Anything 3 as scene encoders, uses House3K meshes with dynamic rendering, compares against a random-view baseline during testing, and exposes several ablation levers through Hydra configuration.
+
+Our contributions are threefold:
+\begin{itemize}
+    \item We formalize the current \codebase implementation as a coherent NBV method that combines frozen multi-view geometry priors, cross-view attention-based policy learning, differentiable candidate rendering, and reconstruction-aware supervision.
+    \item We analyze the repository architecture and show how its ports-and-adapters decomposition maps naturally to paper-level components: batch preparation, policy inference, candidate evaluation, reconstruction loss, and test-time metric aggregation.
+    \item We provide a full CVPR-style manuscript scaffold, grounded in the code and informed by recent NBV papers in the local \texttt{papers/} collection, so that the remaining work is primarily empirical rather than editorial.
+\end{itemize}

@@ -1,0 +1,48 @@
+\documentclass[10pt,twocolumn,letterpaper]{article}
+
+% \usepackage{cvpr}              % Camera-ready
+% \usepackage[review]{cvpr}      % Review version
+\makeatletter
+\providecommand\LenToUnit[1]{#1}
+\makeatother
+\usepackage{eso-pic}
+\usepackage[pagenumbers]{cvpr}   % Draft / arXiv-style version
+
+\input{preamble}
+
+\definecolor{cvprblue}{rgb}{0.21,0.49,0.74}
+\usepackage[pagebackref,breaklinks,colorlinks,citecolor=cvprblue]{hyperref}
+
+\def\paperID{0000}
+\def\confName{CVPR}
+\def\confYear{2026}
+
+\title{\method: Reconstruction-Aware Next-Best-View Prediction with Frozen Multi-View Geometry Priors}
+
+\author{
+Anonymous Authors\\
+Institution Withheld for Draft Preparation
+}
+
+\begin{document}
+\maketitle
+
+\input{sections/0_abstract}
+\input{sections/1_intro}
+\input{sections/2_related_work}
+\input{sections/3_method}
+\input{sections/4_experiments}
+\input{sections/5_discussion}
+\input{sections/6_conclusion}
+
+{
+    \small
+    \bibliographystyle{ieeenat_fullname}
+    \bibliography{references}
+}
+
+\clearpage
+\appendix
+\input{sections/7_appendix}
+
+\end{document}

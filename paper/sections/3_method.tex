@@ -1,0 +1,95 @@
+\section{Method}
+\label{sec:method}
+
+\subsection{Problem Setup}
+\label{sec:problem}
+
+We consider one-step greedy NBV prediction under calibrated multi-view observations. For each training sample, the repository provides a normalized mesh $M$, a set of initial camera poses $\mathcal{P}_{0}=\{P_i\}_{i=1}^{K}$, and dynamically rendered observations $\mathcal{I}_{0}=\{I_i\}_{i=1}^{K}$ together with optional depth maps $\mathcal{D}_{0}=\{D_i\}_{i=1}^{K}$. The goal is to predict the next camera pose $\hat{P}_{K+1}$ such that integrating the newly observed view improves reconstruction quality relative to the current partial observation.
+
+Unlike candidate-ranking methods that explicitly enumerate a discrete pose set, the implemented system learns a direct pose predictor. Let $E_{\phi}$ denote a frozen multi-view geometry prior and $\Pi_{\theta}$ the trainable policy. The forward pass can be summarized as
+\begin{equation}
+    \mathbf{F} = E_{\phi}(\mathcal{I}_{0}, \mathcal{P}_{0}, \mathcal{D}_{0}), \qquad
+    \hat{P}_{K+1} = \Pi_{\theta}(\mathbf{F}, \mathcal{P}_{0}),
+\end{equation}
+where $\mathbf{F}$ denotes cross-view scene features. The predicted pose is rendered against the ground-truth mesh, fused with the previous views, reconstructed through a chosen backend, and optimized against mesh-derived supervision. This turns pose prediction into a reconstruction-aware learning problem.
+
+\subsection{Frozen Multi-View Geometry Priors}
+\label{sec:frozen_prior}
+
+The codebase currently supports two scene encoders in the main training factory: MapAnything and Depth Anything 3. Both are wrapped as frozen modules and exposed through a common \texttt{SceneEncoderPort}. This design is important. It prevents policy learning from overfitting to a bespoke encoder and makes it possible to compare geometry priors without changing the rest of the training pipeline.
+
+Given multi-view RGB observations and 7D poses, the scene encoder returns a \texttt{SceneFeatureBatch} containing per-view features and view metadata. In the MapAnything path, the wrapper prepares camera-aware multi-view inputs, enables calibration- and pose-aware geometric tokens, and gathers per-view latent features into a tensor of shape $[B,K,T,C]$, where $T$ is the number of tokens per view. In the Depth Anything 3 path, the wrapper normalizes images, converts camera poses into the expected camera representation, and returns geometry-aware features with a matched interface. In both cases, the encoder parameters are frozen and gradients are reserved for the policy branch.
+
+This frozen-prior design differs from learning all scene understanding end-to-end from rendered RGB alone. The geometry foundation model already encodes cross-view structure, relative pose cues, and dense or token-level scene evidence. The NBV policy can therefore focus on deciding \emph{where to look next}, rather than simultaneously relearning \emph{what the scene means geometrically}.
+
+\subsection{Cross-View Attention Policy}
+\label{sec:policy}
+
+The policy network implemented in \texttt{AttentionNBVPolicy} is a compact transformer that consumes per-view scene features together with reference-view-normalized camera extrinsics. If the encoder returns token grids, they are pooled to one feature vector per view. Each view pose is embedded by a Fourier feature mapping followed by an MLP. The projected scene tokens and pose embeddings are summed, passed through sinusoidal positional encoding, and processed by a stack of transformer encoder blocks.
+
+To aggregate information across the observation set, the model uses a learnable global token queried through multi-head attention. The resulting global descriptor is decoded by a small MLP head. Under the default repository configuration, the policy output mode is \texttt{position\_only}; the network therefore predicts only a 3D relative translation $\Delta \mathbf{x}$ rather than a full SE(3) pose. This is a consequential implementation choice and should be described explicitly in the paper.
+
+Let $P_1$ denote the first observed pose with world position $\mathbf{x}_1$ and rotation matrix $R_1$. The repository converts the predicted translation from the reference camera frame to the world frame via
+\begin{equation}
+    \hat{\mathbf{x}} = \mathbf{x}_1 + R_1^{\top}\Delta \mathbf{x}.
+\end{equation}
+The predicted position is then projected back to a valid spherical shell centered at the origin,
+\begin{equation}
+    \hat{\mathbf{x}} \leftarrow \mathrm{ClampShell}(\hat{\mathbf{x}}; r_{\min}, r_{\max}),
+\end{equation}
+where $r_{\min}$ and $r_{\max}$ are the inner and outer camera radii used elsewhere in the system. Finally, the repository constructs a look-at pose from $\hat{\mathbf{x}}$, orienting the camera toward the scene center. Thus the learned component predicts position, while orientation is generated analytically.
+
+\subsection{Candidate Rendering and Reconstruction Backends}
+\label{sec:candidate_eval}
+
+The differentiable candidate evaluation step is implemented by \texttt{CandidateEvaluationUseCase}. Given the predicted pose $\hat{P}_{K+1}$ and mesh $M$, the renderer produces RGB, point-map, mask, and depth outputs for the candidate view. These tensors are concatenated with the initial observations to form an updated set of $(K+1)$ views.
+
+The repository supports three reconstruction backends:
+\begin{itemize}
+    \item \textbf{scene\_encoder:} the updated observations are passed back through the frozen scene encoder, which returns reconstructed geometry in its own latent-to-geometry path;
+    \item \textbf{point\_maps:} the rendered and cached world-space point maps are concatenated directly, yielding a minimal reconstruction object with confidence and validity masks;
+    \item \textbf{depth\_z:} per-view depth maps are backprojected to world coordinates using camera intrinsics and extrinsics.
+\end{itemize}
+
+The default configuration uses \texttt{point\_maps}. This choice is pragmatic and scientifically useful. It decouples policy optimization from any uncertainty in the scene encoder's own reconstruction head, while still allowing the policy to use the frozen encoder's features for decision making. At the same time, the other two modes create natural ablations that test how tightly policy learning should be coupled to the reconstruction backend.
+
+\subsection{Reconstruction-Aware Objective}
+\label{sec:loss}
+
+Supervision comes from the normalized ground-truth mesh. During dataset loading, the mesh is centered and scaled, then surface points are sampled once to create a target point cloud $\mathcal{G}$. After candidate rendering and reconstruction, the predicted geometry is converted to a list of valid 3D points. The main training loss is a weighted sum of reconstruction and pose regularization terms:
+\begin{equation}
+    \mathcal{L}
+    =
+    \lambda_{\mathrm{ch}}\mathcal{L}_{\mathrm{ch}}
+    +
+    \lambda_{\mathrm{conf}}\mathcal{L}_{\mathrm{conf}}
+    +
+    \lambda_{\mathrm{view}}\mathcal{L}_{\mathrm{view}}
+    +
+    \lambda_{\mathrm{pose}}\mathcal{L}_{\mathrm{pose}}.
+\end{equation}
+
+The dominant term is the Chamfer-style reconstruction loss between the predicted point cloud and sampled mesh points. The repository also exposes optional confidence and viewpoint regularizers, although the current default configuration sets their weights to zero. In practice, the active terms are the Chamfer loss and the pose penalty.
+
+The pose penalty constrains the predicted viewpoint to remain inside a valid shell and above a floor plane:
+\begin{align}
+    \mathcal{L}_{\mathrm{pose}} &=
+    \Bigl[\tfrac{\max(0, r_{\min} - \lVert \hat{\mathbf{x}} \rVert_2)}{r_{\min}}\Bigr]^2
+    +
+    \Bigl[\tfrac{\max(0, \lVert \hat{\mathbf{x}} \rVert_2 - r_{\max})}{r_{\max}}\Bigr]^2 \notag \\
+    &\quad +
+    \Bigl[\tfrac{\max(0, -(\hat{x}_{u} + m_{\mathrm{floor}}))}{m_{\mathrm{floor}}}\Bigr]^2,
+\end{align}
+where $\hat{x}_{u}$ denotes the coordinate along the configured up axis and $m_{\mathrm{floor}}$ is the floor margin. This regularizer matches the actual repository behavior more faithfully than a generic collision-avoidance discussion would.
+
+\subsection{Training and Inference Workflow}
+\label{sec:workflow}
+
+The training loop is orchestrated by five workflow modules: batch preparation, policy inference, candidate evaluation, test-time evaluation, and Lightning integration. \texttt{BatchPreparationUseCase} loads or renders missing initial observations, selects a subset of initial views, and packages meshes, camera poses, and supervision into a consistent batch object. \texttt{PolicyInferenceUseCase} extracts scene features and predicts the next pose. \texttt{CandidateEvaluationUseCase} renders the candidate view, reconstructs the augmented observation set, and computes the loss. \texttt{TestEvaluationUseCase} measures GeomLoss, Chamfer Distance, DCD, and EMD after adding the policy's view and compares them to a random-view baseline generated under the same shell constraints.
+
+This decomposition is more than an implementation convenience. It enables controlled scientific comparisons. Changing the scene encoder does not alter the renderer. Changing the reconstruction mode does not alter how batches are prepared. Changing the pose output mode does not alter the testing protocol. As a result, the repository already contains most of the switches required for a strong ablation section once long-running experiments are completed.
+
+\subsection{Implementation Details}
+\label{sec:impl}
+
+The default Hydra configuration uses MapAnything features, the \texttt{point\_maps} reconstruction mode, an image size of $518$, two initial views, a hidden size of $512$, $4$ attention heads, and $3$ transformer layers. Optimization uses AdamW with learning rate $10^{-5}$, cosine annealing, gradient clipping, mixed-precision training, and dynamic mesh rendering through PyTorch3D. House3K meshes are normalized before use, and each sample stores $32{,}768$ ground-truth surface points for reconstruction supervision. We keep these settings explicit because they are already encoded in the released repository and should therefore define the first reproducible version of the paper.

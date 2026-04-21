@@ -1,0 +1,96 @@
+\section{Experiments}
+\label{sec:experiments}
+
+\paragraph{Status of this draft.}
+This section is written to match the current repository capabilities exactly. The code already supports the full evaluation protocol, but large-scale runs have not yet been executed in this paper-writing session. Consequently, the tables below are intentionally provided as structured placeholders rather than populated with unverifiable numbers. The prose focuses on protocol, ablation dimensions, and analysis templates that can be filled directly once training and testing complete.
+
+\subsection{Experimental Setup}
+\label{sec:setup}
+
+\paragraph{Dataset.}
+The current repository trains on House3K meshes. The dataset loader scans normalized mesh files, partitions them into train/validation/test splits with ratios $0.8/0.1/0.1$, and generates camera poses on the fly. Unlike pipelines that depend on pre-rendered image caches, this setup renders observations dynamically during training and evaluation, which keeps the supervision synchronized with the camera policy and makes viewpoint ablations straightforward.
+
+\paragraph{Observations and supervision.}
+Each mesh is normalized and sampled to obtain a ground-truth point cloud of $32{,}768$ surface points. The default configuration uses $K=2$ initial views per sample. If cached images, point maps, or depth maps are unavailable, they are rendered on demand from the mesh using the differentiable renderer. This keeps the training signal consistent with the actual candidate-evaluation path.
+
+\paragraph{Training details.}
+By default, \method uses MapAnything as the frozen scene encoder, \texttt{point\_maps} as the reconstruction backend, a policy hidden dimension of $512$, $4$ heads, and $3$ transformer layers. Training uses AdamW with learning rate $10^{-5}$ and cosine annealing over $100$ epochs. Mixed precision and gradient clipping are enabled in the Lightning trainer. We recommend reporting both single-GPU smoke results and full multi-GPU training runs in the final version.
+
+\subsection{Metrics and Baselines}
+\label{sec:metrics}
+
+The test pipeline already aggregates four point-cloud metrics: GeomLoss, Chamfer Distance (CD), Density-aware Chamfer Distance (DCD), and Earth Mover's Distance (EMD). During testing, the repository evaluates the learned policy and a random-view baseline sampled under the same radius and floor constraints. This random policy is the most faithful baseline supported directly by the current code.
+
+For the final paper, we recommend adding external baselines that align with the problem setting: PB-NBV~\cite{jia2025pbnbv} as a projection-based planner, GenNBV~\cite{chen2024gennbv} as a generalizable learned policy, and VIN-NBV~\cite{frahm2025vinnbv} as a reconstruction-improvement predictor. These methods span the main design spectrum represented in the local paper collection.
+
+\begin{table}[t]
+    \centering
+    \small
+    \resizebox{\linewidth}{!}{%
+    \begin{tabular}{lccccc}
+        \toprule
+        Method & GeomLoss$\downarrow$ & CD$\downarrow$ & DCD$\downarrow$ & EMD$\downarrow$ & Note \\
+        \midrule
+        Random pose & TBD & TBD & TBD & TBD & code baseline \\
+        PB-NBV~\cite{jia2025pbnbv} & TBD & TBD & TBD & TBD & projection planner \\
+        GenNBV~\cite{chen2024gennbv} & TBD & TBD & TBD & TBD & learned policy \\
+        VIN-NBV~\cite{frahm2025vinnbv} & TBD & TBD & TBD & TBD & view scoring \\
+        \method & TBD & TBD & TBD & TBD & MA + point maps \\
+        \bottomrule
+    \end{tabular}}
+    \caption{Main quantitative comparison template. Numeric cells are left blank intentionally in this draft. Once the runs are available, the repository already exports test summaries compatible with this table.}
+    \label{tab:main_results}
+\end{table}
+
+\subsection{Ablation Plan}
+\label{sec:ablation}
+
+The repository exposes several ablations that are especially meaningful because they isolate distinct design choices rather than entangled implementation changes.
+
+\paragraph{Scene encoder.}
+The first ablation compares MapAnything and Depth Anything 3. This measures whether policy learning benefits more from a stronger geometry prior or from a simpler and potentially cheaper encoder. Because the rest of the pipeline is unchanged, this comparison is architecturally clean.
+
+\paragraph{Reconstruction backend.}
+The second ablation compares \texttt{scene\_encoder}, \texttt{point\_maps}, and \texttt{depth\_z}. This tests whether the policy should be supervised through the frozen prior's own reconstruction pathway or through explicit rendered geometry. Our expectation is that \texttt{point\_maps} will offer the best bias--variance trade-off for early experiments, while \texttt{scene\_encoder} may become more attractive once encoder-specific uncertainty is better understood.
+
+\paragraph{Pose parameterization.}
+The third ablation compares \texttt{position\_only} with a full pose output mode such as \texttt{cartesian}. The current implementation defaults to \texttt{position\_only}, which is easier to optimize and analytically well behaved because orientation is derived from a look-at rule. A full-pose policy may be more expressive but is also more difficult to regularize.
+
+\begin{table}[t]
+    \centering
+    \small
+    \resizebox{\linewidth}{!}{%
+    \begin{tabular}{lccc}
+        \toprule
+        Variant & GeomLoss$\downarrow$ & CD$\downarrow$ & Comment \\
+        \midrule
+        MapAnything + point\_maps & TBD & TBD & default \\
+        MapAnything + scene\_encoder & TBD & TBD & tighter coupling \\
+        MapAnything + depth\_z & TBD & TBD & backprojection \\
+        DA3 + point\_maps & TBD & TBD & encoder swap \\
+        MapAnything + cartesian pose & TBD & TBD & full-pose head \\
+        \bottomrule
+    \end{tabular}}
+    \caption{Ablation template derived directly from existing Hydra switches.}
+    \label{tab:ablations}
+\end{table}
+
+\subsection{Qualitative Evaluation}
+\label{sec:qualitative}
+
+The repository can already export rendered candidate views, point clouds, and depth visualizations through its observability utilities. We recommend visualizing four items per example: the initial observations, the predicted next view, the rendered candidate RGB/depth, and the final point-cloud reconstruction after adding the candidate. These visualizations are especially important for diagnosing degenerate behavior such as shell-boundary saturation, repeated front-facing poses, or policies that chase visually easy but geometrically redundant views.
+
+\begin{figure}[t]
+    \centering
+    \fbox{\parbox[c][34mm][c]{0.93\linewidth}{\centering
+    Placeholder for qualitative comparison.\\[2pt]
+    Suggested layout: initial views, predicted pose, rendered candidate view,\\
+    and reconstructed point cloud after integration.}}
+    \caption{Qualitative figure template for the final paper. The current codebase can already export the required rendered images and point clouds.}
+    \label{fig:qualitative}
+\end{figure}
+
+\subsection{Expected Analysis Directions}
+\label{sec:analysis}
+
+Once results are available, the first question to answer is whether frozen geometry priors help more in representation quality or in optimization stability. If \method outperforms the random baseline consistently but remains sensitive to the reconstruction backend, that would indicate the policy is learning but the supervision pathway still dominates performance. If MapAnything and Depth Anything 3 yield similar final metrics but differ in convergence behavior, then the geometry prior mainly stabilizes policy training rather than changing the optimum. If position-only output remains competitive with a full-pose head, that would justify keeping the analytical look-at orientation in the final system.
